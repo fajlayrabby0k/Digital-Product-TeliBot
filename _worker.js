@@ -121,21 +121,20 @@ async function setupDatabase(db) {
       value TEXT
     );`,
 
-    // Admin conversational state store (resilient across serverless requests)
     `CREATE TABLE IF NOT EXISTS admin_states (
       user_id INTEGER PRIMARY KEY,
       state TEXT,
       data TEXT
     );`,
 
-    // Demo Products (Shown directly in Shop)
+    // Demo Products
     `INSERT OR IGNORE INTO products (id, name, description, price_bdt, price_usd) VALUES 
       (1, 'Windows 11 Pro Retail Key', 'Lifetime Retail Online Activation License Key (1 PC)', 500, 4.5),
       (2, 'Internet Download Manager (IDM)', '1-Year Official Registration License Key', 750, 7.0),
       (3, 'Telegram Premium 1 Month', 'Direct Gift link activation (No login required)', 450, 4.0),
       (4, 'NordVPN 1 Year Account', 'Premium Shared Account with warranty', 600, 5.5);`,
 
-    // Demo Inventory
+    // Demo Stock
     `INSERT OR IGNORE INTO inventory (id, product_id, item_data) VALUES 
       (1, 1, 'W269N-WFGWX-YVC9B-4J6C9-T83GX'),
       (2, 1, 'VK7JG-NPHTM-C97JM-9MPGT-3V66T'),
@@ -305,14 +304,12 @@ async function handleUpdate(update, env) {
     const firstName = cb.from.first_name || "Customer";
     const username = cb.from.username ? `@${cb.from.username}` : firstName;
 
-    // Home
     if (data === "home") {
       await clearAdminState(env, chatId);
       await sendHomeDashboard(env, chatId, user, firstName, messageId);
       return;
     }
 
-    // DIRECT SHOP (Lists all products directly without category layer)
     if (data === "shop") {
       await sendProductsDirectly(env, chatId, messageId);
       return;
@@ -344,7 +341,7 @@ async function handleUpdate(update, env) {
     }
 
     // ----------------------------------------------------
-    // ADMIN PANEL BUTTON-DRIVEN WORKFLOWS (NO COMMANDS NEEDED)
+    // ADMIN PANEL BUTTON-DRIVEN ACTIONS
     // ----------------------------------------------------
     if (data === "admin_panel") {
       if (String(chatId) === String(env.ADMIN_ID)) {
@@ -354,7 +351,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin: Choose product to add stock
     if (data === "adm_stock_menu") {
       const { results: prods } = await env.DB.prepare("SELECT * FROM products WHERE is_active = 1").all();
       const buttons = prods.map(p => [{ text: `📦 ${p.name}`, callback_data: `adm_addstock_${p.id}` }]);
@@ -370,7 +366,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin clicked product to add stock
     if (data.startsWith("adm_addstock_")) {
       const prodId = data.replace("adm_addstock_", "");
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
@@ -388,7 +383,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin: Add New Product Guided Flow
     if (data === "adm_add_product") {
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_prod_name', '{}')").bind(chatId).run();
       const cancelBtn = [[{ text: "❌ Cancel", callback_data: "admin_panel" }]];
@@ -402,7 +396,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin: Manage / Delete Products
     if (data === "adm_manage_products") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) as stock_count FROM products p WHERE p.is_active = 1").all();
       const buttons = prods.map(p => [
@@ -420,7 +413,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin: Product details & delete option
     if (data.startsWith("adm_prod_details_")) {
       const prodId = data.replace("adm_prod_details_", "");
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
@@ -436,7 +428,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin: Delete Product confirmation
     if (data.startsWith("adm_del_prod_")) {
       const prodId = data.replace("adm_del_prod_", "");
       await env.DB.prepare("UPDATE products SET is_active = 0 WHERE id = ?").bind(prodId).run();
@@ -450,7 +441,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin: Broadcast Flow
     if (data === "adm_broadcast") {
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_broadcast', '')").bind(chatId).run();
       const cancelBtn = [[{ text: "❌ Cancel", callback_data: "admin_panel" }]];
@@ -464,7 +454,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin: Payment Numbers Settings Menu
     if (data === "adm_payment_settings") {
       const bKash = await getSetting(env, "bkash_num", env.BKASH_NUM || "Not set");
       const nagad = await getSetting(env, "nagad_num", env.NAGAD_NUM || "Not set");
@@ -486,7 +475,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin Payment update triggers
     if (data.startsWith("adm_set_")) {
       const field = data.replace("adm_set_", "");
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, ?, '')").bind(chatId, `awaiting_setting_${field}`).run();
@@ -503,7 +491,6 @@ async function handleUpdate(update, env) {
     // ----------------------------------------------------
     // CUSTOMER SHOPPING & ORDERING
     // ----------------------------------------------------
-    // Product Details View
     if (data.startsWith("prod_")) {
       const prodId = data.split("_")[1];
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
@@ -531,7 +518,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Wallet Instant Purchase
     if (data.startsWith("pay_wallet_")) {
       const prodId = data.replace("pay_wallet_", "");
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
@@ -570,7 +556,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Direct Payment Selection
     if (data.startsWith("buy_")) {
       const prodId = data.split("_")[1];
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
@@ -593,7 +578,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Payment Instructions & TrxID Request
     if (data.startsWith("pay_")) {
       const [, prodId, method] = data.split("_");
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
@@ -630,7 +614,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin Approval
     if (data.startsWith("admin_approve_")) {
       const orderId = data.replace("admin_approve_", "");
       const order = await env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
@@ -661,7 +644,6 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Admin Rejection
     if (data.startsWith("admin_reject_")) {
       const orderId = data.replace("admin_reject_", "");
       await env.DB.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").bind(orderId).run();
@@ -690,7 +672,7 @@ async function handleUpdate(update, env) {
 async function handleAdminTextState(env, chatId, text, adminState) {
   const state = adminState.state;
 
-  // 1. Adding Stock
+  // Adding Stock
   if (state === "awaiting_stock") {
     const prodId = adminState.data;
     await env.DB.prepare("INSERT INTO inventory (product_id, item_data) VALUES (?, ?)").bind(prodId, text).run();
@@ -713,7 +695,7 @@ async function handleAdminTextState(env, chatId, text, adminState) {
     return true;
   }
 
-  // 2. Adding Product - Step 1: Name received
+  // Adding Product - Step 1
   if (state === "awaiting_prod_name") {
     const data = { name: text };
     await env.DB.prepare("UPDATE admin_states SET state = 'awaiting_prod_desc', data = ? WHERE user_id = ?").bind(JSON.stringify(data), chatId).run();
@@ -727,7 +709,7 @@ async function handleAdminTextState(env, chatId, text, adminState) {
     return true;
   }
 
-  // 2. Adding Product - Step 2: Description received
+  // Adding Product - Step 2
   if (state === "awaiting_prod_desc") {
     const data = JSON.parse(adminState.data || "{}");
     data.description = text;
@@ -735,14 +717,14 @@ async function handleAdminTextState(env, chatId, text, adminState) {
 
     await sendTelegram(env, "sendMessage", {
       chat_id: chatId,
-      text: `💰 <b>Add Product — Step 3/3</b>\n\nPlease enter the price in <b>BDT and USD</b> separated by a comma (or just BDT price):\n<i>Example: <code>500, 4.5</code> (500 BDT and 4.5 USD)</i>`,
+      text: `💰 <b>Add Product — Step 3/3</b>\n\nPlease enter the price in <b>BDT and USD</b> separated by a comma:\n<i>Example: <code>500, 4.5</code> (500 BDT and 4.5 USD)</i>`,
       parse_mode: "HTML",
       reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_panel" }]] }
     });
     return true;
   }
 
-  // 2. Adding Product - Step 3: Price received & Product Created!
+  // Adding Product - Step 3
   if (state === "awaiting_prod_price") {
     const data = JSON.parse(adminState.data || "{}");
     let bdt = 500, usd = 4.5;
@@ -776,7 +758,7 @@ async function handleAdminTextState(env, chatId, text, adminState) {
     return true;
   }
 
-  // 3. Broadcasting message
+  // Broadcasting message
   if (state === "awaiting_broadcast") {
     await clearAdminState(env, chatId);
     const { results: allUsers } = await env.DB.prepare("SELECT user_id FROM users").all();
@@ -801,7 +783,7 @@ async function handleAdminTextState(env, chatId, text, adminState) {
     return true;
   }
 
-  // 4. Updating Payment Settings
+  // Updating Payment Settings
   if (state.startsWith("awaiting_setting_")) {
     const field = state.replace("awaiting_setting_", "");
     let key = "bkash_num";
@@ -946,7 +928,7 @@ async function sendDeposit(env, chatId, editMessageId = null) {
   const binanceId = await getSetting(env, "binance_id", env.BINANCE_PAY_ID || "12345678");
   const bep20Addr = await getSetting(env, "bep20_addr", env.BEP20_ADDRESS || "0x...");
 
-  const depText = `💰 <b>Deposit / Add Funds</b>\n\nSend funds to any of the following accounts, then share your TrxID with Support:\n\n• <b>bKash:</b> <code>${bkashNum}</code>\n• <b>Nagad:</b> <code>${nagadNum}</code>\n• <b>Rocket:</b> <code>${rocketNum}</code>\n• <b>Binance Pay:</b> <code>${binanceId}</code>\n• <b>USDT (BEP-20):</b> <code>${bep20Addr}</code>\n\nOnce submitted, your wallet balance will be credited promptly.`;
+  const depText = `💰 <b>Deposit / Add Funds</b>\n\nSend funds to any of the following accounts, then share your TrxID with Support:\n\n• <b>bKash:</b> <code>${bkashNum}</code>\n• <b>Nagad:</b> <code>${nagadNum}</code>\n• <b>Rocket:</b> <code>${rocketNum}</code>\n• <b>Binance Pay ID:</b> <code>${binanceId}</code>\n• <b>USDT (BEP-20):</b> <code>${bep20Addr}</code>\n\nOnce submitted, your wallet balance will be credited promptly.`;
   const buttons = [
     [{ text: "🕒 Contact Support", callback_data: "support" }],
     [{ text: "🔙 Main Menu", callback_data: "home" }]
