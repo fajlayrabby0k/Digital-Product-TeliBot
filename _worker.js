@@ -1,6 +1,10 @@
 // ====================================================================
-// VEXORIX Store Clone - Professional Digital Product Telegram Bot
-// Standard English | Exact 1:1 VEXORIX Store UI & Menu Layout
+// VEXORIX Store Clone - Fully Interactive Digital Product Telegram Bot
+// - Direct Products on [🛒 Shop] (No Categories)
+// - 100% Button-Driven Admin Panel (Zero Commands to Type)
+// - Step-by-Step Guided Adding of Products, Stock, Broadcast & Settings
+// - 5 Payment Methods (bKash, Nagad, Rocket, Binance Pay, BEP-20 USDT)
+// - Standard English Interface
 // ====================================================================
 
 export default {
@@ -18,7 +22,6 @@ export default {
         }
         await setupDatabase(env.DB);
 
-        // Register Exact Telegram Menu Commands (as seen in VEXORIX Store)
         await sendTelegram(env, "setMyCommands", {
           commands: [
             { command: "start", description: "Open the shop" },
@@ -35,7 +38,7 @@ export default {
         return new Response(
           JSON.stringify({
             success: true,
-            message: "Setup complete! VEXORIX Store layout and Menu Commands are active."
+            message: "Setup complete! Direct products list and button-driven Admin Panel are ready."
           }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
@@ -59,7 +62,7 @@ export default {
     }
 
     // 3. Fallback Landing Status Page
-    return new Response("🤖 VEXORIX Style Digital Store Telegram Bot is Active!", { status: 200 });
+    return new Response("🤖 VEXORIX Digital Store Telegram Bot is Active!", { status: 200 });
   }
 };
 
@@ -80,21 +83,13 @@ async function setupDatabase(db) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );`,
 
-    `CREATE TABLE IF NOT EXISTS categories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      is_active INTEGER DEFAULT 1
-    );`,
-
     `CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      category_id INTEGER,
       name TEXT NOT NULL,
       description TEXT,
       price_bdt REAL NOT NULL,
       price_usd REAL NOT NULL,
-      is_active INTEGER DEFAULT 1,
-      FOREIGN KEY (category_id) REFERENCES categories(id)
+      is_active INTEGER DEFAULT 1
     );`,
 
     `CREATE TABLE IF NOT EXISTS inventory (
@@ -126,20 +121,21 @@ async function setupDatabase(db) {
       value TEXT
     );`,
 
-    // Demo Categories
-    `INSERT OR IGNORE INTO categories (id, name) VALUES 
-      (1, '🔥 Software & License Keys'),
-      (2, '⚡ Premium Subscriptions & VPN'),
-      (3, '💎 Social Media & Gaming Accounts');`,
+    // Admin conversational state store (resilient across serverless requests)
+    `CREATE TABLE IF NOT EXISTS admin_states (
+      user_id INTEGER PRIMARY KEY,
+      state TEXT,
+      data TEXT
+    );`,
 
-    // Demo Products
-    `INSERT OR IGNORE INTO products (id, category_id, name, description, price_bdt, price_usd) VALUES 
-      (1, 1, 'Windows 11 Pro Retail Key', 'Lifetime Retail Online Activation License Key (1 PC)', 500, 4.5),
-      (2, 1, 'Internet Download Manager (IDM)', '1-Year Official Registration License Key', 750, 7.0),
-      (3, 2, 'Telegram Premium 1 Month', 'Direct Gift link activation (No login required)', 450, 4.0),
-      (4, 2, 'NordVPN 1 Year Account', 'Premium Shared Account with warranty', 600, 5.5);`,
+    // Demo Products (Shown directly in Shop)
+    `INSERT OR IGNORE INTO products (id, name, description, price_bdt, price_usd) VALUES 
+      (1, 'Windows 11 Pro Retail Key', 'Lifetime Retail Online Activation License Key (1 PC)', 500, 4.5),
+      (2, 'Internet Download Manager (IDM)', '1-Year Official Registration License Key', 750, 7.0),
+      (3, 'Telegram Premium 1 Month', 'Direct Gift link activation (No login required)', 450, 4.0),
+      (4, 'NordVPN 1 Year Account', 'Premium Shared Account with warranty', 600, 5.5);`,
 
-    // Demo Inventory Items
+    // Demo Inventory
     `INSERT OR IGNORE INTO inventory (id, product_id, item_data) VALUES 
       (1, 1, 'W269N-WFGWX-YVC9B-4J6C9-T83GX'),
       (2, 1, 'VK7JG-NPHTM-C97JM-9MPGT-3V66T'),
@@ -159,7 +155,7 @@ async function setupDatabase(db) {
 // Bot Update Processor
 // ====================================================================
 async function handleUpdate(update, env) {
-  // 1. Text Message and Command Handler
+  // 1. Text Message Processing
   if (update.message) {
     const msg = update.message;
     const chatId = msg.chat.id;
@@ -168,7 +164,7 @@ async function handleUpdate(update, env) {
     const username = from.username ? `@${from.username}` : (from.first_name || "Customer");
     const firstName = from.first_name || "Customer";
 
-    // Register or load user
+    // User Registration / Loading
     let user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
     if (!user) {
       let referrerId = 0;
@@ -202,14 +198,23 @@ async function handleUpdate(update, env) {
       }
     }
 
-    // Menu Shortcuts & Commands
+    // CHECK IF ADMIN IS IN A CONVERSATION STATE (Button-guided workflow)
+    if (String(chatId) === String(env.ADMIN_ID)) {
+      const adminState = await env.DB.prepare("SELECT * FROM admin_states WHERE user_id = ?").bind(chatId).first();
+      if (adminState && adminState.state) {
+        const handled = await handleAdminTextState(env, chatId, text, adminState);
+        if (handled) return;
+      }
+    }
+
+    // Menu Commands
     if (text.startsWith("/start") || text === "/home") {
       await sendHomeDashboard(env, chatId, user, firstName);
       return;
     }
 
     if (text === "/shop") {
-      await sendCategories(env, chatId);
+      await sendProductsDirectly(env, chatId);
       return;
     }
 
@@ -239,48 +244,9 @@ async function handleUpdate(update, env) {
     }
 
     if (text === "/admin") {
-      if (String(chatId) !== String(env.ADMIN_ID)) {
-        await sendTelegram(env, "sendMessage", { chat_id: chatId, text: "⛔ Access Denied: You are not an administrator." });
-        return;
+      if (String(chatId) === String(env.ADMIN_ID)) {
+        await sendAdminDashboard(env, chatId);
       }
-      await sendAdminDashboard(env, chatId);
-      return;
-    }
-
-    // Admin Stock Addition (/addstock <id> <data>)
-    if (text.startsWith("/addstock") && String(chatId) === String(env.ADMIN_ID)) {
-      const parts = text.split(" ");
-      if (parts.length >= 3) {
-        const prodId = parts[1];
-        const itemData = parts.slice(2).join(" ");
-        await env.DB.prepare("INSERT INTO inventory (product_id, item_data) VALUES (?, ?)").bind(prodId, itemData).run();
-        await sendTelegram(env, "sendMessage", { chat_id: chatId, text: `✅ Stock item successfully added to Product #${prodId}!` });
-      } else {
-        await sendTelegram(env, "sendMessage", {
-          chat_id: chatId,
-          text: "⚠️ Usage: <code>/addstock &lt;product_id&gt; &lt;license_or_data&gt;</code>\nExample: <code>/addstock 1 ABCDE-12345-XYZ</code>",
-          parse_mode: "HTML"
-        });
-      }
-      return;
-    }
-
-    // Admin Broadcast Announcement (/broadcast <msg>)
-    if (text.startsWith("/broadcast") && String(chatId) === String(env.ADMIN_ID)) {
-      const bMsg = text.replace("/broadcast", "").trim();
-      if (!bMsg) {
-        await sendTelegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ Usage: <code>/broadcast Your message here</code>", parse_mode: "HTML" });
-        return;
-      }
-      const { results: allUsers } = await env.DB.prepare("SELECT user_id FROM users").all();
-      let sentCount = 0;
-      for (const u of allUsers) {
-        try {
-          await sendTelegram(env, "sendMessage", { chat_id: u.user_id, text: `📢 <b>Announcement:</b>\n\n${bMsg}`, parse_mode: "HTML" });
-          sentCount++;
-        } catch (e) {}
-      }
-      await sendTelegram(env, "sendMessage", { chat_id: chatId, text: `✅ Broadcasted to ${sentCount} users successfully!` });
       return;
     }
 
@@ -328,7 +294,7 @@ async function handleUpdate(update, env) {
     }
   }
 
-  // 2. Inline Keyboard Callbacks
+  // 2. Inline Keyboard Button Callbacks
   if (update.callback_query) {
     const cb = update.callback_query;
     const data = cb.data;
@@ -339,13 +305,16 @@ async function handleUpdate(update, env) {
     const firstName = cb.from.first_name || "Customer";
     const username = cb.from.username ? `@${cb.from.username}` : firstName;
 
+    // Home
     if (data === "home") {
+      await clearAdminState(env, chatId);
       await sendHomeDashboard(env, chatId, user, firstName, messageId);
       return;
     }
 
+    // DIRECT SHOP (Lists all products directly without category layer)
     if (data === "shop") {
-      await sendCategories(env, chatId, messageId);
+      await sendProductsDirectly(env, chatId, messageId);
       return;
     }
 
@@ -374,32 +343,166 @@ async function handleUpdate(update, env) {
       return;
     }
 
+    // ----------------------------------------------------
+    // ADMIN PANEL BUTTON-DRIVEN WORKFLOWS (NO COMMANDS NEEDED)
+    // ----------------------------------------------------
     if (data === "admin_panel") {
       if (String(chatId) === String(env.ADMIN_ID)) {
+        await clearAdminState(env, chatId);
         await sendAdminDashboard(env, chatId, messageId);
       }
       return;
     }
 
-    // Category Selected -> Show Products
-    if (data.startsWith("cat_")) {
-      const catId = data.split("_")[1];
-      const cat = await env.DB.prepare("SELECT * FROM categories WHERE id = ?").bind(catId).first();
-      const { results } = await env.DB.prepare("SELECT * FROM products WHERE category_id = ? AND is_active = 1").all();
-
-      const buttons = results.map(p => [{ text: `🔹 ${p.name} — $${p.price_usd} (৳${p.price_bdt})`, callback_data: `prod_${p.id}` }]);
-      buttons.push([{ text: "🔙 Back to Categories", callback_data: "shop" }]);
+    // Admin: Choose product to add stock
+    if (data === "adm_stock_menu") {
+      const { results: prods } = await env.DB.prepare("SELECT * FROM products WHERE is_active = 1").all();
+      const buttons = prods.map(p => [{ text: `📦 ${p.name}`, callback_data: `adm_addstock_${p.id}` }]);
+      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
 
       await sendTelegram(env, "editMessageText", {
         chat_id: chatId,
         message_id: messageId,
-        text: `📂 <b>Category: ${cat ? cat.name : "Products"}</b>\n\nChoose an item below to view details and purchase:`,
+        text: `📦 <b>Select a product to add stock:</b>\n\nClick on the product you want to add license keys or accounts to:`,
         parse_mode: "HTML",
         reply_markup: { inline_keyboard: buttons }
       });
       return;
     }
 
+    // Admin clicked product to add stock
+    if (data.startsWith("adm_addstock_")) {
+      const prodId = data.replace("adm_addstock_", "");
+      const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
+
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_stock', ?)").bind(chatId, prodId).run();
+
+      const cancelBtn = [[{ text: "❌ Cancel", callback_data: "admin_panel" }]];
+      await sendTelegram(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: `📥 <b>Add Stock for: ${prod ? prod.name : "Product"}</b>\n\nPlease <b>send / paste</b> the license key, account details, or download link below:`,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: cancelBtn }
+      });
+      return;
+    }
+
+    // Admin: Add New Product Guided Flow
+    if (data === "adm_add_product") {
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_prod_name', '{}')").bind(chatId).run();
+      const cancelBtn = [[{ text: "❌ Cancel", callback_data: "admin_panel" }]];
+      await sendTelegram(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: `➕ <b>Add New Product — Step 1/3</b>\n\nPlease send the <b>Name</b> of the new product:\n<i>(Example: Canva Pro 1 Year)</i>`,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: cancelBtn }
+      });
+      return;
+    }
+
+    // Admin: Manage / Delete Products
+    if (data === "adm_manage_products") {
+      const { results: prods } = await env.DB.prepare("SELECT p.*, (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) as stock_count FROM products p WHERE p.is_active = 1").all();
+      const buttons = prods.map(p => [
+        { text: `${p.name} (${p.stock_count} in stock)`, callback_data: `adm_prod_details_${p.id}` }
+      ]);
+      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
+
+      await sendTelegram(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: `📋 <b>All Store Products:</b>\nClick on any product to view details or remove it:`,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: buttons }
+      });
+      return;
+    }
+
+    // Admin: Product details & delete option
+    if (data.startsWith("adm_prod_details_")) {
+      const prodId = data.replace("adm_prod_details_", "");
+      const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
+      const stock = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE product_id = ? AND is_sold = 0").bind(prodId).first();
+
+      const text = `📦 <b>${prod.name}</b>\n\nPrice: $${prod.price_usd} USD (৳${prod.price_bdt} BDT)\nRemaining Stock: ${stock ? stock.count : 0} items\nDescription: ${prod.description}`;
+      const buttons = [
+        [{ text: "➕ Add Stock to this Product", callback_data: `adm_addstock_${prod.id}` }],
+        [{ text: "🗑️ Delete Product", callback_data: `adm_del_prod_${prod.id}` }],
+        [{ text: "🔙 Back", callback_data: "adm_manage_products" }]
+      ];
+      await sendTelegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } });
+      return;
+    }
+
+    // Admin: Delete Product confirmation
+    if (data.startsWith("adm_del_prod_")) {
+      const prodId = data.replace("adm_del_prod_", "");
+      await env.DB.prepare("UPDATE products SET is_active = 0 WHERE id = ?").bind(prodId).run();
+      await sendTelegram(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: `✅ Product #${prodId} has been removed from store!`,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [[{ text: "🔙 Products List", callback_data: "adm_manage_products" }]] }
+      });
+      return;
+    }
+
+    // Admin: Broadcast Flow
+    if (data === "adm_broadcast") {
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_broadcast', '')").bind(chatId).run();
+      const cancelBtn = [[{ text: "❌ Cancel", callback_data: "admin_panel" }]];
+      await sendTelegram(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: `📢 <b>Broadcast Announcement to All Users:</b>\n\nPlease type and send the message you want to deliver to every registered user:`,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: cancelBtn }
+      });
+      return;
+    }
+
+    // Admin: Payment Numbers Settings Menu
+    if (data === "adm_payment_settings") {
+      const bKash = await getSetting(env, "bkash_num", env.BKASH_NUM || "Not set");
+      const nagad = await getSetting(env, "nagad_num", env.NAGAD_NUM || "Not set");
+      const rocket = await getSetting(env, "rocket_num", env.ROCKET_NUM || "Not set");
+      const binance = await getSetting(env, "binance_id", env.BINANCE_PAY_ID || "Not set");
+      const bep20 = await getSetting(env, "bep20_addr", env.BEP20_ADDRESS || "Not set");
+
+      const text = `⚙️ <b>Store Payment Accounts:</b>\n\n• <b>bKash:</b> <code>${bKash}</code>\n• <b>Nagad:</b> <code>${nagad}</code>\n• <b>Rocket:</b> <code>${rocket}</code>\n• <b>Binance Pay:</b> <code>${binance}</code>\n• <b>USDT BEP-20:</b> <code>${bep20}</code>\n\nClick any button below to update account number:`;
+
+      const buttons = [
+        [{ text: "📱 Edit bKash", callback_data: "adm_set_bkash" }, { text: "📱 Edit Nagad", callback_data: "adm_set_nagad" }],
+        [{ text: "📱 Edit Rocket", callback_data: "adm_set_rocket" }],
+        [{ text: "🟡 Edit Binance Pay ID", callback_data: "adm_set_binance" }],
+        [{ text: "🌐 Edit USDT BEP-20", callback_data: "adm_set_bep20" }],
+        [{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]
+      ];
+
+      await sendTelegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } });
+      return;
+    }
+
+    // Admin Payment update triggers
+    if (data.startsWith("adm_set_")) {
+      const field = data.replace("adm_set_", "");
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, ?, '')").bind(chatId, `awaiting_setting_${field}`).run();
+      await sendTelegram(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: `✏️ <b>Enter new value for ${field}:</b>\n\nPlease send the new account number or wallet address:`,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "adm_payment_settings" }]] }
+      });
+      return;
+    }
+
+    // ----------------------------------------------------
+    // CUSTOMER SHOPPING & ORDERING
+    // ----------------------------------------------------
     // Product Details View
     if (data.startsWith("prod_")) {
       const prodId = data.split("_")[1];
@@ -416,7 +519,7 @@ async function handleUpdate(update, env) {
       } else {
         buttons.push([{ text: "❌ Out of Stock", callback_data: "none" }]);
       }
-      buttons.push([{ text: "🔙 Back to Products", callback_data: `cat_${prod.category_id}` }]);
+      buttons.push([{ text: "🔙 Back to Products", callback_data: "shop" }]);
 
       await sendTelegram(env, "editMessageText", {
         chat_id: chatId,
@@ -504,12 +607,18 @@ async function handleUpdate(update, env) {
 
       const orderId = res.meta.last_row_id;
 
+      const bkashNum = await getSetting(env, "bkash_num", env.BKASH_NUM || "017XXXXXXXX");
+      const nagadNum = await getSetting(env, "nagad_num", env.NAGAD_NUM || "017XXXXXXXX");
+      const rocketNum = await getSetting(env, "rocket_num", env.ROCKET_NUM || "017XXXXXXXX");
+      const binanceId = await getSetting(env, "binance_id", env.BINANCE_PAY_ID || "12345678");
+      const bep20Addr = await getSetting(env, "bep20_addr", env.BEP20_ADDRESS || "0x1234...");
+
       let instruction = "";
-      if (method === "bKash") instruction = `📱 <b>bKash Number (Send Money):</b>\n<code>${env.BKASH_NUM || "017XXXXXXXX"}</code>\nAmount: <b>৳${amount} BDT</b>`;
-      else if (method === "Nagad") instruction = `📱 <b>Nagad Number (Send Money):</b>\n<code>${env.NAGAD_NUM || "017XXXXXXXX"}</code>\nAmount: <b>৳${amount} BDT</b>`;
-      else if (method === "Rocket") instruction = `📱 <b>Rocket Number:</b>\n<code>${env.ROCKET_NUM || "017XXXXXXXX"}</code>\nAmount: <b>৳${amount} BDT</b>`;
-      else if (method === "BinancePay") instruction = `🟡 <b>Binance Pay ID:</b>\n<code>${env.BINANCE_PAY_ID || "12345678"}</code>\nAmount: <b>$${amount} USDT</b>`;
-      else if (method === "BEP20") instruction = `🌐 <b>USDT BEP-20 Address:</b>\n<code>${env.BEP20_ADDRESS || "0x1234..."}</code>\nAmount: <b>$${amount} USDT</b>`;
+      if (method === "bKash") instruction = `📱 <b>bKash Number (Send Money):</b>\n<code>${bkashNum}</code>\nAmount: <b>৳${amount} BDT</b>`;
+      else if (method === "Nagad") instruction = `📱 <b>Nagad Number (Send Money):</b>\n<code>${nagadNum}</code>\nAmount: <b>৳${amount} BDT</b>`;
+      else if (method === "Rocket") instruction = `📱 <b>Rocket Number:</b>\n<code>${rocketNum}</code>\nAmount: <b>৳${amount} BDT</b>`;
+      else if (method === "BinancePay") instruction = `🟡 <b>Binance Pay ID:</b>\n<code>${binanceId}</code>\nAmount: <b>$${amount} USDT</b>`;
+      else if (method === "BEP20") instruction = `🌐 <b>USDT BEP-20 Address:</b>\n<code>${bep20Addr}</code>\nAmount: <b>$${amount} USDT</b>`;
 
       const promptMsg = `📌 <b>Order ID: #${orderId}</b>\nProduct: <b>${prod.name}</b>\n\n${instruction}\n\n⚠️ <b>Instructions:</b>\nAfter completing your payment, please <b>Reply</b> to this message with your Transaction ID (TrxID) or Transaction Hash.`;
 
@@ -576,16 +685,166 @@ async function handleUpdate(update, env) {
 }
 
 // ====================================================================
-// Reusable UI Functions (Exact 1:1 VEXORIX Store Layout)
+// Admin Interactive State Processor (100% Zero-Command)
+// ====================================================================
+async function handleAdminTextState(env, chatId, text, adminState) {
+  const state = adminState.state;
+
+  // 1. Adding Stock
+  if (state === "awaiting_stock") {
+    const prodId = adminState.data;
+    await env.DB.prepare("INSERT INTO inventory (product_id, item_data) VALUES (?, ?)").bind(prodId, text).run();
+    await clearAdminState(env, chatId);
+
+    const prod = await env.DB.prepare("SELECT name FROM products WHERE id = ?").bind(prodId).first();
+    const count = await env.DB.prepare("SELECT COUNT(*) as c FROM inventory WHERE product_id = ? AND is_sold = 0").bind(prodId).first();
+
+    const buttons = [
+      [{ text: "➕ Add More Stock to this Product", callback_data: `adm_addstock_${prodId}` }],
+      [{ text: "👑 Admin Panel", callback_data: "admin_panel" }]
+    ];
+
+    await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `✅ <b>Stock Added Successfully!</b>\n\nProduct: <b>${prod ? prod.name : "Product"}</b>\nCurrent Stock: <b>${count ? count.c : 1} items</b>`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: buttons }
+    });
+    return true;
+  }
+
+  // 2. Adding Product - Step 1: Name received
+  if (state === "awaiting_prod_name") {
+    const data = { name: text };
+    await env.DB.prepare("UPDATE admin_states SET state = 'awaiting_prod_desc', data = ? WHERE user_id = ?").bind(JSON.stringify(data), chatId).run();
+
+    await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `📝 <b>Add Product — Step 2/3</b>\n\nProduct Name: <b>${text}</b>\n\nNow please send a short <b>Description</b> for this product:`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_panel" }]] }
+    });
+    return true;
+  }
+
+  // 2. Adding Product - Step 2: Description received
+  if (state === "awaiting_prod_desc") {
+    const data = JSON.parse(adminState.data || "{}");
+    data.description = text;
+    await env.DB.prepare("UPDATE admin_states SET state = 'awaiting_prod_price', data = ? WHERE user_id = ?").bind(JSON.stringify(data), chatId).run();
+
+    await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `💰 <b>Add Product — Step 3/3</b>\n\nPlease enter the price in <b>BDT and USD</b> separated by a comma (or just BDT price):\n<i>Example: <code>500, 4.5</code> (500 BDT and 4.5 USD)</i>`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_panel" }]] }
+    });
+    return true;
+  }
+
+  // 2. Adding Product - Step 3: Price received & Product Created!
+  if (state === "awaiting_prod_price") {
+    const data = JSON.parse(adminState.data || "{}");
+    let bdt = 500, usd = 4.5;
+    if (text.includes(",")) {
+      const parts = text.split(",");
+      bdt = parseFloat(parts[0].trim()) || 500;
+      usd = parseFloat(parts[1].trim()) || 4.5;
+    } else {
+      bdt = parseFloat(text.trim()) || 500;
+      usd = parseFloat((bdt / 115).toFixed(2));
+    }
+
+    const res = await env.DB.prepare(
+      "INSERT INTO products (name, description, price_bdt, price_usd, is_active) VALUES (?, ?, ?, ?, 1)"
+    ).bind(data.name, data.description || "Digital Product", bdt, usd).run();
+
+    const newProdId = res.meta.last_row_id;
+    await clearAdminState(env, chatId);
+
+    const buttons = [
+      [{ text: "➕ Add Stock to this Product Now", callback_data: `adm_addstock_${newProdId}` }],
+      [{ text: "👑 Admin Panel", callback_data: "admin_panel" }]
+    ];
+
+    await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `🎉 <b>New Product Successfully Created!</b>\n\n• Name: <b>${data.name}</b>\n• Price: <b>$${usd} USD / ৳${bdt} BDT</b>\n• Status: Active in Shop!`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: buttons }
+    });
+    return true;
+  }
+
+  // 3. Broadcasting message
+  if (state === "awaiting_broadcast") {
+    await clearAdminState(env, chatId);
+    const { results: allUsers } = await env.DB.prepare("SELECT user_id FROM users").all();
+    let sentCount = 0;
+    for (const u of allUsers) {
+      try {
+        await sendTelegram(env, "sendMessage", {
+          chat_id: u.user_id,
+          text: `📢 <b>Store Announcement:</b>\n\n${text}`,
+          parse_mode: "HTML"
+        });
+        sentCount++;
+      } catch (e) {}
+    }
+
+    await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `✅ <b>Broadcast Completed!</b>\nMessage delivered to ${sentCount} users successfully.`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "👑 Admin Panel", callback_data: "admin_panel" }]] }
+    });
+    return true;
+  }
+
+  // 4. Updating Payment Settings
+  if (state.startsWith("awaiting_setting_")) {
+    const field = state.replace("awaiting_setting_", "");
+    let key = "bkash_num";
+    if (field === "bkash") key = "bkash_num";
+    else if (field === "nagad") key = "nagad_num";
+    else if (field === "rocket") key = "rocket_num";
+    else if (field === "binance") key = "binance_id";
+    else if (field === "bep20") key = "bep20_addr";
+
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(key, text).run();
+    await clearAdminState(env, chatId);
+
+    await sendTelegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `✅ <b>Payment Account Updated!</b>\n\n${field.toUpperCase()}: <code>${text}</code>`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "⚙️ Payment Settings", callback_data: "adm_payment_settings" }], [{ text: "👑 Admin Panel", callback_data: "admin_panel" }]] }
+    });
+    return true;
+  }
+
+  return false;
+}
+
+async function clearAdminState(env, userId) {
+  await env.DB.prepare("DELETE FROM admin_states WHERE user_id = ?").bind(userId).run();
+}
+
+async function getSetting(env, key, defaultVal) {
+  const row = await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first();
+  return (row && row.value) ? row.value : defaultVal;
+}
+
+// ====================================================================
+// Reusable UI Functions (Direct Products on Shop & Guided Admin)
 // ====================================================================
 
-// 1. Exact VEXORIX Store Main Dashboard
+// 1. Main Home Dashboard
 async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = null) {
   const usdBal = user ? (user.balance_usd || 0).toFixed(2) : "0.00";
 
   const welcome = `🛒 <b>Welcome to VEXORIX Store!</b>\n\nHey ${firstName}! 👋\n\nWe offer premium digital products at the best prices. Fast, secure, and fully automated delivery.\n\n<blockquote>🛒 <b>Shop</b> — Browse & buy products\n💰 <b>Deposit</b> — Add funds to your wallet\n👤 <b>Profile</b> — Balance, orders & settings\n🕒 <b>Support</b> — Get help</blockquote>\n\n📢 <b>Channel:</b> <a href="https://t.me/">Join Channel</a>\n👥 <b>Group:</b> <a href="https://t.me/">Join Group Chat</a>\n\n💰 <b>Balance:</b> $${usdBal} USDT\n\nChoose an option below to continue!`;
 
-  // Exact VEXORIX Store Inline Button Grid
   const keyboard = [
     [{ text: "🛒 Shop", callback_data: "shop" }],
     [{ text: "👤 Profile", callback_data: "profile" }, { text: "💰 Deposit", callback_data: "deposit" }],
@@ -613,19 +872,22 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
   }
 }
 
-// 2. Categories Selection
-async function sendCategories(env, chatId, editMessageId = null) {
-  const { results: categories } = await env.DB.prepare("SELECT * FROM categories WHERE is_active = 1").all();
+// 2. Direct Products List on [🛒 Shop] (NO CATEGORY STEP!)
+async function sendProductsDirectly(env, chatId, editMessageId = null) {
+  const { results: prods } = await env.DB.prepare("SELECT * FROM products WHERE is_active = 1").all();
   const buttons = [];
 
-  if (categories && categories.length > 0) {
-    for (const c of categories) {
-      buttons.push([{ text: c.name, callback_data: `cat_${c.id}` }]);
+  if (prods && prods.length > 0) {
+    for (const p of prods) {
+      buttons.push([{ text: `🔹 ${p.name} — $${p.price_usd} (৳${p.price_bdt})`, callback_data: `prod_${p.id}` }]);
     }
+  } else {
+    buttons.push([{ text: "❌ No products currently in store", callback_data: "none" }]);
   }
+
   buttons.push([{ text: "🔙 Main Menu", callback_data: "home" }]);
 
-  const text = `🛒 <b>Product Categories</b>\n\nPlease select a category below to browse items:`;
+  const text = `🛒 <b>Available Products</b>\n\nSelect any product below to view description and instant buy options:`;
   const payload = { chat_id: chatId, text, parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } };
 
   if (editMessageId) {
@@ -636,7 +898,34 @@ async function sendCategories(env, chatId, editMessageId = null) {
   }
 }
 
-// 3. Profile & Wallet
+// 3. Button-Driven Admin Dashboard (100% Zero-Command)
+async function sendAdminDashboard(env, chatId, editMessageId = null) {
+  const totalUsers = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first();
+  const totalOrders = await env.DB.prepare("SELECT COUNT(*) as count FROM orders").first();
+  const completed = await env.DB.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'completed'").first();
+  const pending = await env.DB.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'").first();
+  const stock = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE is_sold = 0").first();
+
+  const report = `👑 <b>Store Administration Panel</b>\n\n📊 <b>Store Analytics:</b>\n• Total Users: <b>${totalUsers ? totalUsers.count : 0} members</b>\n• Total Orders: <b>${totalOrders ? totalOrders.count : 0}</b>\n• Completed Deliveries: <b>${completed ? completed.count : 0}</b>\n• Pending Verifications: <b>${pending ? pending.count : 0}</b>\n• Total In-Stock Items: <b>${stock ? stock.count : 0} items</b>\n\nSelect an action below to manage your store easily:`;
+
+  const buttons = [
+    [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
+    [{ text: "📋 Manage Products & Stock", callback_data: "adm_manage_products" }],
+    [{ text: "📢 Send Broadcast Message", callback_data: "adm_broadcast" }],
+    [{ text: "⚙️ Update Payment Numbers", callback_data: "adm_payment_settings" }],
+    [{ text: "🔙 Back to Store Home", callback_data: "home" }]
+  ];
+
+  const payload = { chat_id: chatId, text: report, parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } };
+  if (editMessageId) {
+    payload.message_id = editMessageId;
+    await sendTelegram(env, "editMessageText", payload);
+  } else {
+    await sendTelegram(env, "sendMessage", payload);
+  }
+}
+
+// 4. Profile & Wallet
 async function sendProfile(env, chatId, user, editMessageId = null) {
   const profileText = `👤 <b>User Profile & Wallet</b>\n\n🆔 <b>User ID:</b> <code>${chatId}</code>\n👤 <b>Name:</b> ${user ? user.first_name : "Customer"}\n\n💰 <b>Wallet Balance:</b>\n• USD: <b>$${user ? user.balance_usd.toFixed(2) : "0.00"} USDT</b>\n• BDT: <b>৳${user ? user.balance_bdt.toFixed(2) : "0.00"} BDT</b>\n\n👥 <b>Total Referrals:</b> ${user ? user.total_referrals : 0} members`;
   const buttons = [
@@ -649,9 +938,15 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
   else { await sendTelegram(env, "sendMessage", payload); }
 }
 
-// 4. Deposit Funds
+// 5. Deposit Funds
 async function sendDeposit(env, chatId, editMessageId = null) {
-  const depText = `💰 <b>Deposit / Add Funds</b>\n\nSend funds to any of the following accounts, then share your TrxID with Support:\n\n• <b>bKash:</b> <code>${env.BKASH_NUM || "017XXXXXXXX"}</code>\n• <b>Nagad:</b> <code>${env.NAGAD_NUM || "017XXXXXXXX"}</code>\n• <b>Rocket:</b> <code>${env.ROCKET_NUM || "017XXXXXXXX"}</code>\n• <b>Binance Pay ID:</b> <code>${env.BINANCE_PAY_ID || "12345678"}</code>\n• <b>USDT (BEP-20):</b> <code>${env.BEP20_ADDRESS || "0x..."}</code>\n\nOnce submitted, your wallet balance will be credited promptly.`;
+  const bkashNum = await getSetting(env, "bkash_num", env.BKASH_NUM || "017XXXXXXXX");
+  const nagadNum = await getSetting(env, "nagad_num", env.NAGAD_NUM || "017XXXXXXXX");
+  const rocketNum = await getSetting(env, "rocket_num", env.ROCKET_NUM || "017XXXXXXXX");
+  const binanceId = await getSetting(env, "binance_id", env.BINANCE_PAY_ID || "12345678");
+  const bep20Addr = await getSetting(env, "bep20_addr", env.BEP20_ADDRESS || "0x...");
+
+  const depText = `💰 <b>Deposit / Add Funds</b>\n\nSend funds to any of the following accounts, then share your TrxID with Support:\n\n• <b>bKash:</b> <code>${bkashNum}</code>\n• <b>Nagad:</b> <code>${nagadNum}</code>\n• <b>Rocket:</b> <code>${rocketNum}</code>\n• <b>Binance Pay:</b> <code>${binanceId}</code>\n• <b>USDT (BEP-20):</b> <code>${bep20Addr}</code>\n\nOnce submitted, your wallet balance will be credited promptly.`;
   const buttons = [
     [{ text: "🕒 Contact Support", callback_data: "support" }],
     [{ text: "🔙 Main Menu", callback_data: "home" }]
@@ -661,7 +956,7 @@ async function sendDeposit(env, chatId, editMessageId = null) {
   else { await sendTelegram(env, "sendMessage", payload); }
 }
 
-// 5. Order History
+// 6. Order History
 async function sendOrders(env, chatId, editMessageId = null) {
   const { results } = await env.DB.prepare(
     "SELECT o.*, p.name as product_name, i.item_data FROM orders o JOIN products p ON o.product_id = p.id LEFT JOIN inventory i ON o.id = i.order_id WHERE o.user_id = ? AND o.status = 'completed' ORDER BY o.id DESC LIMIT 5"
@@ -682,7 +977,7 @@ async function sendOrders(env, chatId, editMessageId = null) {
   else { await sendTelegram(env, "sendMessage", payload); }
 }
 
-// 6. Refer & Earn
+// 7. Refer & Earn
 async function sendRefer(env, chatId, user, editMessageId = null) {
   const botInfo = await sendTelegram(env, "getMe", {});
   const botData = await botInfo.json();
@@ -704,31 +999,11 @@ async function sendRefer(env, chatId, user, editMessageId = null) {
   else { await sendTelegram(env, "sendMessage", payload); }
 }
 
-// 7. Support
+// 8. Support
 async function sendSupport(env, chatId, editMessageId = null) {
-  const supText = `🕒 <b>Customer Support & Helpdesk</b>\n\nNeed assistance or have questions regarding your order? Feel free to reach out to our team.\n\nAdministrator: ${env.ADMIN_ID ? `Available via chat` : "Support Agent"}`;
+  const supText = `🕒 <b>Customer Support & Helpdesk</b>\n\nNeed assistance or have questions regarding your order? Feel free to reach out to our team.\n\nAdministrator: Available via chat`;
   const buttons = [[{ text: "🔙 Main Menu", callback_data: "home" }]];
   const payload = { chat_id: chatId, text: supText, parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } };
-  if (editMessageId) { payload.message_id = editMessageId; await sendTelegram(env, "editMessageText", payload); }
-  else { await sendTelegram(env, "sendMessage", payload); }
-}
-
-// 8. Admin Panel
-async function sendAdminDashboard(env, chatId, editMessageId = null) {
-  const totalUsers = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first();
-  const totalOrders = await env.DB.prepare("SELECT COUNT(*) as count FROM orders").first();
-  const completed = await env.DB.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'completed'").first();
-  const pending = await env.DB.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'").first();
-  const stock = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE is_sold = 0").first();
-
-  const report = `👑 <b>Store Administration Panel</b>\n\n📊 <b>Store Analytics:</b>\n• Total Users: ${totalUsers ? totalUsers.count : 0}\n• Total Orders: ${totalOrders ? totalOrders.count : 0}\n• Completed Deliveries: ${completed ? completed.count : 0}\n• Pending Verifications: ${pending ? pending.count : 0}\n• In-Stock Items: ${stock ? stock.count : 0}\n\n🛠️ <b>Management Commands:</b>\n• Add Stock: <code>/addstock &lt;id&gt; &lt;item_key&gt;</code>\n• Broadcast Announcement: <code>/broadcast &lt;message&gt;</code>`;
-
-  const buttons = [
-    [{ text: "🛒 View Catalog & Stocks", callback_data: "shop" }],
-    [{ text: "🔙 Main Menu", callback_data: "home" }]
-  ];
-
-  const payload = { chat_id: chatId, text: report, parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } };
   if (editMessageId) { payload.message_id = editMessageId; await sendTelegram(env, "editMessageText", payload); }
   else { await sendTelegram(env, "sendMessage", payload); }
 }
