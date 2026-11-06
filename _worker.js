@@ -16,11 +16,14 @@
 //     * 🚀 Rocket
 //     * 👛 Wallet
 // - Pre-Order System for Out-of-Stock Products
-// - External Bot / Provider API Integration:
-//     * Sync products from any external Bot / SMM / REST API
-//     * Auto-markup % or Individual Custom Selling Price per product
+// - VEXORIX Reseller API Integration (Directly matching your screenshot):
+//     * Base URL: https://207-148-64-141.sslip.io
+//     * Auth Header: X-Reseller-Key
+//     * Endpoints: GET /api/reseller/products, GET /api/reseller/me, POST /api/reseller/orders
+//     * Auto-markup % or Individual Custom Selling Price per product (Permanent override)
 //     * Live API Stock synchronization
 //     * Automated API Order Dispatch on customer purchase
+//     * Live VEXORIX Wallet Balance Checker in Admin Panel
 //     * Built-in 1-Click Demo API for instant testing
 // - 1 USD = X BDT Admin-Configurable Exchange Rate
 // - Purchase-Based % Referral Commission System
@@ -62,7 +65,7 @@ export default {
         return new Response(
           JSON.stringify({
             success: true,
-            message: "Setup and schema migration completed successfully! All tables, external API engine, and bot commands are ready."
+            message: "Setup and schema migration completed successfully! All tables, VEXORIX Reseller API engine, and bot commands are ready."
           }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
@@ -75,24 +78,38 @@ export default {
     }
 
     // 2. Built-in Mock External Provider API for instant testing (/api/mock-provider)
-    if (url.pathname === "/api/mock-provider") {
-      let action = url.searchParams.get("action") || "services";
+    if (url.pathname.startsWith("/api/mock-provider")) {
+      let action = url.searchParams.get("action") || "";
       if (request.method === "POST") {
         try {
           const body = await request.clone().json().catch(() => ({}));
           if (body.action) action = body.action;
+          if (body.product_id) action = "orders";
         } catch (_) {}
       }
 
-      // Order placement action
-      if (action === "add") {
-        const fakeOrder = Math.floor(100000 + Math.random() * 900000);
-        const randCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+      // Account / Balance check
+      if (action === "me" || url.pathname.endsWith("/me")) {
         return new Response(
           JSON.stringify({
-            order: fakeOrder,
-            status: "Completed",
-            credentials: `https://digital-redeem.net/gift/${randCode}`
+            reseller: { id: "demo_reseller_01", username: "DemoReseller", name: "Demo User" },
+            wallet: { balance: 45.50, currency: "USDT", frozen: false },
+            key: { prefix: "vxr_live_demo", created_at: "2026-11-06T12:00:00Z" }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      // Order placement action
+      if (action === "add" || action === "orders" || url.pathname.endsWith("/orders")) {
+        const fakeOrder = `ord_${Math.floor(100000 + Math.random() * 900000)}`;
+        const randCode = Math.random().toString(36).substring(2, 12).toUpperCase();
+        return new Response(
+          JSON.stringify({
+            order_id: fakeOrder,
+            status: "completed",
+            items: [{ content: `https://vexorix.net/redeem/GIFT-${randCode}` }],
+            balance_after: 44.50
           }),
           { status: 200, headers: { "Content-Type": "application/json" } }
         );
@@ -101,50 +118,62 @@ export default {
       // Services / Products Catalog list
       const mockCatalog = [
         {
-          service: "ext_canva_1y",
-          name: "Canva Pro 1 Year (Private Team)",
-          rate: "3.50",
+          id: "notion_3m",
+          name: "Notion Plus 3M Link",
+          price: 1.00,
           stock: 45,
-          desc: "Official Canva Pro education/team upgrade invite. Private activation on your personal account. 1 Year replacement warranty."
+          available: true,
+          description: "Notion Plus 3 Months upgrade workspace link. Includes Unlimited AI, blocks, and file uploads.",
+          how_to_use: "Open the invite link while logged into your personal Notion account to apply 3 months Plus instantly."
         },
         {
-          service: "ext_chatgpt_plus",
+          id: "canva_pro_1y",
+          name: "Canva Pro 1 Year (Private Team)",
+          price: 3.50,
+          stock: 60,
+          available: true,
+          description: "Official Canva Pro education/team invite. Works on personal email with 1 Year warranty.",
+          how_to_use: "Click the delivered invite link and accept team invitation on canva.com."
+        },
+        {
+          id: "chatgpt_plus_1m",
           name: "ChatGPT Plus Shared 1M",
-          rate: "4.80",
+          price: 4.80,
           stock: 28,
-          desc: "Shared ChatGPT Plus account with full GPT-4o, DALL-E 3 and Canvas access. High-speed private credentials."
+          available: true,
+          description: "Shared ChatGPT Plus account with full GPT-4o, DALL-E 3 and Canvas access. High-speed private credentials.",
+          how_to_use: "Login via chatgpt.com using the delivered email and password. Do not change login details."
         },
         {
-          service: "ext_netflix_uhd",
-          name: "Netflix UHD 4K 1 Profile 1M",
-          rate: "2.40",
-          stock: 85,
-          desc: "Private 1 Profile with personal 4-digit PIN lock. Ultra HD 4K streaming. Direct login email and password."
-        },
-        {
-          service: "ext_spotify_12m",
+          id: "spotify_12m",
           name: "Spotify Premium 12M Family Invite",
-          rate: "6.50",
+          price: 6.50,
           stock: 50,
-          desc: "Upgrade your own existing Spotify account to Premium for 12 full months. No ads, high-quality audio & offline downloads."
+          available: true,
+          description: "Upgrade your own existing Spotify account to Premium for 12 full months. No ads, high-quality audio & offline downloads.",
+          how_to_use: "Open Spotify family invite link and enter provided postal code when prompted."
         },
         {
-          service: "ext_youtube_prem",
+          id: "youtube_prem_3m",
           name: "YouTube Premium 3M (No Ads)",
-          rate: "1.90",
+          price: 1.90,
           stock: 35,
-          desc: "Private family invite for your own Gmail. Ad-free YouTube videos, background play, and YouTube Music Premium included."
+          available: true,
+          description: "Private family invite for your own Gmail. Ad-free YouTube videos, background play, and YouTube Music Premium included.",
+          how_to_use: "Accept Google family invitation link sent to your email address."
         },
         {
-          service: "ext_coursera_plus",
+          id: "coursera_plus_annual",
           name: "Coursera Plus Annual Pass",
-          rate: "16.00",
+          price: 16.00,
           stock: 0,
-          desc: "Unlimited access to 7,000+ top courses and certificates from Google, IBM, and Meta. (Currently Sold Out - Pre-Order Available!)"
+          available: false,
+          description: "Unlimited access to 7,000+ top courses and certificates from Google, IBM, and Meta. (Currently Sold Out - Pre-Order Available!)",
+          how_to_use: "Login with delivered credentials to access all courses."
         }
       ];
 
-      return new Response(JSON.stringify(mockCatalog), {
+      return new Response(JSON.stringify({ products: mockCatalog }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
       });
@@ -285,7 +314,7 @@ async function setupDatabase(db) {
     try { await db.prepare(alt).run(); } catch (_) {}
   }
 
-  // Default Settings
+  // Default Settings (with default Base URL matching your screenshot!)
   const defaultSettings = [
     ['usd_to_bdt_rate', '125'],
     ['referral_commission_percent', '5'],
@@ -295,7 +324,7 @@ async function setupDatabase(db) {
     ['rocket_num', '017XXXXXXXX'],
     ['binance_id', '6029752069'],
     ['bep20_addr', '0x71C...YourWalletAddress'],
-    ['external_api_url', ''],
+    ['external_api_url', 'https://207-148-64-141.sslip.io'],
     ['external_api_key', ''],
     ['external_profit_margin', '20'],
     ['auto_order_enabled', '1']
@@ -743,7 +772,7 @@ async function handleUpdate(update, env, originUrl = "") {
       return;
     }
 
-    // Instant Wallet Balance Purchase (With External API Auto-Dispatch)
+    // Instant Wallet Balance Purchase (With VEXORIX Reseller API Auto-Dispatch)
     if (data.startsWith("pay_balance_")) {
       const parts = data.split("_");
       const prodId = parts[2];
@@ -779,9 +808,9 @@ async function handleUpdate(update, env, originUrl = "") {
         return;
       }
 
-      // Check Stock & Delivery Type (External Bot API vs Local Inventory)
+      // Check Stock & Delivery Type (VEXORIX API vs Local Inventory)
       if (prod.is_external === 1) {
-        // Deduct Wallet Balance
+        // Deduct Customer Wallet Balance
         await env.DB.prepare(
           "UPDATE users SET balance_usd = balance_usd - ?, balance_bdt = balance_bdt - ?, total_spent_usd = total_spent_usd + ? WHERE user_id = ?"
         ).bind(totalUsd, totalBdt, totalUsd, chatId).run();
@@ -792,11 +821,11 @@ async function handleUpdate(update, env, originUrl = "") {
         ).bind(chatId, username, prodId, qty, totalUsd, totalBdt).run();
         const ordId = resOrd.meta.last_row_id;
 
-        // Auto-dispatch to external API
+        // Auto-dispatch to VEXORIX Reseller API
         const apiDelivery = await dispatchExternalOrder(env, prod, qty, ordId);
 
         if (apiDelivery.success) {
-          await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(apiDelivery.externalOrderId || "API-COMPLETED", ordId).run();
+          await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(apiDelivery.externalOrderId || "VEXORIX-DELIVERED", ordId).run();
           await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(qty, prodId).run();
           await processReferralCommission(env, chatId, totalUsd, prod.name);
 
@@ -804,7 +833,7 @@ async function handleUpdate(update, env, originUrl = "") {
             `Product: <b>${prod.name}</b>\n` +
             `Quantity: <b>${qty} item(s)</b>\n` +
             `Deducted: <b>$${totalUsd.toFixed(2)} USD</b>\n\n` +
-            `<b>🔑 Your Delivered Digital Credentials:</b>\n\n` +
+            `<b>🔑 Your Delivered Digital Credentials / Links:</b>\n\n` +
             `<code>${apiDelivery.credentials || "Order Active with Provider"}</code>\n\n` +
             `Thank you for shopping with us! ❤️`;
 
@@ -816,18 +845,18 @@ async function handleUpdate(update, env, originUrl = "") {
             reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "home", style: "success" }]] }
           });
         } else {
-          // If API provider is queued or requires manual review
+          // If VEXORIX balance is low or pending manual action
           await sendTelegram(env, "editMessageText", {
             chat_id: chatId,
             message_id: messageId,
-            text: `🎉 <b>Payment Received! Order #${ordId} is Processing.</b>\n\nProduct: <b>${prod.name}</b> (x${qty})\nProvider Status: <i>${apiDelivery.message}</i>\n\nOur automated system is obtaining your credentials from the provider. You will receive an instant notification here once ready.`,
+            text: `🎉 <b>Payment Received! Order #${ordId} is Processing.</b>\n\nProduct: <b>${prod.name}</b> (x${qty})\nStatus: <i>Processing with digital provider...</i>\n\nOur automated system is securing your credentials. You will receive an instant notification here once ready.`,
             parse_mode: "HTML",
             reply_markup: { inline_keyboard: [[{ text: "🏠 Main Menu", callback_data: "home", style: "success" }]] }
           });
 
           await sendTelegram(env, "sendMessage", {
             chat_id: env.ADMIN_ID,
-            text: `🚨 <b>External API Order Notice!</b>\n\nOrder: #${ordId}\nProduct: <b>${prod.name}</b> (x${qty})\nCustomer: ${username} (ID: <code>${chatId}</code>)\nAPI Dispatch: ${apiDelivery.message}`,
+            text: `🚨 <b>VEXORIX API Order Notice!</b>\n\nOrder: #${ordId}\nProduct: <b>${prod.name}</b> (x${qty})\nCustomer: ${username} (ID: <code>${chatId}</code>)\nAPI Error/Status: <code>${apiDelivery.message}</code>\n\n💡 <i>Tip: Check your VEXORIX wallet balance if insufficient_funds occurred.</i>`,
             parse_mode: "HTML"
           });
         }
@@ -1091,7 +1120,7 @@ async function handleUpdate(update, env, originUrl = "") {
 
       const text = `📦 <b>${prod.name}</b>\n\n` +
         `• Selling Price: <b>$${prod.price_usd.toFixed(2)} USD (৳${prod.price_bdt} BDT)</b>\n` +
-        (prod.is_external ? `• Provider Cost Price: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>\n• Origin: <b>External Bot API (ID: ${prod.external_id})</b>\n` : `• Origin: <b>Manual Store Stock</b>\n`) +
+        (prod.is_external ? `• Provider Cost Price: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>\n• Origin: <b>VEXORIX Reseller API (ID: ${prod.external_id})</b>\n` : `• Origin: <b>Manual Store Stock</b>\n`) +
         `• Remaining Stock: <b>${liveStock} items</b>\n\n` +
         `📝 <b>Description:</b>\n${prod.description}`;
 
@@ -1191,10 +1220,10 @@ async function handleUpdate(update, env, originUrl = "") {
     }
 
     // ----------------------------------------------------------------
-    // ADMIN: EXTERNAL BOT / PROVIDER API MANAGEMENT
+    // ADMIN: VEXORIX RESELLER API MANAGEMENT (Directly Matching Your Screenshot)
     // ----------------------------------------------------------------
     if (data === "adm_api_menu") {
-      const apiUrl = await getSetting(env, "external_api_url", "");
+      const apiUrl = await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io");
       const apiKey = await getSetting(env, "external_api_key", "");
       const margin = await getSetting(env, "external_profit_margin", "20");
       const autoOrder = await getSetting(env, "auto_order_enabled", "1") === "1";
@@ -1202,23 +1231,36 @@ async function handleUpdate(update, env, originUrl = "") {
       const apiProds = await env.DB.prepare("SELECT COUNT(*) as c FROM products WHERE is_external = 1 AND is_active = 1").first();
       const count = apiProds ? apiProds.c : 0;
 
-      const apiText = `🔌 <b>External Bot / Provider API Center</b>\n` +
+      let balanceText = "⚠️ Not Connected";
+      let statusText = "⚠️ Missing API Key";
+      if (apiKey) {
+        const acc = await checkResellerAccount(env);
+        if (acc && acc.wallet) {
+          statusText = "✅ Active & Verified";
+          balanceText = `$${Number(acc.wallet.balance || 0).toFixed(2)} ${acc.wallet.currency || "USDT"}`;
+        } else {
+          statusText = "⚠️ Connected (Tap Sync to Test)";
+          balanceText = "Ready to Sync";
+        }
+      }
+
+      const apiText = `🔌 <b>VEXORIX Reseller API Center</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `• <b>Status:</b> ${apiUrl ? "✅ Connected" : "⚠️ Not Configured"}\n` +
-        `• <b>API URL:</b> <code>${apiUrl || "Not Set"}</code>\n` +
-        `• <b>API Key:</b> <code>${apiKey ? "••••••••" + apiKey.slice(-4) : "Not Set"}</code>\n` +
+        `• <b>API Status:</b> ${statusText}\n` +
+        `• <b>VEXORIX Wallet:</b> <b>${balanceText}</b>\n` +
+        `• <b>Base URL:</b> <code>${apiUrl}</code>\n` +
+        `• <b>API Key:</b> <code>${apiKey ? apiKey.slice(0, 12) + "••••••••" : "Not Set"}</code>\n` +
         `• <b>Default Profit Margin:</b> <b>${margin}%</b>\n` +
         `• <b>Auto-Order on Purchase:</b> <b>${autoOrder ? "✅ Enabled (Instant)" : "⏸️ Disabled"}</b>\n` +
         `• <b>Imported API Products:</b> <b>${count} products active</b>\n\n` +
-        `💡 <b>Quick Guide:</b>\n` +
-        `1. Set the API URL and API Key from another bot / provider.\n` +
-        `2. Tap <b>Sync Products Now</b> to import all products.\n` +
-        `3. Tap <b>Set Custom Prices</b> to override any product's selling price!\n` +
-        `<i>(Or tap "🧪 Test with Demo API" to test right now with 1-click!)</i>`;
+        `💡 <b>How to Connect:</b>\n` +
+        `1. Tap <b>[ 🔑 Set VEXORIX API Key ]</b> and paste your key (starts with <code>vxr_live_...</code>).\n` +
+        `2. Tap <b>[ 🔄 Sync Products Now ]</b> to fetch all products & live stock.\n` +
+        `3. Tap <b>[ 💰 Set Custom Prices ]</b> to customize your selling prices!`;
 
       const buttons = [
         [{ text: "🔄 Sync Products Now", callback_data: "adm_sync_api", style: "success" }],
-        [{ text: "🔗 Set API URL", callback_data: "adm_set_api_url", style: "success" }, { text: "🔑 Set API Key", callback_data: "adm_set_api_key", style: "success" }],
+        [{ text: "🔑 Set VEXORIX API Key", callback_data: "adm_set_api_key", style: "success" }, { text: "🔗 Change Base URL", callback_data: "adm_set_api_url", style: "success" }],
         [{ text: `📈 Profit Margin (${margin}%)`, callback_data: "adm_set_api_margin", style: "success" }, { text: `🤖 Auto-Order: ${autoOrder ? "ON" : "OFF"}`, callback_data: "adm_toggle_auto_order", style: "success" }],
         [{ text: "💰 Set Custom Product Prices", callback_data: "adm_price_menu", style: "success" }],
         [{ text: "🧪 Test with Demo API (1-Click)", callback_data: "adm_setup_demo_api", style: "success" }],
@@ -1241,7 +1283,7 @@ async function handleUpdate(update, env, originUrl = "") {
       const newVal = current === "1" ? "0" : "1";
       await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('auto_order_enabled', ?)").bind(newVal).run();
       await sendTelegram(env, "answerCallbackQuery", { callback_query_id: cb.id, text: `Auto-Order is now ${newVal === "1" ? "ENABLED" : "DISABLED"}` });
-      // Re-render menu
+      
       const refreshBtn = { data: "adm_api_menu", message: { chat: { id: chatId }, message_id: messageId } };
       await handleUpdate({ callback_query: refreshBtn }, env, originUrl);
       return;
@@ -1280,18 +1322,18 @@ async function handleUpdate(update, env, originUrl = "") {
 
     // Admin: Trigger API Sync
     if (data === "adm_sync_api") {
-      const apiUrl = await getSetting(env, "external_api_url", "");
+      const apiUrl = await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io");
       const apiKey = await getSetting(env, "external_api_key", "");
 
-      if (!apiUrl) {
+      if (!apiKey) {
         await sendTelegram(env, "editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          text: `⚠️ <b>API URL Not Configured!</b>\n\nPlease set the External Bot API URL first using the button below:`,
+          text: `⚠️ <b>API Key Not Set!</b>\n\nPlease set your VEXORIX API Key first (the key starting with <code>vxr_live_...</code> from your screenshot) using the button below:`,
           parse_mode: "HTML",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "🔗 Set API URL", callback_data: "adm_set_api_url", style: "success" }],
+              [{ text: "🔑 Set VEXORIX API Key", callback_data: "adm_set_api_key", style: "success" }],
               [{ text: "🧪 Test with Demo API", callback_data: "adm_setup_demo_api", style: "success" }],
               [{ text: "🔙 Back", callback_data: "adm_api_menu", style: "success" }]
             ]
@@ -1303,7 +1345,7 @@ async function handleUpdate(update, env, originUrl = "") {
       await sendTelegram(env, "editMessageText", {
         chat_id: chatId,
         message_id: messageId,
-        text: `⏳ <b>Connecting to External Bot API & Fetching Products... Please wait...</b>`,
+        text: `⏳ <b>Connecting to VEXORIX Reseller API & Syncing Products... Please wait...</b>`,
         parse_mode: "HTML"
       });
 
@@ -1328,11 +1370,11 @@ async function handleUpdate(update, env, originUrl = "") {
     // Admin: Set API Parameters
     if (data === "adm_set_api_url" || data === "adm_set_api_key" || data === "adm_set_api_margin") {
       let state = "awaiting_api_url";
-      let prompt = "Please send the External Bot / Provider API URL:\n<i>(Example: https://provider.com/api/v2)</i>";
+      let prompt = "Please send the API Base URL:\n<i>(Default: https://207-148-64-141.sslip.io)</i>";
 
       if (data === "adm_set_api_key") {
         state = "awaiting_api_key";
-        prompt = "Please send the API Key or Secret Token from that bot/provider:";
+        prompt = "🔑 <b>Enter your VEXORIX API Key:</b>\n\nPlease send your full API Key (starts with <code>vxr_live_...</code> as shown in your screenshot):";
       } else if (data === "adm_set_api_margin") {
         state = "awaiting_api_margin";
         prompt = "Please enter your default Profit Margin % on imported products (e.g. <code>25</code> for 25% markup):";
@@ -1414,20 +1456,20 @@ async function handleUpdate(update, env, originUrl = "") {
         if (prod && prod.is_external === 1) {
           const apiDelivery = await dispatchExternalOrder(env, prod, orderQty, orderId);
 
-          await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(apiDelivery.externalOrderId || "API-APPROVED", orderId).run();
+          await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(apiDelivery.externalOrderId || "VEXORIX-APPROVED", orderId).run();
           await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(orderQty, prod.id).run();
           await processReferralCommission(env, order.user_id, order.amount_usd, prod.name);
 
           await sendTelegram(env, "sendMessage", {
             chat_id: order.user_id,
-            text: `🎉 <b>Order Approved & Delivered!</b>\n\nOrder ID: #${orderId}\nProduct: <b>${prod.name}</b> (x${orderQty})\n\n<b>🔑 Your License / Credentials:</b>\n<code>${apiDelivery.credentials || "Delivered via Bot API"}</code>\n\nThank you for choosing our store! ❤️`,
+            text: `🎉 <b>Order Approved & Delivered!</b>\n\nOrder ID: #${orderId}\nProduct: <b>${prod.name}</b> (x${orderQty})\n\n<b>🔑 Your Delivered License / Links:</b>\n<code>${apiDelivery.credentials || "Delivered via Bot API"}</code>\n\nThank you for choosing our store! ❤️`,
             parse_mode: "HTML"
           });
 
           await sendTelegram(env, "editMessageText", {
             chat_id: chatId,
             message_id: messageId,
-            text: `✅ <b>Order #${orderId} approved and dispatched via External API!</b>`,
+            text: `✅ <b>Order #${orderId} approved and dispatched via VEXORIX API!</b>`,
             parse_mode: "HTML"
           });
           return;
@@ -1714,18 +1756,19 @@ async function handleAdminTextState(env, chatId, text, adminState) {
     return true;
   }
 
-  // 7. External API Settings Handlers
+  // 7. External API Settings Handlers (With Instant VEXORIX Verification!)
   if (state === "awaiting_api_url") {
-    const cleanUrl = text.trim();
+    let cleanUrl = text.trim();
+    if (cleanUrl.endsWith("/")) cleanUrl = cleanUrl.slice(0, -1);
     await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('external_api_url', ?)").bind(cleanUrl).run();
     await clearAdminState(env, chatId);
     await sendTelegram(env, "sendMessage", {
       chat_id: chatId,
-      text: `✅ <b>External Bot API URL Saved!</b>\n\n<code>${cleanUrl}</code>\n\nNow set your API Key or tap <b>Sync Products Now</b>:`,
+      text: `✅ <b>API Base URL Saved!</b>\n\n<code>${cleanUrl}</code>\n\nNow set your API Key or tap <b>Sync Products Now</b>:`,
       parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
-          [{ text: "🔑 Set API Key", callback_data: "adm_set_api_key", style: "success" }],
+          [{ text: "🔑 Set VEXORIX API Key", callback_data: "adm_set_api_key", style: "success" }],
           [{ text: "🔄 Sync Products Now", callback_data: "adm_sync_api", style: "success" }],
           [{ text: "🔌 API Settings", callback_data: "adm_api_menu", style: "success" }]
         ]
@@ -1735,11 +1778,51 @@ async function handleAdminTextState(env, chatId, text, adminState) {
   }
 
   if (state === "awaiting_api_key") {
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('external_api_key', ?)").bind(text.trim()).run();
+    const cleanKey = text.trim();
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('external_api_key', ?)").bind(cleanKey).run();
+
+    // Ensure default Base URL is set
+    const currentUrl = await getSetting(env, "external_api_url", "");
+    if (!currentUrl) {
+      await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('external_api_url', 'https://207-148-64-141.sslip.io')").bind().run();
+    }
+
     await clearAdminState(env, chatId);
+
+    // Verify key with VEXORIX Reseller API (/api/reseller/me)
+    const acc = await checkResellerAccount(env);
+    if (acc && acc.wallet) {
+      await sendTelegram(env, "sendMessage", {
+        chat_id: chatId,
+        text: `🎉 <b>VEXORIX Reseller API Connected & Verified!</b>\n\n` +
+          `• Reseller: <b>${acc.reseller ? (acc.reseller.username || acc.reseller.id) : "Active"}</b>\n` +
+          `• VEXORIX Wallet: <b>$${Number(acc.wallet.balance || 0).toFixed(2)} ${acc.wallet.currency || "USDT"}</b>\n` +
+          `• Key Prefix: <code>${acc.key ? acc.key.prefix : "Active"}</code>\n\n` +
+          `⏳ <b>Auto-Syncing products from VEXORIX now...</b>`,
+        parse_mode: "HTML"
+      });
+
+      const targetUrl = await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io");
+      const syncResult = await syncExternalProducts(env, targetUrl, cleanKey);
+
+      await sendTelegram(env, "sendMessage", {
+        chat_id: chatId,
+        text: `🎉 <b>Products Synced Successfully!</b>\n\n${syncResult.message}\n\nAll products from VEXORIX are now available in your store with live stock. You can now set custom selling prices or open the shop:`,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🛒 Open Shop to Check", callback_data: "shop", style: "success" }],
+            [{ text: "💰 Set Custom Prices", callback_data: "adm_price_menu", style: "success" }],
+            [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
+          ]
+        }
+      });
+      return true;
+    }
+
     await sendTelegram(env, "sendMessage", {
       chat_id: chatId,
-      text: `✅ <b>External API Key Saved!</b>\n\nYou are ready to sync products from that bot now:`,
+      text: `✅ <b>API Key Saved!</b>\n\nTap <b>Sync Products Now</b> below to import products:`,
       parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
@@ -1853,61 +1936,117 @@ async function handleAdminTextState(env, chatId, text, adminState) {
 }
 
 // ====================================================================
-// External Bot / Provider API Sync & Auto-Order Dispatch Engine
+// VEXORIX Reseller API Sync & Auto-Order Dispatch Engine
 // ====================================================================
-async function syncExternalProducts(env, apiUrl, apiKey) {
+
+// Check VEXORIX Reseller Account & Balance
+async function checkResellerAccount(env) {
   try {
-    let url = apiUrl;
-    let options = {
+    let baseUrl = await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io");
+    baseUrl = baseUrl.trim().replace(/\/+$/, "");
+    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
+    const apiKey = await getSetting(env, "external_api_key", "");
+    if (!apiKey) return null;
+
+    const res = await fetch(`${baseUrl}/api/reseller/me`, {
       method: "GET",
       headers: {
+        "X-Reseller-Key": apiKey,
         "Accept": "application/json",
-        "User-Agent": "TelegramBotStore/2.0"
+        "User-Agent": "TelegramStoreBot/2.0"
       }
-    };
+    });
 
-    // If query parameters or standard V2 SMM API format
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+// Sync products from VEXORIX Reseller API or standard SMM
+async function syncExternalProducts(env, apiUrl, apiKey) {
+  try {
+    let baseUrl = (apiUrl || await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io")).trim();
+    baseUrl = baseUrl.replace(/\/+$/, "");
+    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
+    const key = apiKey || await getSetting(env, "external_api_key", "");
+
+    if (!key) {
+      return { success: false, message: "Please set your VEXORIX API Key first before syncing products." };
+    }
+
+    let items = [];
+    let isVexorix = false;
+
+    // 1. Try VEXORIX Reseller API (Matching your screenshot)
+    const vexorixProductsUrl = `${baseUrl}/api/reseller/products`;
     try {
-      const parsedUrl = new URL(apiUrl);
-      if (apiKey && !parsedUrl.searchParams.has("key")) {
-        parsedUrl.searchParams.set("key", apiKey);
+      const vResp = await fetch(vexorixProductsUrl, {
+        method: "GET",
+        headers: {
+          "X-Reseller-Key": key,
+          "Accept": "application/json",
+          "User-Agent": "TelegramStoreBot/2.0"
+        }
+      });
+
+      if (vResp.ok) {
+        const vData = await vResp.json();
+        if (vData && Array.isArray(vData.products)) {
+          isVexorix = true;
+          items = vData.products.map(p => ({
+            id: p.id,
+            name: p.name,
+            desc: p.description ? (p.description + (p.how_to_use ? `\n\n📖 <b>Instructions:</b>\n${p.how_to_use}` : "")) : (p.how_to_use || "Digital License"),
+            rate: p.price,
+            stock: p.available ? (p.stock || 50) : 0
+          }));
+        }
       }
-      if (!parsedUrl.searchParams.has("action")) {
-        parsedUrl.searchParams.set("action", "services");
-      }
-      url = parsedUrl.toString();
     } catch (_) {}
 
-    let response = await fetch(url, options);
+    // 2. Fallback to generic / SMM API if needed
+    if (!isVexorix) {
+      let url = baseUrl;
+      let options = {
+        method: "GET",
+        headers: {
+          "Accept": "application/json",
+          "X-Reseller-Key": key,
+          "Authorization": `Bearer ${key}`,
+          "User-Agent": "TelegramStoreBot/2.0"
+        }
+      };
 
-    // Fallback: If GET returned 405 or 400, try POST with JSON or form body
-    if (!response.ok && apiKey) {
-      response = await fetch(apiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify({ key: apiKey, action: "services" })
-      });
+      try {
+        const parsedUrl = new URL(baseUrl);
+        if (!parsedUrl.searchParams.has("key")) parsedUrl.searchParams.set("key", key);
+        if (!parsedUrl.searchParams.has("action")) parsedUrl.searchParams.set("action", "services");
+        url = parsedUrl.toString();
+      } catch (_) {}
+
+      let response = await fetch(url, options);
+      if (!response.ok) {
+        response = await fetch(baseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "application/json" },
+          body: JSON.stringify({ key: key, action: "services" })
+        });
+      }
+
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data)) items = data;
+        else if (data.services && Array.isArray(data.services)) items = data.services;
+        else if (data.products && Array.isArray(data.products)) items = data.products;
+        else if (data.data && Array.isArray(data.data)) items = data.data;
+        else if (data.items && Array.isArray(data.items)) items = data.items;
+      }
     }
 
-    if (!response.ok) {
-      return { success: false, message: `Could not connect to external API. Status: ${response.status} (${response.statusText}). Please check your API URL.` };
-    }
-
-    const data = await response.json();
-    let items = [];
-
-    if (Array.isArray(data)) {
-      items = data;
-    } else if (data.services && Array.isArray(data.services)) {
-      items = data.services;
-    } else if (data.products && Array.isArray(data.products)) {
-      items = data.products;
-    } else if (data.data && Array.isArray(data.data)) {
-      items = data.data;
-    } else if (data.items && Array.isArray(data.items)) {
-      items = data.items;
-    } else {
-      return { success: false, message: "Unrecognized API response format. Expected a JSON array of products or services." };
+    if (!items || items.length === 0) {
+      return { success: false, message: `Could not fetch products. Please ensure your API Key is correct and that the Base URL (${baseUrl}) is reachable.` };
     }
 
     const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
@@ -1915,12 +2054,12 @@ async function syncExternalProducts(env, apiUrl, apiKey) {
 
     let importedCount = 0;
     for (const item of items) {
-      const extId = String(item.service || item.id || item.product_id || item.service_id || "");
+      const extId = String(item.id || item.service || item.product_id || item.service_id || "");
       if (!extId) continue;
 
       const name = item.name || item.title || item.product_name || "External Product";
-      const desc = item.desc || item.description || item.details || `Automated digital product delivered via external bot API. (Service ID: ${extId})`;
-      const baseCostPrice = parseFloat(item.rate || item.price || item.cost || item.unit_price || 5.0);
+      const desc = item.desc || item.description || item.details || `Automated digital product delivered via API. (ID: ${extId})`;
+      const baseCostPrice = parseFloat(item.rate || item.price || item.cost || item.unit_price || 1.0);
       const apiStock = parseInt(item.stock || item.remains || item.quantity || (item.status === 'active' || item.status === 1 ? 50 : 0)) || 0;
 
       // Check if product already exists in store
@@ -1951,49 +2090,89 @@ async function syncExternalProducts(env, apiUrl, apiKey) {
 
     return {
       success: true,
-      message: `Successfully connected! Imported & updated <b>${importedCount} products</b> from the external bot API with live stock and pricing.`
+      message: `Successfully connected! Imported & updated <b>${importedCount} products</b> from ${isVexorix ? "VEXORIX Reseller API" : "Provider API"} with live stock and pricing.`
     };
   } catch (err) {
-    return { success: false, message: `Error connecting to external API: ${err.message}` };
+    return { success: false, message: `Error connecting to API: ${err.message}` };
   }
 }
 
-// Auto-dispatch order to External API
+// Auto-dispatch order to External API (VEXORIX Reseller API + SMM Fallback)
 async function dispatchExternalOrder(env, prod, quantity, orderId) {
   try {
-    const apiUrl = await getSetting(env, "external_api_url", "");
+    let baseUrl = await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io");
+    baseUrl = baseUrl.trim().replace(/\/+$/, "");
+    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
     const apiKey = await getSetting(env, "external_api_key", "");
 
-    if (!apiUrl) {
-      return { success: false, message: "External API URL not configured in store settings." };
+    if (!apiKey) {
+      return { success: false, message: "External API Key is not set in settings." };
     }
 
-    const payload = {
+    // 1. VEXORIX Reseller API Format
+    const vexorixOrderUrl = `${baseUrl}/api/reseller/orders`;
+    const vOrderPayload = {
+      product_id: String(prod.external_id),
+      quantity: quantity,
+      external_order_id: `shop-${orderId}-${Date.now().toString(36)}`
+    };
+
+    const vResp = await fetch(vexorixOrderUrl, {
+      method: "POST",
+      headers: {
+        "X-Reseller-Key": apiKey,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify(vOrderPayload)
+    });
+
+    if (vResp.ok || vResp.status === 201 || vResp.status === 200) {
+      const resData = await vResp.json();
+      const items = resData.items || [];
+      const credentials = items.map(it => it.content).join("\n\n");
+      return {
+        success: true,
+        externalOrderId: String(resData.order_id || ""),
+        credentials: credentials || (resData.order_id ? `Order Delivered: #${resData.order_id}` : "Delivered"),
+        balanceAfter: resData.balance_after,
+        message: "Order placed & delivered instantly via VEXORIX API."
+      };
+    }
+
+    const errData = await vResp.json().catch(() => ({}));
+    if (errData && errData.error) {
+      return {
+        success: false,
+        message: `${errData.error.code}: ${errData.error.message || "Failed to order from VEXORIX"}`
+      };
+    }
+
+    // 2. Fallback to standard SMM API format
+    const smmPayload = {
       key: apiKey,
       action: "add",
       service: prod.external_id,
       quantity: quantity,
       order_id: orderId
     };
-
-    let response = await fetch(apiUrl, {
+    let smmResp = await fetch(baseUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(smmPayload)
     });
 
-    if (!response.ok) {
-      // Fallback form urlencoded
-      const formBody = new URLSearchParams(payload);
-      response = await fetch(apiUrl, {
+    if (!smmResp.ok) {
+      const formBody = new URLSearchParams(smmPayload);
+      smmResp = await fetch(baseUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: formBody.toString()
       });
     }
 
-    if (response.ok) {
-      const resData = await response.json().catch(() => ({}));
+    if (smmResp.ok) {
+      const resData = await smmResp.json().catch(() => ({}));
       const extOrderId = resData.order || resData.order_id || resData.id || "";
       const credentials = resData.credentials || resData.license || resData.key || resData.data || "";
 
@@ -2004,7 +2183,7 @@ async function dispatchExternalOrder(env, prod, quantity, orderId) {
         message: "Order placed successfully with external provider."
       };
     } else {
-      return { success: false, message: `Provider API responded with HTTP status ${response.status}` };
+      return { success: false, message: `Provider API responded with HTTP status ${smmResp.status}` };
     }
   } catch (err) {
     return { success: false, message: err.message };
@@ -2322,7 +2501,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     `• Completed Deliveries: <b>${completed ? completed.count : 0}</b>\n` +
     `• Pending Verifications: <b>${pending ? pending.count : 0}</b>\n` +
     `• Total In-Stock Items: <b>${stock ? stock.count : 0}</b>\n` +
-    `• External Bot API Products: <b>${apiProds ? apiProds.count : 0} active</b>\n` +
+    `• VEXORIX API Products: <b>${apiProds ? apiProds.count : 0} active</b>\n` +
     `• Pending Pre-Orders: <b>${pendingPo ? pendingPo.count : 0}</b>\n\n` +
     `⚙️ <b>Current System Rates:</b>\n` +
     `• Rate: <b>1 USD = ${rate} BDT</b>\n` +
@@ -2332,7 +2511,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
   const buttons = [
     [{ text: "➕ Add Stock", callback_data: "adm_stock_menu", style: "success" }, { text: "➕ Add New Product", callback_data: "adm_add_product", style: "success" }],
     [{ text: "💰 Custom Prices", callback_data: "adm_price_menu", style: "success" }, { text: "📋 Manage Products", callback_data: "adm_manage_products", style: "success" }],
-    [{ text: `🔌 Bot API Center (${apiProds ? apiProds.count : 0})`, callback_data: "adm_api_menu", style: "success" }, { text: `⏳ Pre-Orders (${pendingPo ? pendingPo.count : 0})`, callback_data: "adm_view_preorders", style: "success" }],
+    [{ text: `🔌 VEXORIX API Center (${apiProds ? apiProds.count : 0})`, callback_data: "adm_api_menu", style: "success" }, { text: `⏳ Pre-Orders (${pendingPo ? pendingPo.count : 0})`, callback_data: "adm_view_preorders", style: "success" }],
     [{ text: `💱 1 USD = BDT Rate (${rate})`, callback_data: "adm_set_rate", style: "success" }, { text: `🎁 Referral % (${commPct}%)`, callback_data: "adm_set_ref_comm", style: "success" }],
     [{ text: "⚙️ Payment Numbers", callback_data: "adm_payment_settings", style: "success" }, { text: "📞 Support Contact ID", callback_data: "adm_set_support", style: "success" }],
     [{ text: "📢 Broadcast Message", callback_data: "adm_broadcast", style: "success" }],
