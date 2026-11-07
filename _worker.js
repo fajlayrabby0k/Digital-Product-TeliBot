@@ -89,7 +89,8 @@ export default {
     if (request.method === "POST" && (url.pathname === "/api/webhook" || url.pathname === "/")) {
       try {
         const update = await request.json();
-        await handleUpdate(update, env, url.origin);
+        await ensureDbReady(env.DB);
+        await handleUpdate(update, env, url.origin, ctx);
         return new Response("OK", { status: 200 });
       } catch (e) {
         console.error("Webhook error:", e);
@@ -109,81 +110,116 @@ export default {
 // ====================================================================
 // Database Setup & Migrations
 // ====================================================================
-async function setupDatabase(db) {
-  const schema = [
-    `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE NOT NULL, username TEXT, first_name TEXT, balance_usd REAL DEFAULT 0, balance_bdt REAL DEFAULT 0, referred_by INTEGER DEFAULT 0, total_referrals INTEGER DEFAULT 0, total_spent_usd REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
-    `CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, price_usd REAL NOT NULL, price_bdt REAL NOT NULL, is_active INTEGER DEFAULT 1, is_external INTEGER DEFAULT 0, external_id TEXT DEFAULT '', cost_price_usd REAL DEFAULT 0, custom_price_usd REAL DEFAULT 0, api_stock INTEGER DEFAULT 0);`,
-    `CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, item_data TEXT NOT NULL, is_sold INTEGER DEFAULT 0, order_id INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
-    `CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, product_id INTEGER NOT NULL, quantity INTEGER DEFAULT 1, payment_method TEXT NOT NULL, trx_id TEXT DEFAULT '', amount_usd REAL NOT NULL DEFAULT 0, amount_bdt REAL NOT NULL DEFAULT 0, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
-    `CREATE TABLE IF NOT EXISTS preorders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, product_id INTEGER NOT NULL, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
-    `CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, method TEXT NOT NULL, amount_usd REAL NOT NULL DEFAULT 0, amount_bdt REAL NOT NULL DEFAULT 0, trx_id TEXT DEFAULT '', status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
-    `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`,
-    `CREATE TABLE IF NOT EXISTS admin_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
-    `CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`
-  ];
-  for (const q of schema) await db.prepare(q).run();
+let isDbInitialized = false;
+async function ensureDbReady(db) {
+  if (isDbInitialized || !db) return;
+  try {
+    const schema = [
+      `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE NOT NULL, username TEXT, first_name TEXT, balance_usd REAL DEFAULT 0, balance_bdt REAL DEFAULT 0, referred_by INTEGER DEFAULT 0, total_referrals INTEGER DEFAULT 0, total_spent_usd REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
+      `CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, price_usd REAL NOT NULL, price_bdt REAL NOT NULL, is_active INTEGER DEFAULT 1, is_external INTEGER DEFAULT 0, external_id TEXT DEFAULT '', cost_price_usd REAL DEFAULT 0, custom_price_usd REAL DEFAULT 0, api_stock INTEGER DEFAULT 0);`,
+      `CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, item_data TEXT NOT NULL, is_sold INTEGER DEFAULT 0, order_id INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
+      `CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, product_id INTEGER NOT NULL, quantity INTEGER DEFAULT 1, payment_method TEXT NOT NULL, trx_id TEXT DEFAULT '', amount_usd REAL NOT NULL DEFAULT 0, amount_bdt REAL NOT NULL DEFAULT 0, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
+      `CREATE TABLE IF NOT EXISTS preorders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, product_id INTEGER NOT NULL, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
+      `CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, method TEXT NOT NULL, amount_usd REAL NOT NULL DEFAULT 0, amount_bdt REAL NOT NULL DEFAULT 0, trx_id TEXT DEFAULT '', status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
+      `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`,
+      `CREATE TABLE IF NOT EXISTS admin_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
+      `CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`
+    ];
+    for (const q of schema) await db.prepare(q).run();
 
-  const alters = [
-    "ALTER TABLE users ADD COLUMN balance_usd REAL DEFAULT 0;",
-    "ALTER TABLE users ADD COLUMN balance_bdt REAL DEFAULT 0;",
-    "ALTER TABLE users ADD COLUMN total_spent_usd REAL DEFAULT 0;",
-    "ALTER TABLE products ADD COLUMN is_external INTEGER DEFAULT 0;",
-    "ALTER TABLE products ADD COLUMN external_id TEXT DEFAULT '';",
-    "ALTER TABLE products ADD COLUMN cost_price_usd REAL DEFAULT 0;",
-    "ALTER TABLE products ADD COLUMN custom_price_usd REAL DEFAULT 0;",
-    "ALTER TABLE products ADD COLUMN api_stock INTEGER DEFAULT 0;",
-    "ALTER TABLE orders ADD COLUMN quantity INTEGER DEFAULT 1;",
-    "ALTER TABLE orders ADD COLUMN amount_usd REAL DEFAULT 0;",
-    "ALTER TABLE orders ADD COLUMN amount_bdt REAL DEFAULT 0;"
-  ];
-  for (const a of alters) { try { await db.prepare(a).run(); } catch (_) {} }
+    const alters = [
+      "ALTER TABLE users ADD COLUMN balance_usd REAL DEFAULT 0;",
+      "ALTER TABLE users ADD COLUMN balance_bdt REAL DEFAULT 0;",
+      "ALTER TABLE users ADD COLUMN total_spent_usd REAL DEFAULT 0;",
+      "ALTER TABLE products ADD COLUMN is_external INTEGER DEFAULT 0;",
+      "ALTER TABLE products ADD COLUMN external_id TEXT DEFAULT '';",
+      "ALTER TABLE products ADD COLUMN cost_price_usd REAL DEFAULT 0;",
+      "ALTER TABLE products ADD COLUMN custom_price_usd REAL DEFAULT 0;",
+      "ALTER TABLE products ADD COLUMN api_stock INTEGER DEFAULT 0;",
+      "ALTER TABLE orders ADD COLUMN quantity INTEGER DEFAULT 1;",
+      "ALTER TABLE orders ADD COLUMN amount_usd REAL DEFAULT 0;",
+      "ALTER TABLE orders ADD COLUMN amount_bdt REAL DEFAULT 0;"
+    ];
+    for (const a of alters) { try { await db.prepare(a).run(); } catch (_) {} }
 
-  const defaults = [
-    ['usd_to_bdt_rate', '125'],
-    ['referral_commission_percent', '5'],
-    ['support_admin', '@fojlaybd'],
-    ['bkash_num', '017XXXXXXXX'],
-    ['nagad_num', '017XXXXXXXX'],
-    ['rocket_num', '017XXXXXXXX'],
-    ['binance_id', '6029752069'],
-    ['binance_auto_verify', '1'],
-    ['binance_pay_api_key', ''],
-    ['binance_pay_secret', ''],
-    ['bep20_addr', '0x71C...YourWalletAddress'],
-    ['external_api_url', 'https://207-148-64-141.sslip.io'],
-    ['external_api_key', ''],
-    ['external_profit_margin', '20'],
-    ['auto_order_enabled', '1'],
-    ['force_channel_username', ''],
-    ['force_group_username', ''],
-    ['last_external_sync_time', '0']
-  ];
-  for (const [k, v] of defaults) await db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").bind(k, v).run();
+    const defaults = [
+      ['usd_to_bdt_rate', '125'],
+      ['referral_commission_percent', '5'],
+      ['support_admin', '@fojlaybd'],
+      ['bkash_num', '017XXXXXXXX'],
+      ['nagad_num', '017XXXXXXXX'],
+      ['rocket_num', '017XXXXXXXX'],
+      ['binance_id', '6029752069'],
+      ['binance_auto_verify', '1'],
+      ['binance_pay_api_key', ''],
+      ['binance_pay_secret', ''],
+      ['bep20_addr', '0x71C...YourWalletAddress'],
+      ['external_api_url', 'https://207-148-64-141.sslip.io'],
+      ['external_api_key', ''],
+      ['external_profit_margin', '20'],
+      ['auto_order_enabled', '1'],
+      ['force_channel_username', ''],
+      ['force_group_username', ''],
+      ['last_external_sync_time', '0']
+    ];
+    for (const [k, v] of defaults) await db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").bind(k, v).run();
 
-  const pc = await db.prepare("SELECT COUNT(*) as c FROM products").first();
-  if (!pc || pc.c === 0) {
-    await db.prepare(`INSERT INTO products (id, name, description, price_usd, price_bdt, is_active) VALUES 
-      (1, '🤖 Lovable Pro 12m NW', 'Full Pro Access for 12 Months\\n- 5 daily credits\\n- Instant Automated Delivery', 45.50, 5688, 1),
-      (2, '⚡ Lovable Lite 12m', 'Full Lite Access for 12 Months\\n- 300 Credits', 5.00, 625, 1),
-      (3, '🛡️ NordVPN 3m', 'NordVPN 3 Months Premium Access', 2.50, 312, 1);`).run();
-    await db.prepare(`INSERT INTO inventory (product_id, item_data) VALUES 
-      (2, 'https://lovable.dev/redeem/LOV-300-KEY-001'),
-      (2, 'https://lovable.dev/redeem/LOV-300-KEY-002'),
-      (3, 'User: nord_user@mail.com | Pass: Nord#2026');`).run();
+    const pc = await db.prepare("SELECT COUNT(*) as c FROM products").first();
+    if (!pc || pc.c === 0) {
+      await db.prepare(`INSERT INTO products (id, name, description, price_usd, price_bdt, is_active) VALUES 
+        (1, '🤖 Lovable Pro 12m NW', 'Full Pro Access for 12 Months\\n- 5 daily credits\\n- Instant Automated Delivery', 45.50, 5688, 1),
+        (2, '⚡ Lovable Lite 12m', 'Full Lite Access for 12 Months\\n- 300 Credits', 5.00, 625, 1),
+        (3, '🛡️ NordVPN 3m', 'NordVPN 3 Months Premium Access', 2.50, 312, 1);`).run();
+      await db.prepare(`INSERT INTO inventory (product_id, item_data) VALUES 
+        (2, 'https://lovable.dev/redeem/LOV-300-KEY-001'),
+        (2, 'https://lovable.dev/redeem/LOV-300-KEY-002'),
+        (3, 'User: nord_user@mail.com | Pass: Nord#2026');`).run();
+    }
+    isDbInitialized = true;
+  } catch (err) {
+    console.error("ensureDbReady error:", err);
   }
+}
+
+async function setupDatabase(db) {
+  isDbInitialized = false;
+  await ensureDbReady(db);
+}
+
+// Safety & Utility Helpers
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(id));
 }
 
 // ====================================================================
 // Telegram API Helpers
 // ====================================================================
 async function callTg(env, method, payload) {
-  if (!env.BOT_TOKEN) return { ok: false };
+  if (!env.BOT_TOKEN) return { ok: false, error: "BOT_TOKEN missing" };
   try {
     const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
     });
-    return await res.json();
-  } catch (e) { return { ok: false, error: e.message }; }
+    const data = await res.json();
+    if (!data.ok) {
+      console.error(`Telegram API error in ${method}:`, JSON.stringify(data));
+    }
+    return data;
+  } catch (e) {
+    console.error(`Telegram API network error in ${method}:`, e.message);
+    return { ok: false, error: e.message };
+  }
 }
 async function sendMsg(env, chatId, text, keyboard = null) {
   const p = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
@@ -193,14 +229,24 @@ async function sendMsg(env, chatId, text, keyboard = null) {
 async function editMsg(env, chatId, messageId, text, keyboard = null) {
   const p = { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", disable_web_page_preview: true };
   if (keyboard) p.reply_markup = { inline_keyboard: keyboard };
-  return await callTg(env, "editMessageText", p);
+  const res = await callTg(env, "editMessageText", p);
+  if (!res || !res.ok) {
+    const desc = (res && res.description) || "";
+    if (desc.includes("message is not modified")) return res;
+    return await sendMsg(env, chatId, text, keyboard);
+  }
+  return res;
 }
-async function ansCb(env, id, text, showAlert = false) {
-  return await callTg(env, "answerCallbackQuery", { callback_query_id: id, text, show_alert: showAlert });
+async function ansCb(env, id, text = null, showAlert = false) {
+  const p = { callback_query_id: id };
+  if (text) { p.text = text; p.show_alert = showAlert; }
+  return await callTg(env, "answerCallbackQuery", p);
 }
 async function getSetting(env, key, defVal) {
-  const r = await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first();
-  return (r && r.value !== undefined && r.value !== null) ? r.value : defVal;
+  try {
+    const r = await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first();
+    return (r && r.value !== undefined && r.value !== null) ? r.value : defVal;
+  } catch (_) { return defVal; }
 }
 async function clearAdminState(env, id) {
   await env.DB.prepare("DELETE FROM admin_states WHERE user_id = ?").bind(id).run();
@@ -261,7 +307,7 @@ async function verifyBscUsdtTx(env, txHash, expectedUsd) {
       return { success: false, reason: "tx_failed", message: "Transaction failed or reverted on the blockchain." };
     }
 
-    // USDT on BSC Contract: 0x55d398326f99059ff775485246999027b3197955
+    // USDT on BSC Contract: 0x55d398326f99059ff775485246999027B3197955
     const usdtContract = "0x55d398326f99059ff775485246999027b3197955".toLowerCase();
     const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
@@ -388,8 +434,8 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
       await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(orderQty, order.product_id).run();
     }
     await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${creds}</code></blockquote>`, [
-      [{ text: "📦 View Orders", callback_data: "my_orders", style: "success" }],
-      [{ text: "🛒 Continue Shopping", callback_data: "shop", style: "success" }]
+      [{ text: "📦 View Orders", callback_data: "my_orders" }],
+      [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
     await sendMsg(env, env.ADMIN_ID, `✅ <b>Order #${orderId} Auto-Verified & Delivered via API!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
     await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
@@ -406,8 +452,8 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
       lines.push(it.item_data);
     }
     await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${lines.join("\n\n")}</code></blockquote>`, [
-      [{ text: "📦 View Orders", callback_data: "my_orders", style: "success" }],
-      [{ text: "🛒 Continue Shopping", callback_data: "shop", style: "success" }]
+      [{ text: "📦 View Orders", callback_data: "my_orders" }],
+      [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
     await sendMsg(env, env.ADMIN_ID, `✅ <b>Order #${orderId} Auto-Verified & Delivered from Stock!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
     await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
@@ -428,7 +474,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   if (prod.is_external === 1) {
     if ((prod.api_stock || 0) < qty) {
       await sendMsg(env, chatId, `❌ <b>Product is currently out of stock!</b>\nYou can pre-order and you will be notified the instant it's restocked!`, [
-        [{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}`, style: "danger" }]
+        [{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]
       ]);
       return;
     }
@@ -442,8 +488,8 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     if (apiResult.success) await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(qty, prod.id).run();
 
     await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${prod.name}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${creds}</code></blockquote>`, [
-      [{ text: "📦 View Orders", callback_data: "my_orders", style: "success" }],
-      [{ text: "🛒 Continue Shopping", callback_data: "shop", style: "success" }]
+      [{ text: "📦 View Orders", callback_data: "my_orders" }],
+      [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
     await processReferralCommission(env, chatId, totalUsd, prod.name);
     return;
@@ -453,7 +499,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   const { results: items } = await env.DB.prepare("SELECT * FROM inventory WHERE product_id = ? AND is_sold = 0 LIMIT ?").bind(prod.id, qty).all();
   if (!items || items.length < qty) {
     await sendMsg(env, chatId, `❌ <b>Insufficient Stock!</b>\nOnly ${items ? items.length : 0} item(s) available. You can pre-order!`, [
-      [{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}`, style: "danger" }]
+      [{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]
     ]);
     return;
   }
@@ -469,8 +515,8 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   }
 
   await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${prod.name}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${itemStrings.join("\n\n")}</code></blockquote>`, [
-    [{ text: "📦 View Orders", callback_data: "my_orders", style: "success" }],
-    [{ text: "🛒 Continue Shopping", callback_data: "shop", style: "success" }]
+    [{ text: "📦 View Orders", callback_data: "my_orders" }],
+    [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
   ]);
   await processReferralCommission(env, chatId, totalUsd, prod.name);
 }
@@ -510,13 +556,15 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
     `Exchange Rate: <b>1 USD = ${rate} BDT</b>\n\n` +
     `${promptDetails}`;
 
-  await editMsg(env, chatId, messageId, depPrompt, [[{ text: "◀️ Back to Deposit", callback_data: "deposit", style: "danger" }]]);
+  await editMsg(env, chatId, messageId, depPrompt, [[{ text: "◀️ Back to Deposit", callback_data: "deposit" }]]);
 }
 
 // ====================================================================
 // Telegram Update Processor
 // ====================================================================
-async function handleUpdate(update, env, originUrl = "") {
+async function handleUpdate(update, env, originUrl = "", ctx = null) {
+  await ensureDbReady(env.DB);
+
   // 1. Text Messages Handler
   if (update.message) {
     const msg = update.message;
@@ -626,7 +674,7 @@ async function handleUpdate(update, env, originUrl = "") {
             await env.DB.prepare("UPDATE orders SET trx_id = ? WHERE id = ?").bind(cleanText, orderId).run();
             await sendMsg(env, chatId, `✅ <b>Payment Details Received!</b>\n\nOrder ID: #${orderId}\nMethod: <b>${order.payment_method}</b>\nTransaction ID: <code>${cleanText}</code>\n\nOur team is verifying your payment. Your product will be delivered automatically upon confirmation.`);
             await sendMsg(env, env.ADMIN_ID, `🚨 <b>New Order Payment Verification!</b>\n\nOrder ID: #${order.id}\nProduct: <b>${order.product_name}</b> (${order.quantity || 1} items)\nMethod: <b>${order.payment_method}</b>\nAmount: <b>$${order.amount_usd} USD (৳${order.amount_bdt} BDT)</b>\nTrxID: <code>${cleanText}</code>\nCustomer: ${order.username} (ID: <code>${order.user_id}</code>)`, [
-              [{ text: "✅ Approve Order", callback_data: `admin_approve_${orderId}`, style: "success" }, { text: "❌ Reject Order", callback_data: `admin_reject_${orderId}`, style: "danger" }]
+              [{ text: "✅ Approve Order", callback_data: `admin_approve_${orderId}` }, { text: "❌ Reject Order", callback_data: `admin_reject_${orderId}` }]
             ]);
             return;
           }
@@ -657,7 +705,7 @@ async function handleUpdate(update, env, originUrl = "") {
               const u = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
 
               await sendMsg(env, chatId, `🎉 <b>Deposit Verified & Credited Automatically!</b>\n\nDeposit ID: #${depId}\nCredited: <b>+$${creditedUsd.toFixed(2)} USDT (≈ ৳${creditedBdt} BDT)</b>\nNew Wallet Balance: <b>$${u.balance_usd.toFixed(2)} USD</b>`, [
-                [{ text: "🛒 Open Shop", callback_data: "shop", style: "success" }]
+                [{ text: "🛒 Open Shop", callback_data: "shop" }]
               ]);
               await sendMsg(env, env.ADMIN_ID, `✅ <b>BEP20 Deposit #${depId} Auto-Credited!</b>\nUser: ${username} (ID: <code>${chatId}</code>)\nAmount: $${creditedUsd.toFixed(2)} USDT\nTxHash: <code>${cleanText}</code>`);
               return;
@@ -681,7 +729,7 @@ async function handleUpdate(update, env, originUrl = "") {
               const u = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
 
               await sendMsg(env, chatId, `🎉 <b>Binance Deposit Verified & Credited Automatically!</b>\n\nDeposit ID: #${depId}\nCredited: <b>+$${creditedUsd.toFixed(2)} USD (≈ ৳${creditedBdt} BDT)</b>\nNew Wallet Balance: <b>$${u.balance_usd.toFixed(2)} USD</b>`, [
-                [{ text: "🛒 Open Shop", callback_data: "shop", style: "success" }]
+                [{ text: "🛒 Open Shop", callback_data: "shop" }]
               ]);
               await sendMsg(env, env.ADMIN_ID, `✅ <b>Binance Deposit #${depId} Auto-Credited!</b>\nUser: ${username} (ID: <code>${chatId}</code>)\nAmount: $${creditedUsd.toFixed(2)} USD\nOrder ID: <code>${cleanText}</code>`);
               return;
@@ -693,8 +741,8 @@ async function handleUpdate(update, env, originUrl = "") {
 
         await sendMsg(env, chatId, `✅ <b>Deposit Submission Received!</b>\n\nTransaction Details: <code>${cleanText}</code>\n\nAdmin will verify the transaction and credit your wallet balance shortly.`);
         await sendMsg(env, env.ADMIN_ID, `🚨 <b>New Wallet Deposit Verification!</b>\n\nDeposit ID: #${depId || "N/A"}\nCustomer: ${username} (ID: <code>${chatId}</code>)\nMethod: <b>${dRow ? dRow.method : "Payment"}</b>\nAmount: $${dRow ? dRow.amount_usd : "0"} USD\nTrxID: <code>${cleanText}</code>`, [
-          depId ? [{ text: "✅ Approve Deposit", callback_data: `adm_apprdep_${depId}`, style: "success" }, { text: "❌ Reject Deposit", callback_data: `adm_rejdep_${depId}`, style: "danger" }]
-                : [{ text: "➕ Credit User", callback_data: `adm_credit_${chatId}`, style: "success" }]
+          depId ? [{ text: "✅ Approve Deposit", callback_data: `adm_apprdep_${depId}` }, { text: "❌ Reject Deposit", callback_data: `adm_rejdep_${depId}` }]
+                : [{ text: "➕ Credit User", callback_data: `adm_credit_${chatId}` }]
         ]);
         return;
       }
@@ -702,7 +750,15 @@ async function handleUpdate(update, env, originUrl = "") {
 
     // Standard Navigation Commands
     if (text.startsWith("/start") || text === "/home") { await sendHomeDashboard(env, chatId, user, firstName); return; }
-    if (text === "/shop") { await sendProductsDirectly(env, chatId); return; }
+    if (text === "/shop") {
+      try {
+        await sendProductsDirectly(env, chatId);
+      } catch (e) {
+        console.error("Error in /shop command:", e);
+        await sendMsg(env, chatId, `⚠️ <b>Error opening shop:</b> <code>${escapeHtml(e.message)}</code>`);
+      }
+      return;
+    }
     if (text === "/deposit") { await sendDeposit(env, chatId); return; }
     if (text === "/profile") { await sendProfile(env, chatId, user); return; }
     if (text === "/orders") { await sendOrders(env, chatId); return; }
@@ -721,6 +777,9 @@ async function handleUpdate(update, env, originUrl = "") {
     const data = cb.data;
     const chatId = cb.message.chat.id;
     const messageId = cb.message.message_id;
+
+    // Immediately acknowledge callback query to clear button loading spinner
+    ansCb(env, cb.id).catch(() => {});
 
     let user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
     const firstName = cb.from.first_name || "Customer";
@@ -746,7 +805,15 @@ async function handleUpdate(update, env, originUrl = "") {
 
     // Navigation Callbacks
     if (data === "home") { await clearAdminState(env, chatId); await sendHomeDashboard(env, chatId, user, firstName, messageId); return; }
-    if (data === "shop") { await sendProductsDirectly(env, chatId, messageId); return; }
+    if (data === "shop") {
+      try {
+        await sendProductsDirectly(env, chatId, messageId);
+      } catch (e) {
+        console.error("Error in shop callback:", e);
+        await sendMsg(env, chatId, `⚠️ <b>Error opening shop:</b> <code>${escapeHtml(e.message)}</code>`);
+      }
+      return;
+    }
     if (data === "profile") { await sendProfile(env, chatId, user, messageId); return; }
     if (data === "deposit") { await sendDeposit(env, chatId, messageId); return; }
     if (data === "my_orders") { await sendOrders(env, chatId, messageId); return; }
@@ -762,11 +829,11 @@ async function handleUpdate(update, env, originUrl = "") {
         const existingPo = await env.DB.prepare("SELECT id FROM preorders WHERE user_id = ? AND product_id = ? AND status = 'pending'").bind(chatId, prodId).first();
         if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, status) VALUES (?, ?, ?, 'pending')").bind(chatId, username, prodId).run();
         await editMsg(env, chatId, messageId, `⏳ <b>Pre-Order Confirmed!</b>\n\nProduct: <b>${prod.name}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your pre-order is registered! As soon as new stock is added or synced via API, you will receive an instant notification with a direct purchase link. ❤️`, [
-          [{ text: "🛒 Continue Shopping", callback_data: "shop", style: "success" }],
-          [{ text: "🏠 Main Menu", callback_data: "home", style: "success" }]
+          [{ text: "🛒 Continue Shopping", callback_data: "shop" }],
+          [{ text: "🏠 Main Menu", callback_data: "home" }]
         ]);
         await sendMsg(env, env.ADMIN_ID, `🚨 <b>New Pre-Order Placed!</b>\n\nCustomer: ${username} (ID: <code>${chatId}</code>)\nProduct: <b>${prod.name}</b>\nPrice: $${prod.price_usd} USD\n\n⚠️ Please restock this product using Admin Panel or Provider API!`, [
-          [{ text: `➕ Add Stock for ${prod.name}`, callback_data: `adm_addstock_${prod.id}`, style: "success" }]
+          [{ text: `➕ Add Stock for ${prod.name}`, callback_data: `adm_addstock_${prod.id}` }]
         ]);
       }
       return;
@@ -788,7 +855,7 @@ async function handleUpdate(update, env, originUrl = "") {
       const prodId = data.replace("custom_qty_", "");
       await env.DB.prepare("INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, 'awaiting_custom_qty', ?)").bind(chatId, prodId).run();
       await editMsg(env, chatId, messageId, `✏️ <b>Enter Custom Quantity:</b>\n\nPlease type the exact number of items you wish to purchase (e.g. <code>5</code>):`, [
-        [{ text: "◀️ Cancel", callback_data: `prod_${prodId}`, style: "danger" }]
+        [{ text: "◀️ Cancel", callback_data: `prod_${prodId}` }]
       ]);
       return;
     }
@@ -824,9 +891,9 @@ async function handleUpdate(update, env, originUrl = "") {
           `• Shortage: <b>$${diff.toFixed(2)} USD (≈ ৳${diffBdt} BDT)</b>\n\n` +
           `Please deposit funds to your wallet to complete this purchase, or use Direct Payment below:`,
           [
-            [{ text: `💳 Deposit $${diff.toFixed(2)} USD to Wallet`, callback_data: `dep_needed_${diff.toFixed(2)}`, style: "success" }],
-            [{ text: `⚡ Switch to Direct Payment`, callback_data: `direct_pay_${prod.id}_${qty}`, style: "success" }],
-            [{ text: "◀️ Back to Quantity", callback_data: `buynow_${prod.id}_${qty}`, style: "danger" }]
+            [{ text: `💳 Deposit $${diff.toFixed(2)} USD to Wallet`, callback_data: `dep_needed_${diff.toFixed(2)}` }],
+            [{ text: `⚡ Switch to Direct Payment`, callback_data: `direct_pay_${prod.id}_${qty}` }],
+            [{ text: "◀️ Back to Quantity", callback_data: `buynow_${prod.id}_${qty}` }]
           ]
         );
         return;
@@ -856,11 +923,11 @@ async function handleUpdate(update, env, originUrl = "") {
         `Total Payable: <b>$${totalUsd.toFixed(2)} USD (≈ ৳${totalBdt} BDT)</b>\n\n` +
         `Choose your preferred payment method below:`,
         [
-          [{ text: "🟢 bKash", callback_data: `pay_bkash_${prod.id}_${qty}`, style: "success" }, { text: "🟠 Nagad", callback_data: `pay_nagad_${prod.id}_${qty}`, style: "success" }],
-          [{ text: "🟣 Rocket", callback_data: `pay_rocket_${prod.id}_${qty}`, style: "success" }],
-          [{ text: "🟡 Binance Pay (Auto Verify)", callback_data: `pay_binance_${prod.id}_${qty}`, style: "success" }, { text: "🔵 BEP20 USDT (Auto Verify)", callback_data: `pay_bep20_${prod.id}_${qty}`, style: "success" }],
-          [{ text: `👛 Wallet Pay (Bal: $${userBal.toFixed(2)})`, callback_data: `wallet_pay_check_${prod.id}_${qty}`, style: "success" }],
-          [{ text: "◀️ Back to Quantity", callback_data: `buynow_${prod.id}_${qty}`, style: "danger" }]
+          [{ text: "🟢 bKash", callback_data: `pay_bkash_${prod.id}_${qty}` }, { text: "🟠 Nagad", callback_data: `pay_nagad_${prod.id}_${qty}` }],
+          [{ text: "🟣 Rocket", callback_data: `pay_rocket_${prod.id}_${qty}` }],
+          [{ text: "🟡 Binance Pay (Auto Verify)", callback_data: `pay_binance_${prod.id}_${qty}` }, { text: "🔵 BEP20 USDT (Auto Verify)", callback_data: `pay_bep20_${prod.id}_${qty}` }],
+          [{ text: `👛 Wallet Pay (Bal: $${userBal.toFixed(2)})`, callback_data: `wallet_pay_check_${prod.id}_${qty}` }],
+          [{ text: "◀️ Back to Quantity", callback_data: `buynow_${prod.id}_${qty}` }]
         ]
       );
       return;
@@ -916,7 +983,7 @@ async function handleUpdate(update, env, originUrl = "") {
         `${customInstructions}`;
 
       await editMsg(env, chatId, messageId, checkoutText, [
-        [{ text: "◀️ Cancel Order", callback_data: `prod_${prod.id}`, style: "danger" }]
+        [{ text: "◀️ Cancel Order", callback_data: `prod_${prod.id}` }]
       ]);
       return;
     }
@@ -929,6 +996,7 @@ async function handleUpdate(update, env, originUrl = "") {
       const needed = isNeeded ? parseFloat(data.replace("dep_needed_", "")) || 5.00 : 0;
 
       if (isNeeded) {
+        // Show deposit method selection with pre-filled needed amount
         const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
         const bdtNeeded = Math.round(needed * rate);
         await editMsg(env, chatId, messageId,
@@ -936,10 +1004,10 @@ async function handleUpdate(update, env, originUrl = "") {
           `• Required Amount: <b>$${needed.toFixed(2)} USD (≈ ৳${bdtNeeded} BDT)</b>\n\n` +
           `Select your payment method below to get deposit instructions:`,
           [
-            [{ text: "🟢 bKash", callback_data: `dep_setmeth_bkash_${needed.toFixed(2)}`, style: "success" }, { text: "🟠 Nagad", callback_data: `dep_setmeth_nagad_${needed.toFixed(2)}`, style: "success" }],
-            [{ text: "🟣 Rocket", callback_data: `dep_setmeth_rocket_${needed.toFixed(2)}`, style: "success" }],
-            [{ text: "🟡 Binance Pay (Auto)", callback_data: `dep_setmeth_binance_${needed.toFixed(2)}`, style: "success" }, { text: "🔵 BEP20 USDT (Auto)", callback_data: `dep_setmeth_bep20_${needed.toFixed(2)}`, style: "success" }],
-            [{ text: "◀️ Cancel", callback_data: "home", style: "danger" }]
+            [{ text: "🟢 bKash", callback_data: `dep_setmeth_bkash_${needed.toFixed(2)}` }, { text: "🟠 Nagad", callback_data: `dep_setmeth_nagad_${needed.toFixed(2)}` }],
+            [{ text: "🟣 Rocket", callback_data: `dep_setmeth_rocket_${needed.toFixed(2)}` }],
+            [{ text: "🟡 Binance Pay (Auto)", callback_data: `dep_setmeth_binance_${needed.toFixed(2)}` }, { text: "🔵 BEP20 USDT (Auto)", callback_data: `dep_setmeth_bep20_${needed.toFixed(2)}` }],
+            [{ text: "◀️ Cancel", callback_data: "home" }]
           ]
         );
         return;
@@ -968,8 +1036,8 @@ async function handleUpdate(update, env, originUrl = "") {
 
     if (data === "adm_stock_menu") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `📦 ${p.name} (${p.stock_qty || 0})`, callback_data: `adm_addstock_${p.id}`, style: p.stock_qty > 0 ? "success" : "danger" }]);
-      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel", style: "success" }]);
+      const buttons = prods.map(p => [{ text: `${(p.stock_qty || 0) > 0 ? "🟢" : "🔴"} ${p.name} (${p.stock_qty || 0})`, callback_data: `adm_addstock_${p.id}` }]);
+      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `📦 <b>Select Product to Add Stock:</b>\nClick any product below:`, buttons);
       return;
     }
@@ -979,15 +1047,15 @@ async function handleUpdate(update, env, originUrl = "") {
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_stock', ?)").bind(chatId, prodId).run();
       await editMsg(env, chatId, messageId, `📥 <b>Add Stock for: ${prod ? prod.name : "Product"}</b>\n\nPlease send the license key or account credentials below.\n<i>💡 You can send multiple items separated by new lines!</i>`, [
-        [{ text: "❌ Cancel", callback_data: "adm_stock_menu", style: "danger" }]
+        [{ text: "❌ Cancel", callback_data: "adm_stock_menu" }]
       ]);
       return;
     }
 
     if (data === "adm_price_menu") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `${p.name} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_setprice_${p.id}`, style: "success" }]);
-      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel", style: "success" }]);
+      const buttons = prods.map(p => [{ text: `${p.name} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_setprice_${p.id}` }]);
+      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `💰 <b>Select Product to Set Custom Price or Profit Margin:</b>\n\nClick any product below:`, buttons);
       return;
     }
@@ -1002,20 +1070,20 @@ async function handleUpdate(update, env, originUrl = "") {
       const costInfo = (prod.is_external && prod.cost_price_usd > 0) ? `\n• Provider Cost: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>` : "";
       await editMsg(env, chatId, messageId, `💰 <b>Set Custom Price for: ${prod ? prod.name : "Product"}</b>\n${costInfo}\n• Current Price: <b>$${prod.price_usd.toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n• Live Stock: <b>${liveStock} items</b>\n\n👉 <b>Tap a Profit Margin % button below</b> OR <b>type a custom price / margin in chat</b>:`, [
         [
-          { text: "+10% Profit", callback_data: `adm_quickmargin_${prod.id}_10`, style: "success" },
-          { text: "+20% Profit", callback_data: `adm_quickmargin_${prod.id}_20`, style: "success" },
-          { text: "+25% Profit", callback_data: `adm_quickmargin_${prod.id}_25`, style: "success" }
+          { text: "+10% Profit", callback_data: `adm_quickmargin_${prod.id}_10` },
+          { text: "+20% Profit", callback_data: `adm_quickmargin_${prod.id}_20` },
+          { text: "+25% Profit", callback_data: `adm_quickmargin_${prod.id}_25` }
         ],
         [
-          { text: "+30% Profit", callback_data: `adm_quickmargin_${prod.id}_30`, style: "success" },
-          { text: "+40% Profit", callback_data: `adm_quickmargin_${prod.id}_40`, style: "success" },
-          { text: "+50% Profit", callback_data: `adm_quickmargin_${prod.id}_50`, style: "success" }
+          { text: "+30% Profit", callback_data: `adm_quickmargin_${prod.id}_30` },
+          { text: "+40% Profit", callback_data: `adm_quickmargin_${prod.id}_40` },
+          { text: "+50% Profit", callback_data: `adm_quickmargin_${prod.id}_50` }
         ],
         [
-          { text: "+75% Profit", callback_data: `adm_quickmargin_${prod.id}_75`, style: "success" },
-          { text: "+100% (2x)", callback_data: `adm_quickmargin_${prod.id}_100`, style: "success" }
+          { text: "+75% Profit", callback_data: `adm_quickmargin_${prod.id}_75` },
+          { text: "+100% (2x)", callback_data: `adm_quickmargin_${prod.id}_100` }
         ],
-        [{ text: "❌ Cancel", callback_data: "adm_price_menu", style: "danger" }]
+        [{ text: "❌ Cancel", callback_data: "adm_price_menu" }]
       ]);
       return;
     }
@@ -1036,8 +1104,8 @@ async function handleUpdate(update, env, originUrl = "") {
 
       const profitUsd = (newUsd - baseCost).toFixed(2);
       await editMsg(env, chatId, messageId, `✅ <b>Custom Price Updated!</b>\n\nProduct: <b>${prod.name}</b>\n• Profit Markup: <b>+${marginPct}%</b>\n• Base Cost: <b>$${baseCost.toFixed(2)} USD</b>\n• New Price: <b>$${newUsd.toFixed(2)} USD</b> (≈ ৳${newBdt} BDT)\n• Net Profit: <b>+$${profitUsd} USD</b> per sale! 🚀`, [
-        [{ text: "💰 Set Another Price", callback_data: "adm_price_menu", style: "success" }],
-        [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
+        [{ text: "💰 Set Another Price", callback_data: "adm_price_menu" }],
+        [{ text: "👑 Admin Panel", callback_data: "admin_panel" }]
       ]);
       return;
     }
@@ -1045,26 +1113,26 @@ async function handleUpdate(update, env, originUrl = "") {
     if (data === "adm_add_product") {
       await editMsg(env, chatId, messageId, `➕ <b>Add New Product — Step 1/4: Choose an Icon</b>\n\nSelect an attractive icon for this product from the presets below, or choose 'Skip' to type your own:`, [
         [
-          { text: "🤖 AI Tool", callback_data: "adm_newicon_🤖", style: "success" },
-          { text: "🍿 Streaming", callback_data: "adm_newicon_🍿", style: "success" },
-          { text: "🎵 Music", callback_data: "adm_newicon_🎵", style: "success" }
+          { text: "🤖 AI Tool", callback_data: "adm_newicon_🤖" },
+          { text: "🍿 Streaming", callback_data: "adm_newicon_🍿" },
+          { text: "🎵 Music", callback_data: "adm_newicon_🎵" }
         ],
         [
-          { text: "🛡️ VPN", callback_data: "adm_newicon_🛡️", style: "success" },
-          { text: "🎨 Design", callback_data: "adm_newicon_🎨", style: "success" },
-          { text: "🔑 License", callback_data: "adm_newicon_🔑", style: "success" }
+          { text: "🛡️ VPN", callback_data: "adm_newicon_🛡️" },
+          { text: "🎨 Design", callback_data: "adm_newicon_🎨" },
+          { text: "🔑 License", callback_data: "adm_newicon_🔑" }
         ],
         [
-          { text: "📺 OTT / Video", callback_data: "adm_newicon_📺", style: "success" },
-          { text: "🎓 Education", callback_data: "adm_newicon_🎓", style: "success" },
-          { text: "💎 Premium", callback_data: "adm_newicon_💎", style: "success" }
+          { text: "📺 OTT / Video", callback_data: "adm_newicon_📺" },
+          { text: "🎓 Education", callback_data: "adm_newicon_🎓" },
+          { text: "💎 Premium", callback_data: "adm_newicon_💎" }
         ],
         [
-          { text: "⚡ General", callback_data: "adm_newicon_⚡", style: "success" },
-          { text: "🛍️ Digital", callback_data: "adm_newicon_🛍️", style: "success" },
-          { text: "⏩ Skip / Type Own", callback_data: "adm_newicon_NONE", style: "success" }
+          { text: "⚡ General", callback_data: "adm_newicon_⚡" },
+          { text: "🛍️ Digital", callback_data: "adm_newicon_🛍️" },
+          { text: "⏩ Skip / Type Own", callback_data: "adm_newicon_NONE" }
         ],
-        [{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]
+        [{ text: "❌ Cancel", callback_data: "admin_panel" }]
       ]);
       return;
     }
@@ -1074,15 +1142,15 @@ async function handleUpdate(update, env, originUrl = "") {
       const iconData = { icon: icon === "NONE" ? "" : icon };
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_prod_name', ?)").bind(chatId, JSON.stringify(iconData)).run();
       await editMsg(env, chatId, messageId, `➕ <b>Add Product — Step 2/4: Product Name</b>\n\nSelected Icon: <b>${icon === "NONE" ? "None / Custom" : icon}</b>\n\nPlease enter the <b>Name</b> of the product:\n<i>(Example: Amazon Prime 6 Months)</i>`, [
-        [{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]
+        [{ text: "❌ Cancel", callback_data: "admin_panel" }]
       ]);
       return;
     }
 
     if (data === "adm_manage_products") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `${p.name} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_prod_details_${p.id}`, style: p.stock_qty > 0 ? "success" : "danger" }]);
-      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel", style: "success" }]);
+      const buttons = prods.map(p => [{ text: `${(p.stock_qty || 0) > 0 ? "🟢" : "🔴"} ${p.name} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_prod_details_${p.id}` }]);
+      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `📋 <b>All Store Products:</b>\nClick any product to view details or edit:`, buttons);
       return;
     }
@@ -1100,10 +1168,10 @@ async function handleUpdate(update, env, originUrl = "") {
         `• Live Stock: <b>${liveStock} items</b>\n\n📝 <b>Description:</b>\n${prod.description}`;
 
       const buttons = [
-        [{ text: "💰 Set Custom Price", callback_data: `adm_setprice_${prod.id}`, style: "success" }],
-        prod.is_external ? [] : [{ text: "➕ Add Stock", callback_data: `adm_addstock_${prod.id}`, style: "success" }],
-        [{ text: "🗑️ Delete Product", callback_data: `adm_del_prod_${prod.id}`, style: "danger" }],
-        [{ text: "🔙 Back", callback_data: "adm_manage_products", style: "success" }]
+        [{ text: "💰 Set Custom Price", callback_data: `adm_setprice_${prod.id}` }],
+        prod.is_external ? [] : [{ text: "➕ Add Stock", callback_data: `adm_addstock_${prod.id}` }],
+        [{ text: "🗑️ Delete Product", callback_data: `adm_del_prod_${prod.id}` }],
+        [{ text: "🔙 Back", callback_data: "adm_manage_products" }]
       ].filter(r => r.length > 0);
       await editMsg(env, chatId, messageId, text, buttons);
       return;
@@ -1111,7 +1179,7 @@ async function handleUpdate(update, env, originUrl = "") {
 
     if (data.startsWith("adm_del_prod_")) {
       await env.DB.prepare("UPDATE products SET is_active = 0 WHERE id = ?").bind(data.replace("adm_del_prod_", "")).run();
-      await editMsg(env, chatId, messageId, `✅ Product removed from store!`, [[{ text: "🔙 Products List", callback_data: "adm_manage_products", style: "success" }]]);
+      await editMsg(env, chatId, messageId, `✅ Product removed from store!`, [[{ text: "🔙 Products List", callback_data: "adm_manage_products" }]]);
       return;
     }
 
@@ -1120,7 +1188,7 @@ async function handleUpdate(update, env, originUrl = "") {
       let poText = `⏳ <b>Pending Pre-Orders:</b>\n\n`;
       if (!preorders || preorders.length === 0) poText += `There are no pending pre-orders.`;
       else preorders.forEach(po => { poText += `🔹 #${po.id} — <b>${po.product_name}</b>\nUser: ${po.username} (ID: <code>${po.user_id}</code>)\nDate: ${po.created_at}\n\n`; });
-      await editMsg(env, chatId, messageId, poText, [[{ text: "🔙 Admin Panel", callback_data: "admin_panel", style: "success" }]]);
+      await editMsg(env, chatId, messageId, poText, [[{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]]);
       return;
     }
 
@@ -1128,21 +1196,21 @@ async function handleUpdate(update, env, originUrl = "") {
     if (data === "adm_set_rate") {
       const currentRate = await getSetting(env, "usd_to_bdt_rate", "125");
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_rate', '')").bind(chatId).run();
-      await editMsg(env, chatId, messageId, `💱 <b>Set USD to BDT Rate:</b>\nCurrent: <b>1 USD = ${currentRate} BDT</b>\n\nEnter new exchange rate in BDT (e.g. <code>122</code>):`, [[{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]]);
+      await editMsg(env, chatId, messageId, `💱 <b>Set USD to BDT Rate:</b>\nCurrent: <b>1 USD = ${currentRate} BDT</b>\n\nEnter new exchange rate in BDT (e.g. <code>122</code>):`, [[{ text: "❌ Cancel", callback_data: "admin_panel" }]]);
       return;
     }
 
     if (data === "adm_set_ref_comm") {
       const currentPct = await getSetting(env, "referral_commission_percent", "5");
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_ref_comm', '')").bind(chatId).run();
-      await editMsg(env, chatId, messageId, `🎁 <b>Set Referral Commission:</b>\nCurrent: <b>${currentPct}%</b> on purchases.\n\nEnter new percentage (e.g. <code>10</code>):`, [[{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]]);
+      await editMsg(env, chatId, messageId, `🎁 <b>Set Referral Commission:</b>\nCurrent: <b>${currentPct}%</b> on purchases.\n\nEnter new percentage (e.g. <code>10</code>):`, [[{ text: "❌ Cancel", callback_data: "admin_panel" }]]);
       return;
     }
 
     if (data === "adm_set_support") {
       const currentSup = await getSetting(env, "support_admin", "@fojlaybd");
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_support_contact', '')").bind(chatId).run();
-      await editMsg(env, chatId, messageId, `📞 <b>Set Support Contact:</b>\nCurrent: <b>${currentSup}</b>\n\nEnter Admin Telegram Username (e.g. <code>@fojlaybd</code>) or Chat ID:`, [[{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]]);
+      await editMsg(env, chatId, messageId, `📞 <b>Set Support Contact:</b>\nCurrent: <b>${currentSup}</b>\n\nEnter Admin Telegram Username (e.g. <code>@fojlaybd</code>) or Chat ID:`, [[{ text: "❌ Cancel", callback_data: "admin_panel" }]]);
       return;
     }
 
@@ -1152,23 +1220,23 @@ async function handleUpdate(update, env, originUrl = "") {
       const group = await getSetting(env, "force_group_username", "");
       const isActive = (channel || group);
       await editMsg(env, chatId, messageId, `🔒 <b>Mandatory Channel & Group Membership (Force Join):</b>\n\nStatus: ${isActive ? "🟢 <b>ACTIVE (Mandatory Join Enabled)</b>" : "⚪ <b>DISABLED (Open Access)</b>"}\n\n• <b>Announcement Channel:</b> ${channel ? `<code>${channel}</code>` : "<i>Not Set</i>"}\n• <b>Community Chat Group:</b> ${group ? `<code>${group}</code>` : "<i>Not Set</i>"}\n\n<blockquote>💡 Make sure your bot is an Administrator in both the channel and group so it can verify members!</blockquote>`, [
-        [{ text: "📢 Set Channel Username / Link", callback_data: "adm_set_force_channel", style: "success" }],
-        [{ text: "💬 Set Group Username / Link", callback_data: "adm_set_force_group", style: "success" }],
-        isActive ? [{ text: "❌ Disable Force Join", callback_data: "adm_disable_force", style: "danger" }] : [],
-        [{ text: "🔙 Admin Panel", callback_data: "admin_panel", style: "success" }]
+        [{ text: "📢 Set Channel Username / Link", callback_data: "adm_set_force_channel" }],
+        [{ text: "💬 Set Group Username / Link", callback_data: "adm_set_force_group" }],
+        isActive ? [{ text: "❌ Disable Force Join", callback_data: "adm_disable_force" }] : [],
+        [{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]
       ].filter(r => r.length > 0));
       return;
     }
 
     if (data === "adm_set_force_channel") {
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_force_channel', '')").bind(chatId).run();
-      await editMsg(env, chatId, messageId, `📢 <b>Set Announcement Channel:</b>\n\nEnter the username (e.g. <code>@MyStoreChannel</code>) or link:\n<i>(Make sure the bot is an Admin in this channel!)</i>`, [[{ text: "❌ Cancel", callback_data: "adm_force_menu", style: "danger" }]]);
+      await editMsg(env, chatId, messageId, `📢 <b>Set Announcement Channel:</b>\n\nEnter the username (e.g. <code>@MyStoreChannel</code>) or link:\n<i>(Make sure the bot is an Admin in this channel!)</i>`, [[{ text: "❌ Cancel", callback_data: "adm_force_menu" }]]);
       return;
     }
 
     if (data === "adm_set_force_group") {
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_force_group', '')").bind(chatId).run();
-      await editMsg(env, chatId, messageId, `💬 <b>Set Community Chat Group:</b>\n\nEnter the username (e.g. <code>@MyStoreGroup</code>) or link:\n<i>(Make sure the bot is an Admin in this group!)</i>`, [[{ text: "❌ Cancel", callback_data: "adm_force_menu", style: "danger" }]]);
+      await editMsg(env, chatId, messageId, `💬 <b>Set Community Chat Group:</b>\n\nEnter the username (e.g. <code>@MyStoreGroup</code>) or link:\n<i>(Make sure the bot is an Admin in this group!)</i>`, [[{ text: "❌ Cancel", callback_data: "adm_force_menu" }]]);
       return;
     }
 
@@ -1176,8 +1244,8 @@ async function handleUpdate(update, env, originUrl = "") {
       await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_channel_username', '')").run();
       await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_group_username', '')").run();
       await editMsg(env, chatId, messageId, `✅ <b>Force Join Disabled!</b>\nUsers can now use the bot freely.`, [
-        [{ text: "🔙 Force Join Menu", callback_data: "adm_force_menu", style: "success" }],
-        [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
+        [{ text: "🔙 Force Join Menu", callback_data: "adm_force_menu" }],
+        [{ text: "👑 Admin Panel", callback_data: "admin_panel" }]
       ]);
       return;
     }
@@ -1201,12 +1269,12 @@ async function handleUpdate(update, env, originUrl = "") {
 
       const apiText = `🔌 <b>Live External API Center</b>\n━━━━━━━━━━━━━━━━━━━━\n• <b>API Status:</b> ${statusText}\n• <b>Wallet:</b> <b>${balanceText}</b>\n• <b>Base URL:</b> <code>${apiUrl}</code>\n• <b>API Key:</b> <code>${apiKey ? apiKey.slice(0, 10) + "••••••••" : "Not Set"}</code>\n• <b>Profit Margin:</b> <b>${margin}%</b>\n• <b>Auto-Order:</b> <b>${autoOrder ? "✅ Enabled" : "⏸️ Disabled"}</b>\n• <b>Active Synced Products:</b> <b>${count} products (Live Stock Sync Enabled)</b>`;
       await editMsg(env, chatId, messageId, apiText, [
-        [{ text: "🔄 Sync Products Now", callback_data: "adm_sync_api", style: "success" }],
-        [{ text: "🔑 Set API Key", callback_data: "adm_set_api_key", style: "success" }, { text: "🔗 Set Base URL", callback_data: "adm_set_api_url", style: "success" }],
-        [{ text: `📈 Profit Margin (${margin}%)`, callback_data: "adm_set_api_margin", style: "success" }, { text: `🤖 Auto-Order: ${autoOrder ? "ON" : "OFF"}`, callback_data: "adm_toggle_auto_order", style: "success" }],
-        [{ text: "💰 Set Custom Prices", callback_data: "adm_price_menu", style: "success" }],
-        [{ text: "🧪 Test Demo API", callback_data: "adm_setup_demo_api", style: "success" }],
-        [{ text: "🔙 Admin Panel", callback_data: "admin_panel", style: "success" }]
+        [{ text: "🔄 Sync Products Now", callback_data: "adm_sync_api" }],
+        [{ text: "🔑 Set API Key", callback_data: "adm_set_api_key" }, { text: "🔗 Set Base URL", callback_data: "adm_set_api_url" }],
+        [{ text: `📈 Profit Margin (${margin}%)`, callback_data: "adm_set_api_margin" }, { text: `🤖 Auto-Order: ${autoOrder ? "ON" : "OFF"}`, callback_data: "adm_toggle_auto_order" }],
+        [{ text: "💰 Set Custom Prices", callback_data: "adm_price_menu" }],
+        [{ text: "🧪 Test Demo API", callback_data: "adm_setup_demo_api" }],
+        [{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]
       ]);
       return;
     }
@@ -1225,8 +1293,8 @@ async function handleUpdate(update, env, originUrl = "") {
       await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('external_api_key', 'vxr_live_demo_key_12345')").run();
       const syncResult = await syncExternalProducts(env, `${originUrl}/api/mock-provider`, "vxr_live_demo_key_12345", true);
       await editMsg(env, chatId, messageId, `🧪 <b>Demo API Connected & Products Synced!</b>\n\n${syncResult.message}`, [
-        [{ text: "🛒 Open Shop to Test", callback_data: "shop", style: "success" }],
-        [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
+        [{ text: "🛒 Open Shop to Test", callback_data: "shop" }],
+        [{ text: "👑 Admin Panel", callback_data: "admin_panel" }]
       ]);
       return;
     }
@@ -1235,8 +1303,8 @@ async function handleUpdate(update, env, originUrl = "") {
       await ansCb(env, cb.id, "⏳ Syncing live products from provider API...");
       const syncResult = await syncExternalProducts(env, null, null, true);
       await sendMsg(env, chatId, syncResult.success ? `🎉 <b>API Sync Successful!</b>\n\n${syncResult.message}` : `❌ <b>API Sync Failed</b>\n\n${syncResult.message}`, [
-        [{ text: "💰 Set Custom Prices", callback_data: "adm_price_menu", style: "success" }],
-        [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
+        [{ text: "💰 Set Custom Prices", callback_data: "adm_price_menu" }],
+        [{ text: "👑 Admin Panel", callback_data: "admin_panel" }]
       ]);
       return;
     }
@@ -1247,7 +1315,7 @@ async function handleUpdate(update, env, originUrl = "") {
       if (data === "adm_set_api_key") { stateName = "awaiting_api_key"; prompt = "Please enter your External API Key (e.g. <code>vxr_live_...</code>):"; }
       else if (data === "adm_set_api_margin") { stateName = "awaiting_api_margin"; prompt = "Please enter default profit margin % for synced products (e.g. <code>25</code>):"; }
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, ?, '')").bind(chatId, stateName).run();
-      await editMsg(env, chatId, messageId, `⚙️ <b>${prompt}</b>`, [[{ text: "❌ Cancel", callback_data: "adm_api_menu", style: "danger" }]]);
+      await editMsg(env, chatId, messageId, `⚙️ <b>${prompt}</b>`, [[{ text: "❌ Cancel", callback_data: "adm_api_menu" }]]);
       return;
     }
 
@@ -1261,11 +1329,11 @@ async function handleUpdate(update, env, originUrl = "") {
       const bep20 = await getSetting(env, "bep20_addr", "0x71C...YourAddress");
 
       await editMsg(env, chatId, messageId, `⚙️ <b>Payment Accounts & Auto-Verification Settings:</b>\n\n• bKash: <code>${bkash}</code>\n• Nagad: <code>${nagad}</code>\n• Rocket: <code>${rocket}</code>\n• Binance Pay ID: <code>${binance}</code>\n• Binance Auto-Verify: <b>${binanceAuto ? "🟢 Enabled (Instant Order ID Delivery)" : "⚪ Manual Verification"}</b>\n• BEP20 USDT (BSC): <code>${bep20}</code> <i>(Auto-verified via Blockchain)</i>`, [
-        [{ text: "✏️ Change bKash", callback_data: "adm_set_bkash", style: "success" }, { text: "✏️ Change Nagad", callback_data: "adm_set_nagad", style: "success" }],
-        [{ text: "✏️ Change Rocket", callback_data: "adm_set_rocket", style: "success" }, { text: "✏️ Change Binance Pay ID", callback_data: "adm_set_binance", style: "success" }],
-        [{ text: `🤖 Binance Auto-Verify: ${binanceAuto ? "ON" : "OFF"}`, callback_data: "adm_toggle_binance_auto", style: "success" }],
-        [{ text: "✏️ Change BEP20 Address", callback_data: "adm_set_bep20", style: "success" }],
-        [{ text: "🔙 Admin Panel", callback_data: "admin_panel", style: "success" }]
+        [{ text: "✏️ Change bKash", callback_data: "adm_set_bkash" }, { text: "✏️ Change Nagad", callback_data: "adm_set_nagad" }],
+        [{ text: "✏️ Change Rocket", callback_data: "adm_set_rocket" }, { text: "✏️ Change Binance Pay ID", callback_data: "adm_set_binance" }],
+        [{ text: `🤖 Binance Auto-Verify: ${binanceAuto ? "ON" : "OFF"}`, callback_data: "adm_toggle_binance_auto" }],
+        [{ text: "✏️ Change BEP20 Address", callback_data: "adm_set_bep20" }],
+        [{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]
       ]);
       return;
     }
@@ -1282,13 +1350,13 @@ async function handleUpdate(update, env, originUrl = "") {
     if (data.startsWith("adm_set_") && !data.startsWith("adm_set_rate") && !data.startsWith("adm_set_ref") && !data.startsWith("adm_set_support") && !data.startsWith("adm_set_api") && !data.startsWith("adm_set_force")) {
       const field = data.replace("adm_set_", "");
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, ?, '')").bind(chatId, `awaiting_setting_${field}`).run();
-      await editMsg(env, chatId, messageId, `✏️ <b>Enter new ${field.toUpperCase()} number/address:</b>`, [[{ text: "❌ Cancel", callback_data: "adm_payment_settings", style: "danger" }]]);
+      await editMsg(env, chatId, messageId, `✏️ <b>Enter new ${field.toUpperCase()} number/address:</b>`, [[{ text: "❌ Cancel", callback_data: "adm_payment_settings" }]]);
       return;
     }
 
     if (data === "adm_broadcast") {
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_broadcast', '')").bind(chatId).run();
-      await editMsg(env, chatId, messageId, `📢 <b>Broadcast Announcement:</b>\n\nType your message below. It will be sent to all store users!`, [[{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]]);
+      await editMsg(env, chatId, messageId, `📢 <b>Broadcast Announcement:</b>\n\nType your message below. It will be sent to all store users!`, [[{ text: "❌ Cancel", callback_data: "admin_panel" }]]);
       return;
     }
 
@@ -1318,7 +1386,7 @@ async function handleUpdate(update, env, originUrl = "") {
       if (dep && dep.status === "pending") {
         await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_deposit_amount', ?)").bind(chatId, depId).run();
         await sendMsg(env, chatId, `💰 <b>Approve Deposit #${depId}</b>\nCustomer: ${dep.username} (ID: <code>${dep.user_id}</code>)\nMethod: ${dep.method}\nTrxID: <code>${dep.trx_id}</code>\n\nEnter amount in <b>USD</b> to credit (e.g. <code>10.00</code>):`, [
-          [{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]
+          [{ text: "❌ Cancel", callback_data: "admin_panel" }]
         ]);
       }
       return;
@@ -1336,216 +1404,278 @@ async function handleUpdate(update, env, originUrl = "") {
 }
 
 // ====================================================================
-// Admin Interactive State Processor
+// Real-Time Live Stock Engine & Reseller API
 // ====================================================================
-async function handleAdminTextState(env, chatId, text, adminState) {
-  const state = adminState.state;
+async function checkResellerAccount(env) {
+  try {
+    let baseUrl = (await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io")).trim().replace(/\/+$/, "");
+    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
+    const apiKey = await getSetting(env, "external_api_key", "");
+    if (!apiKey) return null;
+    const res = await fetchWithTimeout(`${baseUrl}/api/reseller/me`, { method: "GET", headers: { "X-Reseller-Key": apiKey, "Accept": "application/json", "User-Agent": "TelegramStoreBot/2.0" } }, 3000);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) { return null; }
+}
 
-  if (state === "awaiting_stock") {
-    const prodId = adminState.data;
-    const lines = text.split("\n").map(l => l.trim()).filter(l => l.length > 0);
-    for (const l of lines) await env.DB.prepare("INSERT INTO inventory (product_id, item_data) VALUES (?, ?)").bind(prodId, l).run();
-    await clearAdminState(env, chatId);
-    const prod = await env.DB.prepare("SELECT name FROM products WHERE id = ?").bind(prodId).first();
-    const count = await env.DB.prepare("SELECT COUNT(*) as c FROM inventory WHERE product_id = ? AND is_sold = 0").bind(prodId).first();
-    await notifyPreorders(env, prodId, prod ? prod.name : "Product", lines.length);
-    await sendMsg(env, chatId, `✅ <b>Added ${lines.length} Stock Item(s) Successfully!</b>\n\nProduct: <b>${prod ? prod.name : "Product"}</b>\nCurrent In-Stock: <b>${count ? count.c : lines.length} items</b>`, [
-      [{ text: "➕ Add More Stock", callback_data: `adm_addstock_${prodId}`, style: "success" }],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ]);
-    return true;
+function smartProductIcon(name) {
+  if (!name) return "⚡ Product";
+  const str = String(name).trim();
+  if (/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/u.test(str)) return str;
+  const low = str.toLowerCase();
+  if (low.includes("prime") || low.includes("amazon") || low.includes("netflix") || low.includes("disney") || low.includes("hulu") || low.includes("ott")) return `🍿 ${str}`;
+  if (low.includes("spotify") || low.includes("music") || low.includes("tidal") || low.includes("deezer")) return `🎵 ${str}`;
+  if (low.includes("chatgpt") || low.includes("openai") || low.includes("claude") || low.includes("gemini") || low.includes("ai") || low.includes("lovable") || low.includes("cursor")) return `🤖 ${str}`;
+  if (low.includes("vpn") || low.includes("nord") || low.includes("express") || low.includes("surfshark") || low.includes("proxy")) return `🛡️ ${str}`;
+  if (low.includes("canva") || low.includes("adobe") || low.includes("figma") || low.includes("design") || low.includes("photoshop")) return `🎨 ${str}`;
+  if (low.includes("youtube") || low.includes("yt") || low.includes("video")) return `📺 ${str}`;
+  if (low.includes("telegram") || low.includes("tg") || low.includes("member") || low.includes("boost")) return `📱 ${str}`;
+  if (low.includes("windows") || low.includes("office") || low.includes("key") || low.includes("license")) return `🔑 ${str}`;
+  if (low.includes("course") || low.includes("udemy") || low.includes("coursera") || low.includes("edu")) return `🎓 ${str}`;
+  if (low.includes("gift") || low.includes("card") || low.includes("voucher")) return `🎁 ${str}`;
+  return `⚡ ${str}`;
+}
+
+// Fetch live stock for a single external product on-demand
+async function fetchLiveProductStock(env, prod) {
+  if (!prod || prod.is_external !== 1 || !prod.external_id) return prod;
+  try {
+    let baseUrl = (await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io")).trim().replace(/\/+$/, "");
+    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
+    const apiKey = await getSetting(env, "external_api_key", "");
+    if (!apiKey) return prod;
+
+    const vResp = await fetchWithTimeout(`${baseUrl}/api/reseller/products`, {
+      method: "GET",
+      headers: { "X-Reseller-Key": apiKey, "Accept": "application/json", "User-Agent": "TelegramStoreBot/2.0" }
+    }, 2500);
+
+    if (vResp.ok) {
+      const vData = await vResp.json();
+      if (vData && Array.isArray(vData.products)) {
+        const ext = vData.products.find(p => String(p.id) === String(prod.external_id));
+        if (ext) {
+          const liveStock = ext.available ? (parseInt(ext.stock) || 0) : 0;
+          const liveCost = parseFloat(ext.price) || prod.cost_price_usd;
+          const margin = parseFloat(await getSetting(env, "external_profit_margin", "20"));
+          const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
+
+          let finalUsd = (prod.custom_price_usd && prod.custom_price_usd > 0)
+            ? prod.custom_price_usd
+            : Number((liveCost * (1 + margin / 100)).toFixed(2));
+          let finalBdt = Math.round(finalUsd * rate);
+
+          const prevStock = prod.api_stock || 0;
+          await env.DB.prepare("UPDATE products SET api_stock = ?, cost_price_usd = ?, price_usd = ?, price_bdt = ? WHERE id = ?")
+            .bind(liveStock, liveCost, finalUsd, finalBdt, prod.id).run();
+
+          prod.api_stock = liveStock;
+          prod.cost_price_usd = liveCost;
+          prod.price_usd = finalUsd;
+          prod.price_bdt = finalBdt;
+
+          if (prevStock === 0 && liveStock > 0) {
+            await notifyPreorders(env, prod.id, prod.name, liveStock);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error("fetchLiveProductStock error:", e.message);
   }
+  return prod;
+}
 
-  if (state === "awaiting_new_price") {
-    const prodId = adminState.data;
-    const prod = await env.DB.prepare("SELECT name, is_external, cost_price_usd, price_usd FROM products WHERE id = ?").bind(prodId).first();
-    const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
-    const baseCost = (prod && prod.is_external && prod.cost_price_usd > 0) ? prod.cost_price_usd : (prod ? prod.price_usd : 1.0);
+// Full live sync for all external products
+async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual = false) {
+  try {
+    let baseUrl = (apiUrl || await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io")).trim().replace(/\/+$/, "");
+    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
+    const key = apiKey || await getSetting(env, "external_api_key", "");
+    if (!key) return { success: false, message: "Please configure your External API Key in Admin Panel." };
 
-    let newUsd = 0;
-    let profitInfo = "";
-    if (text.includes("%")) {
-      const marginPct = parseFloat(text.replace("%", "").trim()) || 20;
-      newUsd = Number((baseCost * (1 + marginPct / 100)).toFixed(2));
-      profitInfo = `\n• Margin: <b>+${marginPct}%</b>\n• Cost: <b>$${baseCost.toFixed(2)} USD</b>\n• Profit: <b>+$${(newUsd - baseCost).toFixed(2)} USD</b>`;
-    } else {
-      newUsd = parseFloat(text.replace("$", "").trim()) || 5.00;
-      if (prod && prod.cost_price_usd > 0) profitInfo = `\n• Cost: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>\n• Profit: <b>+$${(newUsd - prod.cost_price_usd).toFixed(2)} USD</b>`;
+    let items = [];
+    let isVexorix = false;
+
+    try {
+      const vResp = await fetchWithTimeout(`${baseUrl}/api/reseller/products`, {
+        method: "GET",
+        headers: { "X-Reseller-Key": key, "Accept": "application/json", "User-Agent": "TelegramStoreBot/2.0" }
+      }, 3500);
+      if (vResp.ok) {
+        const vData = await vResp.json();
+        if (vData && Array.isArray(vData.products)) {
+          isVexorix = true;
+          items = vData.products.map(p => ({
+            id: p.id,
+            name: p.name,
+            desc: p.description ? (p.description + (p.how_to_use ? `\n\n📖 Instructions:\n${p.how_to_use}` : "")) : (p.how_to_use || "Digital License"),
+            rate: p.price,
+            stock: p.available ? (p.stock || 50) : 0
+          }));
+        }
+      }
+    } catch (_) {}
+
+    if (!isVexorix) {
+      try {
+        const resp = await fetchWithTimeout(baseUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, action: "services" })
+        }, 3500);
+        if (resp.ok) {
+          const d = await resp.json();
+          items = Array.isArray(d) ? d : (d.services || d.products || d.data || []);
+        }
+      } catch (_) {}
     }
 
-    const newBdt = Math.round(newUsd * rate);
-    await env.DB.prepare("UPDATE products SET price_usd = ?, price_bdt = ?, custom_price_usd = ? WHERE id = ?").bind(newUsd, newBdt, newUsd, prodId).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>Custom Price Saved!</b>\n\nProduct: <b>${prod ? prod.name : "Product"}</b>\nNew Price: <b>$${newUsd.toFixed(2)} USD</b> (≈ ৳${newBdt} BDT)${profitInfo}`, [
-      [{ text: "💰 Change Another Price", callback_data: "adm_price_menu", style: "success" }],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ]);
-    return true;
-  }
+    if (!items || items.length === 0) return { success: false, message: `Could not fetch products. Check API key and Base URL (${baseUrl}).` };
 
-  if (state === "awaiting_prod_name") {
-    let data = {};
-    try { data = JSON.parse(adminState.data || "{}"); } catch (_) {}
-    const prefix = data.icon ? `${data.icon} ` : "";
-    data.name = `${prefix}${text.trim()}`;
-    await env.DB.prepare("UPDATE admin_states SET state = 'awaiting_prod_desc', data = ? WHERE user_id = ?").bind(JSON.stringify(data), chatId).run();
-    await sendMsg(env, chatId, `📝 <b>Add Product — Step 3/4: Description</b>\n\nProduct: <b>${data.name}</b>\n\nPlease enter description or instructions:`, [[{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]]);
-    return true;
-  }
-
-  if (state === "awaiting_prod_desc") {
-    const data = JSON.parse(adminState.data || "{}");
-    data.description = text;
-    await env.DB.prepare("UPDATE admin_states SET state = 'awaiting_prod_price', data = ? WHERE user_id = ?").bind(JSON.stringify(data), chatId).run();
-    await sendMsg(env, chatId, `💰 <b>Add Product — Step 4/4: Price</b>\n\nEnter selling price in <b>USD</b> (e.g. <code>45.50</code>):`, [[{ text: "❌ Cancel", callback_data: "admin_panel", style: "danger" }]]);
-    return true;
-  }
-
-  if (state === "awaiting_prod_price") {
-    const data = JSON.parse(adminState.data || "{}");
-    const usd = parseFloat(text.replace("$", "").trim()) || 5.00;
     const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
-    const bdt = Math.round(usd * rate);
-    const res = await env.DB.prepare("INSERT INTO products (name, description, price_usd, price_bdt, is_active) VALUES (?, ?, ?, ?, 1)").bind(data.name, data.description || "Digital Product", usd, bdt).run();
-    const newProdId = res.meta ? res.meta.last_row_id : null;
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `🎉 <b>New Product Created!</b>\n\n• Name: <b>${data.name}</b>\n• Price: <b>$${usd.toFixed(2)} USD (≈ ৳${bdt} BDT)</b>`, [
-      newProdId ? [{ text: "➕ Add Stock Now", callback_data: `adm_addstock_${newProdId}`, style: "success" }] : [],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ].filter(r => r.length > 0));
-    return true;
-  }
+    const margin = parseFloat(await getSetting(env, "external_profit_margin", "20"));
 
-  if (state === "awaiting_rate") {
-    const newRate = parseFloat(text.trim()) || 125;
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('usd_to_bdt_rate', ?)").bind(String(newRate)).run();
-    await env.DB.prepare("UPDATE products SET price_bdt = ROUND(price_usd * ?)").bind(newRate).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>Exchange Rate Updated: 1 USD = ${newRate} BDT</b>`, [[{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]]);
-    return true;
-  }
+    let importedCount = 0;
+    for (const item of items) {
+      const extId = String(item.id || item.service || item.product_id || "");
+      if (!extId) continue;
 
-  if (state === "awaiting_ref_comm") {
-    const pct = parseFloat(text.replace("%", "").trim()) || 5;
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('referral_commission_percent', ?)").bind(String(pct)).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>Referral Commission Updated: ${pct}%</b>`, [[{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]]);
-    return true;
-  }
+      const rawName = item.name || item.title || item.product_name || "External Product";
+      const name = smartProductIcon(rawName);
+      const desc = item.desc || item.description || `Automated digital product delivered via API. (ID: ${extId})`;
+      const baseCostPrice = parseFloat(item.rate || item.price || item.cost || 1.0);
+      const apiStock = parseInt(item.stock || item.remains || (item.available ? 50 : 0)) || 0;
 
-  if (state === "awaiting_support_contact") {
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('support_admin', ?)").bind(text.trim()).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>Support Contact Updated: ${text.trim()}</b>`, [[{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]]);
-    return true;
-  }
+      const existing = await env.DB.prepare("SELECT id, api_stock, custom_price_usd FROM products WHERE external_id = ?").bind(extId).first();
+      let finalPrice = (existing && existing.custom_price_usd && existing.custom_price_usd > 0)
+        ? existing.custom_price_usd
+        : Number((baseCostPrice * (1 + margin / 100)).toFixed(2));
+      const priceBdt = Math.round(finalPrice * rate);
 
-  if (state === "awaiting_force_channel") {
-    let ch = text.trim();
-    if (ch.includes("t.me/")) ch = ch.split("t.me/")[1].replace(/^\+/, "").replace(/\/$/, "");
-    if (!ch.startsWith("@") && !ch.startsWith("-")) ch = "@" + ch;
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_channel_username', ?)").bind(ch).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>Announcement Channel Saved:</b> <code>${ch}</code>\n<i>(Make sure bot is Administrator in this channel!)</i>`, [
-      [{ text: "🔒 Force Join Menu", callback_data: "adm_force_menu", style: "success" }],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ]);
-    return true;
-  }
+      let targetId = null;
+      let prevStock = 0;
+      if (existing) {
+        targetId = existing.id;
+        prevStock = existing.api_stock || 0;
+        await env.DB.prepare("UPDATE products SET name = ?, description = ?, cost_price_usd = ?, price_usd = ?, price_bdt = ?, api_stock = ?, is_active = 1 WHERE id = ?")
+          .bind(name, desc, baseCostPrice, finalPrice, priceBdt, apiStock, existing.id).run();
+      } else {
+        const ins = await env.DB.prepare("INSERT INTO products (name, description, price_usd, price_bdt, cost_price_usd, custom_price_usd, api_stock, is_active, is_external, external_id) VALUES (?, ?, ?, ?, ?, 0, ?, 1, 1, ?)")
+          .bind(name, desc, finalPrice, priceBdt, baseCostPrice, apiStock, extId).run();
+        targetId = ins.meta ? ins.meta.last_row_id : null;
+      }
 
-  if (state === "awaiting_force_group") {
-    let grp = text.trim();
-    if (grp.includes("t.me/")) grp = grp.split("t.me/")[1].replace(/^\+/, "").replace(/\/$/, "");
-    if (!grp.startsWith("@") && !grp.startsWith("-")) grp = "@" + grp;
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('force_group_username', ?)").bind(grp).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>Community Group Saved:</b> <code>${grp}</code>\n<i>(Make sure bot is Administrator in this group!)</i>`, [
-      [{ text: "🔒 Force Join Menu", callback_data: "adm_force_menu", style: "success" }],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ]);
-    return true;
-  }
-
-  if (state === "awaiting_api_url") {
-    const cleanUrl = text.trim().replace(/\/+$/, "");
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('external_api_url', ?)").bind(cleanUrl).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>API Base URL Saved:</b> <code>${cleanUrl}</code>`, [
-      [{ text: "🔄 Sync Products Now", callback_data: "adm_sync_api", style: "success" }],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ]);
-    return true;
-  }
-
-  if (state === "awaiting_api_key") {
-    const cleanKey = text.trim();
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('external_api_key', ?)").bind(cleanKey).run();
-    await clearAdminState(env, chatId);
-    const syncRes = await syncExternalProducts(env, null, cleanKey, true);
-    await sendMsg(env, chatId, `🎉 <b>API Key Saved!</b>\n\n${syncRes.message}`, [
-      [{ text: "💰 Set Custom Prices", callback_data: "adm_price_menu", style: "success" }],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ]);
-    return true;
-  }
-
-  if (state === "awaiting_api_margin") {
-    const margin = parseFloat(text.replace("%", "").trim()) || 20;
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('external_profit_margin', ?)").bind(String(margin)).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>Default Margin Saved: ${margin}%</b>`, [
-      [{ text: "🔄 Re-Sync Now", callback_data: "adm_sync_api", style: "success" }],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ]);
-    return true;
-  }
-
-  if (state === "awaiting_deposit_amount") {
-    const depId = adminState.data;
-    const usd = parseFloat(text.replace("$", "").trim()) || 0;
-    const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
-    const bdt = Math.round(usd * rate);
-    await clearAdminState(env, chatId);
-    const dep = await env.DB.prepare("SELECT * FROM deposits WHERE id = ?").bind(depId).first();
-    if (dep && usd > 0) {
-      await env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, status = 'completed' WHERE id = ?").bind(usd, bdt, depId).run();
-      await env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(usd, bdt, dep.user_id).run();
-      const u = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(dep.user_id).first();
-      await sendMsg(env, dep.user_id, `🎉 <b>Deposit Approved!</b>\n\nCredited: <b>+$${usd.toFixed(2)} USD (≈ ৳${bdt} BDT)</b>\nNew Wallet Balance: <b>$${u.balance_usd.toFixed(2)} USD</b>`, [
-        [{ text: "🛒 Open Shop", callback_data: "shop", style: "success" }]
-      ]);
-      await sendMsg(env, chatId, `✅ Deposit #${depId} Approved: $${usd.toFixed(2)} USD credited.`, [[{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]]);
+      // Restock Alert for Pre-orders
+      if (prevStock === 0 && apiStock > 0 && targetId) {
+        await notifyPreorders(env, targetId, name, apiStock);
+      }
+      importedCount++;
     }
-    return true;
+
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
+    return { success: true, message: `Successfully connected! Imported & updated <b>${importedCount} products</b> with live stock and pricing.` };
+  } catch (err) {
+    return { success: false, message: `Error connecting to API: ${err.message}` };
+  }
+}
+
+async function dispatchExternalOrder(env, prod, quantity, orderId) {
+  try {
+    let baseUrl = (await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io")).trim().replace(/\/+$/, "");
+    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
+    const apiKey = await getSetting(env, "external_api_key", "");
+    if (!apiKey) return { success: false, message: "External API Key is not set." };
+
+    const vexorixOrderUrl = `${baseUrl}/api/reseller/orders`;
+    const vResp = await fetch(vexorixOrderUrl, {
+      method: "POST",
+      headers: { "X-Reseller-Key": apiKey, "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify({ product_id: String(prod.external_id), quantity, external_order_id: `shop-${orderId}-${Date.now().toString(36)}` })
+    });
+
+    if (vResp.ok || vResp.status === 201 || vResp.status === 200) {
+      const resData = await vResp.json();
+      const items = resData.items || [];
+      const credentials = items.map(it => it.content).join("\n\n");
+      return { success: true, externalOrderId: String(resData.order_id || ""), credentials: credentials || (resData.order_id ? `Order Delivered: #${resData.order_id}` : "Delivered"), message: "Delivered via Provider API." };
+    }
+    return { success: false, message: `API status ${vResp.status}` };
+  } catch (err) { return { success: false, message: err.message }; }
+}
+
+async function processReferralCommission(env, buyerChatId, orderAmountUsd, productName) {
+  try {
+    const buyer = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(buyerChatId).first();
+    if (!buyer || !buyer.referred_by || buyer.referred_by === 0) return;
+    const referrerId = buyer.referred_by;
+    const commPct = parseFloat(await getSetting(env, "referral_commission_percent", "5"));
+    const commissionUsd = Number(((orderAmountUsd * commPct) / 100).toFixed(2));
+    if (commissionUsd <= 0) return;
+    const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
+    const commissionBdt = Math.round(commissionUsd * rate);
+
+    await env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(commissionUsd, commissionBdt, referrerId).run();
+    await sendMsg(env, referrerId, `🎉 <b>Referral Commission Received!</b>\n\nYour referred friend completed a purchase of <b>${productName}</b>!\n💰 Added: <b>+$${commissionUsd.toFixed(2)} USD (≈ ৳${commissionBdt} BDT)</b> (${commPct}% commission) to your wallet balance.`);
+  } catch (e) { console.error("Referral Commission Error:", e); }
+}
+
+async function notifyPreorders(env, productId, productName, stockCount) {
+  try {
+    const { results: pendingPreorders } = await env.DB.prepare("SELECT * FROM preorders WHERE product_id = ? AND status = 'pending'").bind(productId).all();
+    if (pendingPreorders && pendingPreorders.length > 0) {
+      for (const po of pendingPreorders) {
+        await sendMsg(env, po.user_id, `🔔 <b>Good News! Pre-Ordered Product Restocked!</b>\n\nProduct: <b>${productName}</b>\n⚡ Available Stock: <b>${stockCount} items</b>\n\nTap below to complete your order:`, [
+          [{ text: `🛍️ Buy ${productName} Now`, callback_data: `prod_${productId}` }],
+          [{ text: "🛒 Open Shop", callback_data: "shop" }]
+        ]);
+      }
+      await env.DB.prepare("UPDATE preorders SET status = 'notified' WHERE product_id = ? AND status = 'pending'").bind(productId).run();
+    }
+  } catch (e) { console.error("notifyPreorders Error:", e); }
+}
+
+async function checkForceJoin(env, chatId) {
+  if (String(chatId) === String(env.ADMIN_ID)) return { passed: true };
+  const channel = await getSetting(env, "force_channel_username", "");
+  const group = await getSetting(env, "force_group_username", "");
+  if (!channel && !group) return { passed: true };
+
+  const validStatuses = ["creator", "administrator", "member", "restricted"];
+  let missingChannel = false, missingGroup = false;
+
+  if (channel) {
+    const t = channel.startsWith("-") || channel.startsWith("@") ? channel : `@${channel}`;
+    try {
+      const resp = await callTg(env, "getChatMember", { chat_id: t, user_id: chatId });
+      if (!resp.ok || !resp.result || !validStatuses.includes(resp.result.status)) missingChannel = true;
+    } catch (_) { missingChannel = true; }
   }
 
-  if (state === "awaiting_broadcast") {
-    await clearAdminState(env, chatId);
-    const { results: allUsers } = await env.DB.prepare("SELECT user_id FROM users").all();
-    let cnt = 0;
-    for (const u of allUsers) { try { await sendMsg(env, u.user_id, `📢 <b>Store Announcement:</b>\n\n${text}`); cnt++; } catch (_) {} }
-    await sendMsg(env, chatId, `✅ <b>Broadcast Completed!</b> Delivered to ${cnt} members.`, [[{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]]);
-    return true;
+  if (group) {
+    const t = group.startsWith("-") || group.startsWith("@") ? group : `@${group}`;
+    try {
+      const resp = await callTg(env, "getChatMember", { chat_id: t, user_id: chatId });
+      if (!resp.ok || !resp.result || !validStatuses.includes(resp.result.status)) missingGroup = true;
+    } catch (_) { missingGroup = true; }
   }
 
-  if (state.startsWith("awaiting_setting_")) {
-    const field = state.replace("awaiting_setting_", "");
-    let k = "bkash_num";
-    if (field === "bkash") k = "bkash_num";
-    else if (field === "nagad") k = "nagad_num";
-    else if (field === "rocket") k = "rocket_num";
-    else if (field === "binance") k = "binance_id";
-    else if (field === "bep20") k = "bep20_addr";
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(k, text.trim()).run();
-    await clearAdminState(env, chatId);
-    await sendMsg(env, chatId, `✅ <b>${field.toUpperCase()} Updated:</b> <code>${text.trim()}</code>`, [
-      [{ text: "⚙️ Payment Settings", callback_data: "adm_payment_settings", style: "success" }],
-      [{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]
-    ]);
-    return true;
-  }
+  if (missingChannel || missingGroup) return { passed: false, channel, group, missingChannel, missingGroup };
+  return { passed: true };
+}
 
-  return false;
+async function sendForceJoinScreen(env, chatId, forceInfo, editMessageId = null) {
+  const channelLink = forceInfo.channel ? (forceInfo.channel.startsWith("http") ? forceInfo.channel : `https://t.me/${forceInfo.channel.replace("@", "")}`) : "";
+  const groupLink = forceInfo.group ? (forceInfo.group.startsWith("http") ? forceInfo.group : `https://t.me/${forceInfo.group.replace("@", "")}`) : "";
+
+  const text = `🔒 <b>Must Join Channels to Use This Bot!</b>\n\nWelcome! To browse products, check prices, and place orders, please join our official community:\n\n📢 <b>1. Announcement Channel:</b> Updates & offers\n💬 <b>2. Discussion Group:</b> Customer chat & support\n\n👇 <b>Click both links below to join, then click 'Verify & Enter':</b>`;
+  const buttons = [];
+  if (channelLink) buttons.push([{ text: "📢 Join Announcement Channel", url: channelLink }]);
+  if (groupLink) buttons.push([{ text: "💬 Join Community Group", url: groupLink }]);
+  buttons.push([{ text: "🔄 Verify & Enter Store", callback_data: "check_force_join" }]);
+
+  if (editMessageId) await editMsg(env, chatId, editMessageId, text, buttons);
+  else await sendMsg(env, chatId, text, buttons);
 }
 
 // ====================================================================
@@ -1557,7 +1687,7 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
   const bdtBal = user ? Math.round((user.balance_usd || 0) * rate) : 0;
 
   const welcome = `🛒 <b>Welcome to SMART SUBS STORE!</b>\n\n` +
-    `Hello ${firstName}! 👋\n\n` +
+    `Hello ${escapeHtml(firstName)}! 👋\n\n` +
     `We offer high-quality digital products and software licenses with fast, secure, and automated delivery.\n\n` +
     `<blockquote>🛒 <b>Shop</b> — Browse & buy products\n` +
     `💰 <b>Deposit</b> — Add funds to your wallet\n` +
@@ -1566,130 +1696,208 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
     `Select an option below to continue:`;
 
   const keyboard = [
-    [{ text: "🛒 Shop", callback_data: "shop", style: "success" }],
-    [{ text: "👤 Profile", callback_data: "profile", style: "success" }, { text: "💰 Deposit", callback_data: "deposit", style: "success" }],
-    [{ text: "📦 Orders", callback_data: "my_orders", style: "success" }, { text: "⏳ Pre-Orders", callback_data: "my_preorders", style: "success" }],
-    [{ text: "👥 Refer & Earn", callback_data: "refer", style: "success" }]
+    [{ text: "🛒 Shop", callback_data: "shop" }],
+    [{ text: "👤 Profile", callback_data: "profile" }, { text: "💰 Deposit", callback_data: "deposit" }],
+    [{ text: "📦 Orders", callback_data: "my_orders" }, { text: "⏳ Pre-Orders", callback_data: "my_preorders" }],
+    [{ text: "👥 Refer & Earn", callback_data: "refer" }]
   ];
-  if (String(chatId) === String(env.ADMIN_ID)) keyboard.push([{ text: "👑 Admin Panel", callback_data: "admin_panel", style: "success" }]);
+  if (String(chatId) === String(env.ADMIN_ID)) keyboard.push([{ text: "👑 Admin Panel", callback_data: "admin_panel" }]);
 
-  if (editMessageId) await editMsg(env, chatId, editMessageId, welcome, keyboard);
-  else await sendMsg(env, chatId, welcome, keyboard);
+  if (editMessageId) {
+    const res = await editMsg(env, chatId, editMessageId, welcome, keyboard);
+    if (res && res.ok) return res;
+  }
+  return await sendMsg(env, chatId, welcome, keyboard);
 }
 
 async function sendProductsDirectly(env, chatId, editMessageId = null) {
-  // Real-time stock auto-sync check: if > 30s since last sync, update external stock
-  const lastSyncStr = await getSetting(env, "last_external_sync_time", "0");
-  const lastSync = parseInt(lastSyncStr) || 0;
-  if (Date.now() - lastSync > 30000) {
-    await syncExternalProducts(env);
+  try {
+    await ensureDbReady(env.DB);
+
+    // Non-blocking background sync if > 60s since last sync (NEVER blocks user view!)
+    try {
+      const lastSyncStr = await getSetting(env, "last_external_sync_time", "0");
+      const lastSync = parseInt(lastSyncStr) || 0;
+      if (Date.now() - lastSync > 60000) {
+        await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
+        syncExternalProducts(env).catch(e => console.error("Background sync error:", e));
+      }
+    } catch (_) {}
+
+    // Defensively query products
+    let prods = [];
+    try {
+      const q = await env.DB.prepare(
+        `SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1 ORDER BY p.id ASC`
+      ).all();
+      prods = q && q.results ? q.results : [];
+    } catch (dbErr) {
+      console.error("Products query error, falling back:", dbErr);
+      const q = await env.DB.prepare("SELECT * FROM products WHERE is_active = 1 ORDER BY id ASC").all();
+      prods = q && q.results ? q.results : [];
+    }
+
+    const keyboard = [];
+    if (prods && prods.length > 0) {
+      prods.forEach(prod => {
+        const stock = prod.stock_qty || 0;
+        const icon = stock > 0 ? "🟢" : "🔴";
+        const stockLabel = stock > 0 ? `(${stock})` : "(Out of stock)";
+        keyboard.push([{
+          text: `${icon} ${prod.name} ${stockLabel}`,
+          callback_data: `prod_${prod.id}`
+        }]);
+      });
+    }
+
+    keyboard.push([
+      { text: "🔄 Refresh Stock", callback_data: "shop" },
+      { text: "🏠 Main Menu", callback_data: "home" }
+    ]);
+
+    let text = "";
+    if (!prods || prods.length === 0) {
+      text = `🛍️ <b>Store Products</b>\n\n⚠️ Currently no products are available in the store.\n\nPlease check back later or contact admin @fojlaybd.`;
+    } else {
+      text = `🛍️ <b>Available Products</b>\n\n🟢 <b>In Stock</b> (Instant Automated Delivery)\n🔴 <b>Out of Stock</b> (Pre-order Available)\n\n<i>Click any product below to view details and order:</i>`;
+    }
+
+    if (editMessageId) {
+      const res = await editMsg(env, chatId, editMessageId, text, keyboard);
+      if (res && res.ok) return res;
+    }
+    return await sendMsg(env, chatId, text, keyboard);
+  } catch (err) {
+    console.error("sendProductsDirectly fatal error:", err);
+    return await sendMsg(env, chatId, `⚠️ <b>Shop Error:</b> <code>${escapeHtml(err.message)}</code>\nPlease try again or contact support.`);
   }
-
-  const { results: prods } = await env.DB.prepare(
-    `SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1`
-  ).all();
-
-  const keyboard = [];
-  if (prods && prods.length > 0) {
-    prods.forEach(prod => {
-      const stock = prod.stock_qty || 0;
-      keyboard.push([{ text: `${prod.name} (${stock})`, callback_data: `prod_${prod.id}`, style: stock > 0 ? "success" : "danger" }]);
-    });
-  }
-  keyboard.push([{ text: "🔄 Refresh Stock", callback_data: "shop", style: "success" }, { text: "◀️ Back", callback_data: "home", style: "success" }]);
-
-  const text = `🛍️ <b>Available Products</b>\n\n🟢 <b>Green</b> = In Stock\n🔴 <b>Red</b> = Out of Stock\n\nClick any product below to view details and order:`;
-  if (editMessageId) await editMsg(env, chatId, editMessageId, text, keyboard);
-  else await sendMsg(env, chatId, text, keyboard);
 }
 
 async function sendProductDetailView(env, chatId, prodId, editMessageId = null) {
-  let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
-  if (!prod) return;
+  try {
+    let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
+    if (!prod) {
+      await sendMsg(env, chatId, "⚠️ Product not found.", [[{ text: "◀️ Back to Shop", callback_data: "shop" }]]);
+      return;
+    }
 
-  // Live real-time stock check for external API products
-  if (prod.is_external === 1) {
-    prod = await fetchLiveProductStock(env, prod);
+    // Live real-time stock check for external API products with 2.5s timeout race
+    if (prod.is_external === 1) {
+      try {
+        prod = await Promise.race([
+          fetchLiveProductStock(env, prod),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 2500))
+        ]).catch(() => prod);
+      } catch (_) {}
+    }
+
+    const stockRow = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE product_id = ? AND is_sold = 0").bind(prodId).first();
+    const stockCount = prod.is_external ? (prod.api_stock || 0) : (stockRow ? stockRow.count : 0);
+    const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
+    const priceBdt = Math.round(prod.price_usd * rate);
+
+    const safeDesc = escapeHtml(prod.description || "Digital License");
+    const details = `💌 <b>${escapeHtml(prod.name)}</b>\n\n` +
+      `👛 Price: <b>$${Number(prod.price_usd).toFixed(2)} / item</b> (≈ ৳${priceBdt} BDT)\n` +
+      `📦 Available Stock: <b>${stockCount}</b>\n\n` +
+      `📦 <b>Product Details:</b>\n<blockquote>${safeDesc}</blockquote>\n\n` +
+      `<blockquote>Important Note:\nDelivery is instant and automated after payment confirmation.</blockquote>`;
+
+    const buttons = [];
+    if (stockCount > 0) {
+      buttons.push([{ text: "🛍️ Buy Now", callback_data: `buynow_${prod.id}_1` }]);
+    } else {
+      buttons.push([{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]);
+    }
+    buttons.push([
+      { text: "🔄 Refresh Stock", callback_data: `prod_${prod.id}` },
+      { text: "◀️ Back to Shop", callback_data: "shop" }
+    ]);
+
+    if (editMessageId) {
+      const res = await editMsg(env, chatId, editMessageId, details, buttons);
+      if (res && res.ok) return res;
+    }
+    return await sendMsg(env, chatId, details, buttons);
+  } catch (err) {
+    console.error("sendProductDetailView error:", err);
+    await sendMsg(env, chatId, `⚠️ Error loading product details: ${escapeHtml(err.message)}`, [[{ text: "◀️ Back to Shop", callback_data: "shop" }]]);
   }
-
-  const stockRow = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE product_id = ? AND is_sold = 0").bind(prodId).first();
-  const stockCount = prod.is_external ? (prod.api_stock || 0) : (stockRow ? stockRow.count : 0);
-  const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
-  const priceBdt = Math.round(prod.price_usd * rate);
-
-  const details = `💌 <b>${prod.name}</b>\n\n` +
-    `👛 Price: <b>$${Number(prod.price_usd).toFixed(2)} / item</b> (≈ ৳${priceBdt} BDT)\n` +
-    `📦 Available Stock: <b>${stockCount}</b>\n\n` +
-    `📦 <b>Product Details:</b>\n<blockquote>${prod.description || "Digital License"}</blockquote>\n\n` +
-    `<blockquote>Important Note:\nDelivery is instant and automated after payment confirmation.</blockquote>`;
-
-  const buttons = [];
-  if (stockCount > 0) buttons.push([{ text: "🛍️ Buy Now", callback_data: `buynow_${prod.id}_1`, style: "success" }]);
-  else buttons.push([{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}`, style: "danger" }]);
-  buttons.push([{ text: "🔄 Refresh Stock", callback_data: `prod_${prod.id}`, style: "success" }, { text: "◀️ Back", callback_data: "shop", style: "success" }]);
-
-  if (editMessageId) await editMsg(env, chatId, editMessageId, details, buttons);
-  else await sendMsg(env, chatId, details, buttons);
 }
 
 // Order Preview Screen with 1-9 keypad & TWO clear payment options
 async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId = null) {
-  let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
-  if (!prod) return;
-  if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
+  try {
+    let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
+    if (!prod) return;
+    if (prod.is_external === 1) {
+      try {
+        prod = await Promise.race([
+          fetchLiveProductStock(env, prod),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 2500))
+        ]).catch(() => prod);
+      } catch (_) {}
+    }
 
-  const user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
-  const userBal = user ? (user.balance_usd || 0) : 0;
-  const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
+    const user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
+    const userBal = user ? (user.balance_usd || 0) : 0;
+    const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
 
-  const qty = quantity > 0 ? quantity : 1;
-  const unitPrice = Number(prod.price_usd);
-  const totalPrice = Number((unitPrice * qty).toFixed(2));
-  const totalBdt = Math.round(totalPrice * rate);
+    const qty = quantity > 0 ? quantity : 1;
+    const unitPrice = Number(prod.price_usd);
+    const totalPrice = Number((unitPrice * qty).toFixed(2));
+    const totalBdt = Math.round(totalPrice * rate);
 
-  const diff = totalPrice - userBal;
-  const hasEnoughBal = diff <= 0;
+    const diff = Number((totalPrice - userBal).toFixed(2));
+    const hasEnoughBal = diff <= 0;
 
-  const previewText = `💌 <b>${prod.name}</b>\n\n` +
-    `📦 <b>Order Preview</b>\n\n` +
-    `Quantity: <b>${qty} item(s)</b>\n` +
-    `👛 Unit Price: <b>$${unitPrice.toFixed(2)}</b>\n` +
-    `💼 Total: <b>$${totalPrice.toFixed(2)}</b> (≈ ৳${totalBdt} BDT)\n` +
-    `👛 Wallet Balance: <b>${userBal.toFixed(2)} USDT</b>\n\n` +
-    (hasEnoughBal
-      ? `✅ <b>Wallet balance is sufficient for this order!</b>`
-      : `⚠️ <b>Need ${diff.toFixed(2)} USDT more in your wallet to pay with balance.</b>\nChoose Direct Payment or Wallet Payment below:`);
+    const previewText = `💌 <b>${escapeHtml(prod.name)}</b>\n\n` +
+      `📦 <b>Order Preview</b>\n\n` +
+      `Quantity: <b>${qty} item(s)</b>\n` +
+      `👛 Unit Price: <b>$${unitPrice.toFixed(2)}</b>\n` +
+      `💼 Total: <b>$${totalPrice.toFixed(2)} USD</b> (≈ ৳${totalBdt} BDT)\n` +
+      `👛 Wallet Balance: <b>$${userBal.toFixed(2)} USD</b>\n\n` +
+      (hasEnoughBal
+        ? `✅ <b>Wallet balance is sufficient for this order!</b>`
+        : `⚠️ <b>Need $${diff.toFixed(2)} USD more in your wallet to pay with balance.</b>\nChoose Direct Payment or Wallet Payment below:`);
 
-  // Keypad for 1-9 & Custom Quantity
-  const keypad = [
-    [
-      { text: qty === 1 ? "· 1 ·" : "1", callback_data: `qty_${prod.id}_1`, style: "success" },
-      { text: qty === 2 ? "· 2 ·" : "2", callback_data: `qty_${prod.id}_2`, style: "success" },
-      { text: qty === 3 ? "· 3 ·" : "3", callback_data: `qty_${prod.id}_3`, style: "success" }
-    ],
-    [
-      { text: qty === 4 ? "· 4 ·" : "4", callback_data: `qty_${prod.id}_4`, style: "success" },
-      { text: qty === 5 ? "· 5 ·" : "5", callback_data: `qty_${prod.id}_5`, style: "success" },
-      { text: qty === 6 ? "· 6 ·" : "6", callback_data: `qty_${prod.id}_6`, style: "success" }
-    ],
-    [
-      { text: qty === 7 ? "· 7 ·" : "7", callback_data: `qty_${prod.id}_7`, style: "success" },
-      { text: qty === 8 ? "· 8 ·" : "8", callback_data: `qty_${prod.id}_8`, style: "success" },
-      { text: qty === 9 ? "· 9 ·" : "9", callback_data: `qty_${prod.id}_9`, style: "success" }
-    ],
-    [{ text: "📦 Custom Quantity", callback_data: `custom_qty_${prod.id}`, style: "success" }],
-    // TWO CLEAR PAYMENT OPTIONS UNDER QUANTITIES
-    [
-      { text: `⚡ Direct Payment ($${totalPrice.toFixed(2)})`, callback_data: `direct_pay_${prod.id}_${qty}`, style: "success" }
-    ],
-    [
-      { text: `👛 Wallet Payment ($${totalPrice.toFixed(2)})`, callback_data: `wallet_pay_check_${prod.id}_${qty}`, style: "success" }
-    ],
-    [{ text: "◀️ Back to Product", callback_data: `prod_${prod.id}`, style: "danger" }]
-  ];
+    // Keypad for 1-9 & Custom Quantity
+    const keypad = [
+      [
+        { text: qty === 1 ? "· 1 ·" : "1", callback_data: `qty_${prod.id}_1` },
+        { text: qty === 2 ? "· 2 ·" : "2", callback_data: `qty_${prod.id}_2` },
+        { text: qty === 3 ? "· 3 ·" : "3", callback_data: `qty_${prod.id}_3` }
+      ],
+      [
+        { text: qty === 4 ? "· 4 ·" : "4", callback_data: `qty_${prod.id}_4` },
+        { text: qty === 5 ? "· 5 ·" : "5", callback_data: `qty_${prod.id}_5` },
+        { text: qty === 6 ? "· 6 ·" : "6", callback_data: `qty_${prod.id}_6` }
+      ],
+      [
+        { text: qty === 7 ? "· 7 ·" : "7", callback_data: `qty_${prod.id}_7` },
+        { text: qty === 8 ? "· 8 ·" : "8", callback_data: `qty_${prod.id}_8` },
+        { text: qty === 9 ? "· 9 ·" : "9", callback_data: `qty_${prod.id}_9` }
+      ],
+      [{ text: "📦 Custom Quantity", callback_data: `custom_qty_${prod.id}` }],
+      // TWO CLEAR PAYMENT OPTIONS UNDER QUANTITIES
+      [
+        { text: `⚡ Direct Payment ($${totalPrice.toFixed(2)})`, callback_data: `direct_pay_${prod.id}_${qty}` }
+      ],
+      [
+        { text: `👛 Wallet Payment ($${totalPrice.toFixed(2)})`, callback_data: `wallet_pay_check_${prod.id}_${qty}` }
+      ],
+      [{ text: "◀️ Back to Product", callback_data: `prod_${prod.id}` }]
+    ];
 
-  if (editMessageId) await editMsg(env, chatId, editMessageId, previewText, keypad);
-  else await sendMsg(env, chatId, previewText, keypad);
+    if (editMessageId) {
+      const res = await editMsg(env, chatId, editMessageId, previewText, keypad);
+      if (res && res.ok) return res;
+    }
+    return await sendMsg(env, chatId, previewText, keypad);
+  } catch (err) {
+    console.error("sendOrderPreview error:", err);
+    await sendMsg(env, chatId, `⚠️ Error loading order preview: ${escapeHtml(err.message)}`);
+  }
 }
 
 async function sendDeposit(env, chatId, editMessageId = null) {
@@ -1704,10 +1912,10 @@ async function sendDeposit(env, chatId, editMessageId = null) {
     `Select a payment method below to get deposit instructions:`;
 
   const buttons = [
-    [{ text: "🟢 bKash", callback_data: "dep_method_bkash", style: "success" }, { text: "🟠 Nagad", callback_data: "dep_method_nagad", style: "success" }],
-    [{ text: "🟣 Rocket", callback_data: "dep_method_rocket", style: "success" }],
-    [{ text: "🟡 Binance Pay (Auto)", callback_data: "dep_method_binance", style: "success" }, { text: "🔵 BEP20 USDT (Auto)", callback_data: "dep_method_bep20", style: "success" }],
-    [{ text: "◀️ Main Menu", callback_data: "home", style: "danger" }]
+    [{ text: "🟢 bKash", callback_data: "dep_method_bkash" }, { text: "🟠 Nagad", callback_data: "dep_method_nagad" }],
+    [{ text: "🟣 Rocket", callback_data: "dep_method_rocket" }],
+    [{ text: "🟡 Binance Pay (Auto)", callback_data: "dep_method_binance" }, { text: "🔵 BEP20 USDT (Auto)", callback_data: "dep_method_bep20" }],
+    [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, text, buttons);
   else await sendMsg(env, chatId, text, buttons);
@@ -1737,13 +1945,13 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     `Select any button below to manage your store:`;
 
   const buttons = [
-    [{ text: "➕ Add Stock", callback_data: "adm_stock_menu", style: "success" }, { text: "➕ Add New Product", callback_data: "adm_add_product", style: "success" }],
-    [{ text: "💰 Custom Prices", callback_data: "adm_price_menu", style: "success" }, { text: "📋 Manage Products", callback_data: "adm_manage_products", style: "success" }],
-    [{ text: `🔌 Live API Center (${apiProds ? apiProds.count : 0})`, callback_data: "adm_api_menu", style: "success" }, { text: `⏳ Pre-Orders (${pendingPo ? pendingPo.count : 0})`, callback_data: "adm_view_preorders", style: "success" }],
-    [{ text: `🔒 Force Join (${forceStatus})`, callback_data: "adm_force_menu", style: "success" }, { text: "📢 Broadcast Message", callback_data: "adm_broadcast", style: "success" }],
-    [{ text: `💱 1 USD = BDT (${rate})`, callback_data: "adm_set_rate", style: "success" }, { text: `🎁 Referral % (${commPct}%)`, callback_data: "adm_set_ref_comm", style: "success" }],
-    [{ text: "⚙️ Payment & Auto-Verify", callback_data: "adm_payment_settings", style: "success" }, { text: "📞 Support Contact", callback_data: "adm_set_support", style: "success" }],
-    [{ text: "🏪 Back to Store Home", callback_data: "home", style: "success" }]
+    [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
+    [{ text: "💰 Custom Prices", callback_data: "adm_price_menu" }, { text: "📋 Manage Products", callback_data: "adm_manage_products" }],
+    [{ text: `🔌 Live API Center (${apiProds ? apiProds.count : 0})`, callback_data: "adm_api_menu" }, { text: `⏳ Pre-Orders (${pendingPo ? pendingPo.count : 0})`, callback_data: "adm_view_preorders" }],
+    [{ text: `🔒 Force Join (${forceStatus})`, callback_data: "adm_force_menu" }, { text: "📢 Broadcast Message", callback_data: "adm_broadcast" }],
+    [{ text: `💱 1 USD = BDT (${rate})`, callback_data: "adm_set_rate" }, { text: `🎁 Referral % (${commPct}%)`, callback_data: "adm_set_ref_comm" }],
+    [{ text: "⚙️ Payment & Auto-Verify", callback_data: "adm_payment_settings" }, { text: "📞 Support Contact", callback_data: "adm_set_support" }],
+    [{ text: "🏪 Back to Store Home", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, report, buttons);
   else await sendMsg(env, chatId, report, buttons);
@@ -1765,10 +1973,10 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
     `• Total Invited Friends: <b>${user ? user.total_referrals : 0} members</b>`;
 
   const buttons = [
-    [{ text: "💳 Deposit Funds", callback_data: "deposit", style: "success" }],
-    [{ text: "📦 Order History", callback_data: "my_orders", style: "success" }, { text: "⏳ My Pre-Orders", callback_data: "my_preorders", style: "success" }],
-    [{ text: "👥 Refer & Earn", callback_data: "refer", style: "success" }],
-    [{ text: "◀️ Main Menu", callback_data: "home", style: "success" }]
+    [{ text: "💳 Deposit Funds", callback_data: "deposit" }],
+    [{ text: "📦 Order History", callback_data: "my_orders" }, { text: "⏳ My Pre-Orders", callback_data: "my_preorders" }],
+    [{ text: "👥 Refer & Earn", callback_data: "refer" }],
+    [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, profileText, buttons);
   else await sendMsg(env, chatId, profileText, buttons);
@@ -1779,7 +1987,7 @@ async function sendUserPreorders(env, chatId, editMessageId = null) {
   let text = `⏳ <b>Your Active Pre-Orders:</b>\n\n`;
   if (!preorders || preorders.length === 0) text += `You have not placed any pre-orders yet.`;
   else preorders.forEach(po => { text += `🔹 <b>${po.product_name}</b>\nPrice: $${po.price_usd.toFixed(2)} USD\nStatus: <b>${po.status.toUpperCase()}</b>\n\n`; });
-  const buttons = [[{ text: "🛒 Open Shop", callback_data: "shop", style: "success" }], [{ text: "◀️ Main Menu", callback_data: "home", style: "success" }]];
+  const buttons = [[{ text: "🛒 Open Shop", callback_data: "shop" }], [{ text: "◀️ Main Menu", callback_data: "home" }]];
   if (editMessageId) await editMsg(env, chatId, editMessageId, text, buttons);
   else await sendMsg(env, chatId, text, buttons);
 }
@@ -1789,7 +1997,7 @@ async function sendOrders(env, chatId, editMessageId = null) {
   let orderText = `📦 <b>Your Completed Orders:</b>\n\n`;
   if (!results || results.length === 0) orderText += `You have not completed any purchases yet.`;
   else results.forEach(o => { orderText += `🔹 <b>${o.product_name}</b>\nOrder: #${o.id} | Quantity: ${o.quantity || 1} | Amount: $${o.amount_usd} USD\nCredentials: <code>${o.item_data || o.trx_id || "Delivered"}</code>\n\n`; });
-  const buttons = [[{ text: "◀️ Main Menu", callback_data: "home", style: "success" }]];
+  const buttons = [[{ text: "◀️ Main Menu", callback_data: "home" }]];
   if (editMessageId) await editMsg(env, chatId, editMessageId, orderText, buttons);
   else await sendMsg(env, chatId, orderText, buttons);
 }
@@ -1807,7 +2015,7 @@ async function sendRefer(env, chatId, user, editMessageId = null) {
 
   const buttons = [
     [{ text: "📤 Share Referral Link", url: `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent("Check out this digital products store with instant automated delivery!")}` }],
-    [{ text: "◀️ Main Menu", callback_data: "home", style: "success" }]
+    [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, refText, buttons);
   else await sendMsg(env, chatId, refText, buttons);
@@ -1819,7 +2027,7 @@ async function sendSupport(env, chatId, editMessageId = null) {
   const supText = `🕒 <b>Customer Support & Helpdesk</b>\n\nNeed help with an order or deposit?\nOur customer service team is ready to assist you!\n\n📞 <b>Support Handle:</b> <code>${supContact}</code>`;
   const buttons = [
     [{ text: "💬 Chat with Support Admin", url: `https://t.me/${cleanUsername}` }],
-    [{ text: "◀️ Main Menu", callback_data: "home", style: "success" }]
+    [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, supText, buttons);
   else await sendMsg(env, chatId, supText, buttons);
