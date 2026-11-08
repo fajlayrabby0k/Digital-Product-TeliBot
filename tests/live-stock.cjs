@@ -1,0 +1,23 @@
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const source = fs.readFileSync(require('node:path').join(__dirname, '../_worker.js'),'utf8').replace('export default {','const worker = {');
+let catalog, fail = false;
+const products = [{id:1,external_id:'a',api_stock:10,custom_price_usd:0,is_external:1},{id:2,external_id:'removed',api_stock:9,is_external:1}];
+const settings = {external_api_url:'https://provider.example',external_api_key:'test',external_profit_margin:'20',usd_to_bdt_rate:'125'};
+const DB = {prepare(sql){let args;return {bind(...a){args=a;return this},async first(){if(sql.includes('FROM settings'))return {value:settings[args[0]]};if(sql.includes('WHERE external_id'))return products.find(p=>p.external_id===args[0]);if(sql.includes('FROM products WHERE id'))return {...products.find(p=>p.id===args[0])};},async all(){if(sql.includes('FROM preorders'))return {results:[]};return {results:products.map(p=>({...p}))}},async run(){if(sql.startsWith('UPDATE products SET name')){const p=products.find(p=>p.id===args[6]);Object.assign(p,{name:args[0],api_stock:args[5],price_usd:args[3],price_bdt:args[4]});}else if(sql.startsWith('UPDATE products SET api_stock = 0'))products.find(p=>p.id===args[0]).api_stock=0;return {success:true}}}}};
+const context = vm.createContext({console,URL,Response,Request,AbortController,setTimeout,clearTimeout,fetch:async()=>{if(fail)throw Error('offline');return Response.json({products:catalog})}});
+vm.runInContext(source+'\nglobalThis.api={providerStock,syncExternalProducts,fetchLiveProductStock,checkExternalStock};',context);
+(async()=>{
+const {api}=context;
+for(const [input,expected] of [[{stock:0,available:true},0],[{stock:7},7],[{stock:0,remains:8},0],[{remains:'4'},4],[{available:true},0],[{stock:9,available:false},0],[{stock:-1},0]])assert.equal(api.providerStock(input),expected);
+catalog=[{id:'a',name:'A',price:2,stock:3,available:true}];
+assert.equal((await api.syncExternalProducts({DB})).success,true);
+assert.equal(products[0].api_stock,3);assert.equal(products[1].api_stock,0);
+catalog=[{id:'a',name:'A',price:2,stock:0,available:true}];
+let fresh=await api.fetchLiveProductStock({DB},products[0]);assert.equal(fresh.api_stock,0);assert.equal(fresh.stock_verified,true);
+assert.equal(await api.checkExternalStock({DB},1,fresh,1),false);
+catalog=[];products[0].api_stock=12;assert.equal((await api.syncExternalProducts({DB})).success,true);assert.equal(products[0].api_stock,0);
+fail=true;products[0].api_stock=8;fresh=await api.fetchLiveProductStock({DB},products[0]);assert.equal(fresh.stock_verified,false);assert.equal(products[0].api_stock,8);assert.equal(await api.checkExternalStock({DB},1,fresh,1),false);
+console.log('PASS: exact quantities, zero stock, removed products, empty catalog, provider failure and checkout guards');
+})().catch(e=>{console.error(e);process.exitCode=1});

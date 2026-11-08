@@ -473,7 +473,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   // External API Product Purchase
   if (prod.is_external === 1) {
     if ((prod.api_stock || 0) < qty) {
-      await sendMsg(env, chatId, `❌ <b>Product is currently out of stock!</b>\nYou can pre-order and you will be notified the instant it's restocked!`, [
+      await sendMsg(env, chatId, `📦 Available Stock: <b>0</b>\nYou can pre-order and you will be notified the instant it's restocked!`, [
         [{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]
       ]);
       return;
@@ -870,6 +870,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (!prod) return;
       if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
+      if (!await checkExternalStock(env, chatId, prod, qty)) return;
 
       const totalPrice = Number((prod.price_usd * qty).toFixed(2));
       const userBal = user ? (user.balance_usd || 0) : 0;
@@ -910,6 +911,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (!prod) return;
       if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
+      if (!await checkExternalStock(env, chatId, prod, qty)) return;
 
       const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
       const totalUsd = Number((prod.price_usd * qty).toFixed(2));
@@ -941,8 +943,10 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const method = parts[1];
       const prodId = parts[2];
       const qty = parseInt(parts[3]) || 1;
-      const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
+      let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (!prod) return;
+      if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
+      if (!await checkExternalStock(env, chatId, prod, qty)) return;
       const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
       const totalUsd = Number((prod.price_usd * qty).toFixed(2));
       const totalBdt = Math.round(totalUsd * rate);
@@ -1436,54 +1440,35 @@ function smartProductIcon(name) {
   return `⚡ ${str}`;
 }
 
-// Fetch live stock for a single external product on-demand
+// Never invent stock when a provider omits its quantity.
+function providerStock(item) {
+  if (item.available === false || item.available === 0 || item.available === "false") return 0;
+  const raw = item.stock ?? item.remains;
+  if (raw === null || raw === undefined || raw === "" || typeof raw === "boolean") return 0;
+  const count = Number(raw);
+  return Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0;
+}
+
+// Use the same provider formats and reconciliation for detail and checkout.
 async function fetchLiveProductStock(env, prod) {
   if (!prod || prod.is_external !== 1 || !prod.external_id) return prod;
-  try {
-    let baseUrl = (await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io")).trim().replace(/\/+$/, "");
-    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
-    const apiKey = await getSetting(env, "external_api_key", "");
-    if (!apiKey) return prod;
+  const result = await syncExternalProducts(env);
+  if (!result.success) return { ...prod, stock_verified: false };
+  const fresh = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prod.id).first();
+  return { ...(fresh || prod), stock_verified: Boolean(fresh) };
+}
 
-    const vResp = await fetchWithTimeout(`${baseUrl}/api/reseller/products`, {
-      method: "GET",
-      headers: { "X-Reseller-Key": apiKey, "Accept": "application/json", "User-Agent": "TelegramStoreBot/2.0" }
-    }, 2500);
-
-    if (vResp.ok) {
-      const vData = await vResp.json();
-      if (vData && Array.isArray(vData.products)) {
-        const ext = vData.products.find(p => String(p.id) === String(prod.external_id));
-        if (ext) {
-          const liveStock = ext.available ? (parseInt(ext.stock) || 0) : 0;
-          const liveCost = parseFloat(ext.price) || prod.cost_price_usd;
-          const margin = parseFloat(await getSetting(env, "external_profit_margin", "20"));
-          const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
-
-          let finalUsd = (prod.custom_price_usd && prod.custom_price_usd > 0)
-            ? prod.custom_price_usd
-            : Number((liveCost * (1 + margin / 100)).toFixed(2));
-          let finalBdt = Math.round(finalUsd * rate);
-
-          const prevStock = prod.api_stock || 0;
-          await env.DB.prepare("UPDATE products SET api_stock = ?, cost_price_usd = ?, price_usd = ?, price_bdt = ? WHERE id = ?")
-            .bind(liveStock, liveCost, finalUsd, finalBdt, prod.id).run();
-
-          prod.api_stock = liveStock;
-          prod.cost_price_usd = liveCost;
-          prod.price_usd = finalUsd;
-          prod.price_bdt = finalBdt;
-
-          if (prevStock === 0 && liveStock > 0) {
-            await notifyPreorders(env, prod.id, prod.name, liveStock);
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.error("fetchLiveProductStock error:", e.message);
+async function checkExternalStock(env, chatId, prod, quantity) {
+  if (prod.is_external !== 1) return true;
+  if (!prod.stock_verified) {
+    await sendMsg(env, chatId, "⚠️ Live stock could not be verified. Please refresh and try again.");
+    return false;
   }
-  return prod;
+  if (prod.api_stock < quantity) {
+    await sendMsg(env, chatId, `⚠️ Only ${prod.api_stock} item(s) currently available. Please refresh the product and choose a smaller quantity.`);
+    return false;
+  }
+  return true;
 }
 
 // Full live sync for all external products
@@ -1494,7 +1479,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
     const key = apiKey || await getSetting(env, "external_api_key", "");
     if (!key) return { success: false, message: "Please configure your External API Key in Admin Panel." };
 
-    let items = [];
+    let items = null;
     let isVexorix = false;
 
     try {
@@ -1511,7 +1496,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
             name: p.name,
             desc: p.description ? (p.description + (p.how_to_use ? `\n\n📖 Instructions:\n${p.how_to_use}` : "")) : (p.how_to_use || "Digital License"),
             rate: p.price,
-            stock: p.available ? (p.stock || 50) : 0
+            stock: providerStock(p)
           }));
         }
       }
@@ -1526,26 +1511,28 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
         }, 3500);
         if (resp.ok) {
           const d = await resp.json();
-          items = Array.isArray(d) ? d : (d.services || d.products || d.data || []);
+          items = Array.isArray(d) ? d : (d.services ?? d.products ?? d.data ?? null);
         }
       } catch (_) {}
     }
 
-    if (!items || items.length === 0) return { success: false, message: `Could not fetch products. Check API key and Base URL (${baseUrl}).` };
+    if (!Array.isArray(items)) return { success: false, message: `Could not fetch products. Check API key and Base URL (${baseUrl}).` };
 
     const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
     const margin = parseFloat(await getSetting(env, "external_profit_margin", "20"));
 
+    const seenIds = new Set();
     let importedCount = 0;
     for (const item of items) {
-      const extId = String(item.id || item.service || item.product_id || "");
+      const extId = String(item.id ?? item.service ?? item.product_id ?? "");
       if (!extId) continue;
+      seenIds.add(extId);
 
       const rawName = item.name || item.title || item.product_name || "External Product";
       const name = smartProductIcon(rawName);
       const desc = item.desc || item.description || `Automated digital product delivered via API. (ID: ${extId})`;
       const baseCostPrice = parseFloat(item.rate || item.price || item.cost || 1.0);
-      const apiStock = parseInt(item.stock || item.remains || (item.available ? 50 : 0)) || 0;
+      const apiStock = providerStock(item);
 
       const existing = await env.DB.prepare("SELECT id, api_stock, custom_price_usd FROM products WHERE external_id = ?").bind(extId).first();
       let finalPrice = (existing && existing.custom_price_usd && existing.custom_price_usd > 0)
@@ -1571,6 +1558,14 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
         await notifyPreorders(env, targetId, name, apiStock);
       }
       importedCount++;
+    }
+
+    // A successful complete catalog is authoritative, including an empty catalog.
+    const { results: externalProducts } = await env.DB.prepare("SELECT id, external_id FROM products WHERE is_external = 1").all();
+    for (const product of externalProducts) {
+      if (!seenIds.has(String(product.external_id))) {
+        await env.DB.prepare("UPDATE products SET api_stock = 0 WHERE id = ?").bind(product.id).run();
+      }
     }
 
     await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
@@ -1714,15 +1709,8 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
   try {
     await ensureDbReady(env.DB);
 
-    // Non-blocking background sync if > 60s since last sync (NEVER blocks user view!)
-    try {
-      const lastSyncStr = await getSetting(env, "last_external_sync_time", "0");
-      const lastSync = parseInt(lastSyncStr) || 0;
-      if (Date.now() - lastSync > 60000) {
-        await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
-        syncExternalProducts(env).catch(e => console.error("Background sync error:", e));
-      }
-    } catch (_) {}
+    // Await the provider before rendering so Refresh displays the new quantity.
+    const stockSync = await syncExternalProducts(env);
 
     // Defensively query products
     let prods = [];
@@ -1741,10 +1729,12 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
     if (prods && prods.length > 0) {
       prods.forEach(prod => {
         const stock = prod.stock_qty || 0;
-        const icon = stock > 0 ? "🟢" : "🔴";
-        const stockLabel = stock > 0 ? `(${stock})` : "(Out of stock)";
+        const verified = !(prod.is_external && !stockSync.success);
+        const stockLabel = verified ? `(${stock})` : "(?)";
+        const name = prod.name.replace(/[🔴🟢]/gu, "").trim();
         keyboard.push([{
-          text: `${icon} ${prod.name} ${stockLabel}`,
+          text: `${name} - $${Number(prod.price_usd).toFixed(2)} ${stockLabel}`,
+          ...(verified ? { style: stock > 0 ? "success" : "danger" } : {}),
           callback_data: `prod_${prod.id}`
         }]);
       });
@@ -1759,7 +1749,7 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
     if (!prods || prods.length === 0) {
       text = `🛍️ <b>Store Products</b>\n\n⚠️ Currently no products are available in the store.\n\nPlease check back later or contact admin @fojlaybd.`;
     } else {
-      text = `🛍️ <b>Available Products</b>\n\n🟢 <b>In Stock</b> (Instant Automated Delivery)\n🔴 <b>Out of Stock</b> (Pre-order Available)\n\n<i>Click any product below to view details and order:</i>`;
+      text = `🛍️ <b>Available Products</b>\n\n<i>Click any product below to view details and order:</i>`;
     }
 
     if (editMessageId) {
@@ -1781,15 +1771,7 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null) 
       return;
     }
 
-    // Live real-time stock check for external API products with 2.5s timeout race
-    if (prod.is_external === 1) {
-      try {
-        prod = await Promise.race([
-          fetchLiveProductStock(env, prod),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 2500))
-        ]).catch(() => prod);
-      } catch (_) {}
-    }
+    if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
 
     const stockRow = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE product_id = ? AND is_sold = 0").bind(prodId).first();
     const stockCount = prod.is_external ? (prod.api_stock || 0) : (stockRow ? stockRow.count : 0);
@@ -1799,12 +1781,14 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null) 
     const safeDesc = escapeHtml(prod.description || "Digital License");
     const details = `💌 <b>${escapeHtml(prod.name)}</b>\n\n` +
       `👛 Price: <b>$${Number(prod.price_usd).toFixed(2)} / item</b> (≈ ৳${priceBdt} BDT)\n` +
-      `📦 Available Stock: <b>${stockCount}</b>\n\n` +
+      `📦 Available Stock: <b>${prod.is_external && !prod.stock_verified ? "Unavailable — please refresh" : stockCount}</b>\n\n` +
       `📦 <b>Product Details:</b>\n<blockquote>${safeDesc}</blockquote>\n\n` +
       `<blockquote>Important Note:\nDelivery is instant and automated after payment confirmation.</blockquote>`;
 
     const buttons = [];
-    if (stockCount > 0) {
+    if (prod.is_external && !prod.stock_verified) {
+      // Keep Refresh available without offering checkout on stale stock.
+    } else if (stockCount > 0) {
       buttons.push([{ text: "🛍️ Buy Now", callback_data: `buynow_${prod.id}_1` }]);
     } else {
       buttons.push([{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]);
@@ -1830,14 +1814,8 @@ async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId
   try {
     let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
     if (!prod) return;
-    if (prod.is_external === 1) {
-      try {
-        prod = await Promise.race([
-          fetchLiveProductStock(env, prod),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 2500))
-        ]).catch(() => prod);
-      } catch (_) {}
-    }
+    if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
+    if (!await checkExternalStock(env, chatId, prod, quantity)) return;
 
     const user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
     const userBal = user ? (user.balance_usd || 0) : 0;
