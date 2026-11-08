@@ -1732,8 +1732,9 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
         const verified = !(prod.is_external && !stockSync.success);
         const stockLabel = verified ? `(${stock})` : "(?)";
         const name = prod.name.replace(/[🔴🟢]/gu, "").trim();
+        const price = Number(prod.price_usd).toFixed(2).replace(/\.00$/, "");
         keyboard.push([{
-          text: `${name} - $${Number(prod.price_usd).toFixed(2)} ${stockLabel}`,
+          text: `${name} - $${price} ${stockLabel}`,
           ...(verified ? { style: stock > 0 ? "success" : "danger" } : {}),
           callback_data: `prod_${prod.id}`
         }]);
