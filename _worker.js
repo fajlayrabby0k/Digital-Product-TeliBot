@@ -416,14 +416,8 @@ async function verifyBinancePayOrder(env, binanceOrderId, expectedUsd) {
       }
     }
 
-    // 2. Smart Binance Auto-Verify Mode (Instant verification on valid Order ID)
-    const autoMode = await getSetting(env, "binance_auto_verify", "1");
-    if (autoMode === "1") {
-      if (/^[0-9A-Za-z]{8,30}$/.test(cleanId)) {
-        return { success: true, paidAmount: expectedUsd, orderId: cleanId };
-      }
-    }
-
+    // A transaction ID's format is never evidence that money was received.
+    // Until a supported history API is configured, require manual confirmation.
     return { success: false, reason: "manual_approval", message: "Sent for manual confirmation." };
   } catch (err) {
     return { success: false, reason: "error", message: `Binance verification error: ${err.message}` };
