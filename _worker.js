@@ -127,6 +127,7 @@ async function ensureDbReady(db) {
       `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`,
       `CREATE TABLE IF NOT EXISTS admin_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
       `CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
+      `CREATE TABLE IF NOT EXISTS bep20_payment_claims (tx_hash TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_wei TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`,
       `CREATE TABLE IF NOT EXISTS binance_payment_claims (transaction_id TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_usdt TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`
     ];
     for (const q of schema) await db.prepare(q).run();
@@ -267,91 +268,102 @@ async function clearAdminState(env, id) {
 // ====================================================================
 // BEP20 USDT Blockchain Auto-Verification (BSC JSON-RPC)
 // ====================================================================
-async function verifyBscUsdtTx(env, txHash, expectedUsd) {
+const BSC_USDT_CONTRACT = "0x55d398326f99059ff775485246999027b3197955";
+const BSC_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const BSC_REQUIRED_CONFIRMATIONS = 12;
+
+async function bscRpc(url, method, params) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
   try {
-    const cleanHash = txHash.trim();
-    if (!/^0x[a-fA-F0-9]{64}$/.test(cleanHash)) {
-      return { success: false, reason: "invalid_format", message: "Invalid Transaction Hash format. Must be a 66-character hex string starting with 0x." };
+    const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: controller.signal });
+    const data = await response.json();
+    if (!response.ok || data.error || !("result" in data)) throw new Error("RPC request rejected");
+    return data.result;
+  } finally { clearTimeout(timer); }
+}
+
+async function verifyBscUsdtTx(env, txHash, expectedUsd, invoice = null) {
+  try {
+    const hash = String(txHash).trim().toLowerCase();
+    if (!/^0x[a-f0-9]{64}$/.test(hash)) return { success: false, reason: "invalid_format", message: "Send the full BEP20 transaction hash: 0x followed by 64 hex characters." };
+    const createdAt = invoiceTimestamp(invoice?.created_at);
+    if (!invoice || !["order", "deposit"].includes(invoice.type) || invoice.status !== "pending" ||
+        !Number.isFinite(createdAt) || createdAt > Date.now() || Date.now() - createdAt > 7 * 86400000 ||
+        !Number.isFinite(expectedUsd) || expectedUsd < 0) {
+      return { success: false, reason: "invalid_invoice", message: "This invoice is not payable or is over 7 days old. Contact admin." };
     }
-
-    // Prevent Replay Attack / Double Spend
-    const usedOrder = await env.DB.prepare("SELECT id FROM orders WHERE trx_id = ? AND status = 'completed'").bind(cleanHash).first();
-    const usedDep = await env.DB.prepare("SELECT id FROM deposits WHERE trx_id = ? AND status = 'completed'").bind(cleanHash).first();
-    if (usedOrder || usedDep) {
-      return { success: false, reason: "already_used", message: "This transaction hash has already been redeemed for another order or deposit!" };
-    }
-
-    const bep20Addr = (await getSetting(env, "bep20_addr", "")).toLowerCase().trim();
-    if (!bep20Addr || !bep20Addr.startsWith("0x")) {
-      return { success: false, reason: "no_wallet", message: "Store BEP20 address is not configured properly by admin." };
-    }
-
-    const cleanTargetAddr = bep20Addr.replace(/^0x/, "").toLowerCase().padStart(64, "0");
-
-    // Public BSC RPC Endpoints (High Availability)
-    const rpcList = [
-      "https://bsc-dataseed.binance.org/",
-      "https://bsc-dataseed1.defibit.io/",
-      "https://binance.llamarpc.com",
-      "https://rpc.ankr.com/bsc"
-    ];
-
-    let receipt = null;
-    for (const rpcUrl of rpcList) {
+    const [usedOrder, usedDeposit, claim, address] = await Promise.all([
+      env.DB.prepare("SELECT id FROM orders WHERE LOWER(trx_id) = ? AND status = 'completed'").bind(hash).first(),
+      env.DB.prepare("SELECT id FROM deposits WHERE LOWER(trx_id) = ? AND status = 'completed'").bind(hash).first(),
+      env.DB.prepare("SELECT tx_hash FROM bep20_payment_claims WHERE tx_hash = ? OR (invoice_type = ? AND invoice_id = ?)").bind(hash, invoice.type, invoice.id).first(),
+      getSetting(env, "bep20_addr", "")
+    ]);
+    if (usedOrder || usedDeposit || claim) return { success: false, reason: "already_used", message: "This transaction or invoice has already been submitted. Contact admin if delivery is pending." };
+    const wallet = String(address).trim().toLowerCase();
+    if (!/^0x[a-f0-9]{40}$/.test(wallet) || /^0x0{40}$/.test(wallet)) return { success: false, reason: "no_wallet", message: "Admin must configure a valid BEP20 receive address." };
+    const urls = env.BSC_RPC_URL ? [env.BSC_RPC_URL] : ["https://bsc-dataseed.bnbchain.org", "https://bsc-dataseed1.defibit.io"];
+    let receipt, block, head, rpcWorked = false;
+    for (const url of urls) {
       try {
-        const resp = await fetch(rpcUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getTransactionReceipt", params: [cleanHash] })
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data && data.result) { receipt = data.result; break; }
-        }
-      } catch (_) {}
+        if (new URL(url).protocol !== "https:") continue;
+        const [chain, candidate, latest] = await Promise.all([
+          bscRpc(url, "eth_chainId", []), bscRpc(url, "eth_getTransactionReceipt", [hash]), bscRpc(url, "eth_blockNumber", [])
+        ]);
+        if (BigInt(chain) !== 56n) continue;
+        rpcWorked = true;
+        if (!candidate) continue;
+        if (!/^0x[0-9a-f]+$/i.test(candidate.blockNumber || "") || !/^0x[0-9a-f]+$/i.test(latest || "")) continue;
+        const candidateBlock = await bscRpc(url, "eth_getBlockByNumber", [candidate.blockNumber, false]);
+        if (!candidateBlock || !/^0x[0-9a-f]{64}$/i.test(candidate.blockHash || "") || candidateBlock.hash?.toLowerCase() !== candidate.blockHash.toLowerCase() ||
+            candidateBlock.number?.toLowerCase() !== candidate.blockNumber.toLowerCase()) continue;
+        receipt = candidate; block = candidateBlock; head = BigInt(latest); break;
+      } catch (_) { /* Retry a second public endpoint without exposing RPC credentials. */ }
     }
-
-    if (!receipt) {
-      return { success: false, reason: "not_found", message: "Transaction receipt not found on BNB Smart Chain yet. Please wait 15-30 seconds and send again." };
+    if (!receipt) return { success: false, reason: rpcWorked ? "not_found" : "rpc_unavailable", message: rpcWorked ? "Transaction not confirmed on BNB Smart Chain yet. Wait briefly and retry the same hash." : "BNB Smart Chain RPC is unavailable. Retry later or contact admin; do not pay again." };
+    if (receipt.transactionHash?.toLowerCase() !== hash || receipt.status !== "0x1") return { success: false, reason: "tx_failed", message: "The blockchain transaction failed or does not match this hash." };
+    const confirmations = head - BigInt(receipt.blockNumber) + 1n;
+    if (confirmations < BigInt(BSC_REQUIRED_CONFIRMATIONS)) return { success: false, reason: "confirmations", message: `Waiting for confirmations (${confirmations < 0n ? 0 : confirmations}/${BSC_REQUIRED_CONFIRMATIONS}). Retry the same TxHash shortly; do not pay again.` };
+    if (!/^0x[0-9a-f]+$/i.test(block.timestamp || "") || Number(BigInt(block.timestamp)) * 1000 < createdAt || Number(BigInt(block.timestamp)) * 1000 > Date.now()) {
+      return { success: false, reason: "old_payment", message: "The transfer must be made after this invoice was created." };
     }
-
-    if (receipt.status !== "0x1") {
-      return { success: false, reason: "tx_failed", message: "Transaction failed or reverted on the blockchain." };
+    const recipientTopic = `0x${wallet.slice(2).padStart(64, "0")}`;
+    let total = 0n;
+    for (const log of receipt.logs || []) {
+      if (log.removed || log.address?.toLowerCase() !== BSC_USDT_CONTRACT || log.topics?.length !== 3 ||
+          log.topics[0]?.toLowerCase() !== BSC_TRANSFER_TOPIC || log.topics[2]?.toLowerCase() !== recipientTopic ||
+          !/^0x[0-9a-f]{64}$/i.test(log.data || "")) continue;
+      total += BigInt(log.data);
     }
-
-    // USDT on BSC Contract: 0x55d398326f99059ff775485246999027B3197955
-    const usdtContract = "0x55d398326f99059ff775485246999027b3197955".toLowerCase();
-    const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-
-    const matchingLog = (receipt.logs || []).find(log => {
-      if (!log.address || log.address.toLowerCase() !== usdtContract) return false;
-      if (!log.topics || log.topics.length < 3) return false;
-      if (log.topics[0].toLowerCase() !== transferTopic) return false;
-      const toTopic = log.topics[2].toLowerCase().replace(/^0x/, "").padStart(64, "0");
-      return toTopic === cleanTargetAddr;
-    });
-
-    if (!matchingLog) {
-      return { success: false, reason: "recipient_mismatch", message: "No USDT transfer to our store wallet address was found in this transaction." };
-    }
-
-    const rawWei = BigInt(matchingLog.data);
-    const paidUsdt = Number(rawWei) / 1e18;
-
-    // 0.05 USDT tolerance for gas/rounding
-    if (paidUsdt < (expectedUsd - 0.05)) {
-      return { success: false, reason: "amount_low", message: `Paid amount ($${paidUsdt.toFixed(2)} USDT) is less than required ($${expectedUsd.toFixed(2)} USDT).` };
-    }
-
-    return { success: true, paidAmount: paidUsdt, txHash: cleanHash };
-  } catch (err) {
-    return { success: false, reason: "error", message: `Verification error: ${err.message}` };
-  }
+    if (total <= 0n) return { success: false, reason: "recipient_mismatch", message: "No supported USDT (BEP20) transfer to the store address was found. Check the network, token and recipient." };
+    const required = usdtUnits(expectedUsd.toFixed(8));
+    if (required === null || total < required * 10000000000n) return { success: false, reason: "amount_low", message: "Received USDT is less than required. Network withdrawal fees must be covered by the sender." };
+    try {
+      await env.DB.prepare("INSERT INTO bep20_payment_claims (tx_hash, invoice_type, invoice_id, user_id, amount_wei) VALUES (?, ?, ?, ?, ?)")
+        .bind(hash, invoice.type, invoice.id, invoice.user_id, total.toString()).run();
+    } catch (_) { return { success: false, reason: "claim_failed", message: "Transaction could not be reserved. It may already be in use; contact admin." }; }
+    return { success: true, paidAmount: Number(total) / 1e18, txHash: hash };
+  } catch (_) { return { success: false, reason: "unavailable", message: "BEP20 verification is temporarily unavailable. Retry or contact admin; do not pay again." }; }
 }
 
 // ====================================================================
 // Binance Pay Auto-Verification Engine
 // ====================================================================
+async function handleBep20SettingText(env, chatId, text, state) {
+  if (String(chatId) !== String(env.ADMIN_ID) || state.state !== "awaiting_setting_bep20") return false;
+  if (text === "/cancel") { await clearAdminState(env, chatId); await sendMsg(env, chatId, "BEP20 address change cancelled."); return true; }
+  const address = text.trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address) || /^0x0{40}$/.test(address)) {
+    await sendMsg(env, chatId, "Send your BNB Smart Chain USDT receive address (0x + 40 hex characters), or /cancel. Never send a private key or seed phrase.");
+    return true;
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('bep20_addr', ?)").bind(address).run();
+  await clearAdminState(env, chatId);
+  await sendMsg(env, chatId, "✅ BEP20 receive address updated.", [[{ text: "Payment Settings", callback_data: "adm_payment_settings" }]]);
+  return true;
+}
+
 async function handleBinanceSettingText(env, chatId, text, state) {
   if (String(chatId) !== String(env.ADMIN_ID) || state.state !== "awaiting_setting_binance") return false;
   if (text === "/cancel") {
@@ -653,7 +665,7 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
   } else if (method === "bep20") {
     mTitle = "BEP20 USDT (Blockchain Auto-Credit)";
     accNum = await getSetting(env, "bep20_addr", "0x71C...YourWalletAddress");
-    promptDetails = "⚡ <b>Instant Credit:</b> After sending USDT on BSC, please <b>REPLY to this message</b> with your <b>Transaction Hash (TxHash)</b> to have your wallet credited automatically!";
+    promptDetails = "⚡ <b>Instant Credit:</b> After sending USDT on BSC, please <b>REPLY to this message</b> with your <b>Transaction Hash (TxHash)</b>. Your wallet will be credited after 12 confirmations. Ensure withdrawal fees do not reduce the required amount!";
   }
 
   const res = await env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, status) VALUES (?, ?, ?, ?, 'pending')").bind(chatId, username, method.toUpperCase(), neededAmount).run();
@@ -720,6 +732,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       if (adminState && adminState.state) {
         if (await handleProductIconText(env, chatId, text, adminState)) return;
         if (await handleBinanceSettingText(env, chatId, text, adminState)) return;
+        if (await handleBep20SettingText(env, chatId, text, adminState)) return;
         const handled = await handleAdminTextState(env, chatId, text, adminState);
         if (handled) return;
       }
@@ -764,10 +777,10 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
             // A. BEP20 USDT Auto-Verification
             if (method === "BEP20") {
               await sendMsg(env, chatId, `🔍 <b>Verifying your BEP20 USDT transaction on BSC blockchain...</b>\n\nTxHash: <code>${cleanText}</code>\nPlease wait a few seconds.`);
-              const verifyRes = await verifyBscUsdtTx(env, cleanText, order.amount_usd);
+              const verifyRes = await verifyBscUsdtTx(env, cleanText, order.amount_usd, { ...order, type: "order" });
 
               if (verifyRes.success) {
-                await completeSuccessfulOrder(env, order, cleanText, chatId);
+                await completeSuccessfulOrder(env, order, verifyRes.txHash, chatId);
                 return;
               } else {
                 await sendMsg(env, chatId, `❌ <b>BEP20 Verification Failed:</b>\n\n${verifyRes.message}\n\n<i>If your transfer was just sent, please wait 15-30 seconds for BSC network block confirmation and reply again.</i>`);
@@ -809,14 +822,16 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
           // BEP20 Auto-Deposit
           if (depMethod === "BEP20") {
             await sendMsg(env, chatId, `🔍 <b>Verifying your BEP20 USDT deposit on BSC blockchain...</b>\n\nTxHash: <code>${cleanText}</code>`);
-            const verifyRes = await verifyBscUsdtTx(env, cleanText, dRow.amount_usd || 1.0);
+            const verifyRes = await verifyBscUsdtTx(env, cleanText, dRow.amount_usd || 0, { ...dRow, type: "deposit" });
             if (verifyRes.success) {
               const creditedUsd = verifyRes.paidAmount;
               const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
               const creditedBdt = Math.round(creditedUsd * rate);
 
-              await env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ?").bind(creditedUsd, creditedBdt, cleanText, depId).run();
-              await env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(creditedUsd, creditedBdt, chatId).run();
+              await env.DB.batch([
+                env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ?").bind(creditedUsd, creditedBdt, verifyRes.txHash, depId),
+                env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(creditedUsd, creditedBdt, chatId)
+              ]);
               const u = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
 
               await sendMsg(env, chatId, `🎉 <b>Deposit Verified & Credited Automatically!</b>\n\nDeposit ID: #${depId}\nCredited: <b>+$${creditedUsd.toFixed(2)} USDT (≈ ৳${creditedBdt} BDT)</b>\nNew Wallet Balance: <b>$${u.balance_usd.toFixed(2)} USD</b>`, [
@@ -1102,7 +1117,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       } else if (method === "bep20") {
         mTitle = "BEP20 USDT (Blockchain Auto-Verify)";
         accNum = await getSetting(env, "bep20_addr", "0x71C...YourWalletAddress");
-        customInstructions = `👉 <b>Send exact amount to BEP20 (BSC) Address:</b>\n<code>${accNum}</code>\nNetwork: <b>BNB Smart Chain (BEP20)</b>\nToken: <b>USDT</b>\n\n⚡ <b>Instant Verification:</b> After sending, please <b>REPLY to this message</b> with your <b>Transaction Hash (TxHash)</b> (e.g. <code>0x4a7b...</code>). The blockchain will auto-verify and deliver immediately!`;
+        customInstructions = `👉 <b>Send exact amount to BEP20 (BSC) Address:</b>\n<code>${accNum}</code>\nNetwork: <b>BNB Smart Chain (BEP20)</b>\nToken: <b>USDT</b>\n\n⚡ <b>Instant Verification:</b> After sending, please <b>REPLY to this message</b> with your <b>Transaction Hash (TxHash)</b> (e.g. <code>0x4a7b...</code>). After 12 confirmations, the bot will verify and deliver automatically. Ensure the received amount covers the total after withdrawal fees.`;
       }
 
       const checkoutText = `💳 <b>Payment Instructions — ${mTitle}</b>\n\n` +
