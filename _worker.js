@@ -1051,7 +1051,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     if (data === "adm_stock_menu") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `${(p.stock_qty || 0) > 0 ? "🟢" : "🔴"} ${productDisplayName(p)} (${p.stock_qty || 0})`, callback_data: `adm_addstock_${p.id}` }]);
+      const buttons = prods.map(p => [productListButton(p, `adm_addstock_${p.id}`)]);
       buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `📦 <b>Select Product to Add Stock:</b>\nClick any product below:`, buttons);
       return;
@@ -1069,7 +1069,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     if (data === "adm_price_menu") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `${productDisplayName(p)} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_setprice_${p.id}` }]);
+      const buttons = prods.map(p => [productListButton(p, `adm_setprice_${p.id}`)]);
       buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `💰 <b>Select Product to Set Custom Price or Profit Margin:</b>\n\nClick any product below:`, buttons);
       return;
@@ -1197,7 +1197,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     if (data === "adm_manage_products") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `${(p.stock_qty || 0) > 0 ? "🟢" : "🔴"} ${productDisplayName(p)} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_prod_details_${p.id}` }]);
+      const buttons = prods.map(p => [productListButton(p, `adm_prod_details_${p.id}`)]);
       buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `📋 <b>All Store Products:</b>\nClick any product to view details or edit:`, buttons);
       return;
@@ -1481,6 +1481,18 @@ function providerProductName(item) {
 function providerEmojiId(item) {
   const id = item.icon_custom_emoji_id ?? item.custom_emoji_id;
   return typeof id === "string" && /^\d+$/.test(id) ? id : null;
+}
+
+// Shared layout for customer and admin product lists.
+function productListButton(product, callbackData, verified = true) {
+  const stock = product.stock_qty || 0;
+  const price = Number(product.price_usd).toFixed(2).replace(/\.00$/, "");
+  return {
+    text: `${productDisplayName(product)} - $${price} (${verified ? stock : "?"})`,
+    ...productButtonIcon(product),
+    ...(verified ? { style: stock > 0 ? "success" : "danger" } : {}),
+    callback_data: callbackData
+  };
 }
 
 function productButtonIcon(product) {
@@ -1838,17 +1850,8 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
     const keyboard = [];
     if (prods && prods.length > 0) {
       prods.forEach(prod => {
-        const stock = prod.stock_qty || 0;
         const verified = !(prod.is_external && !stockSync.success);
-        const stockLabel = verified ? `(${stock})` : "(?)";
-        const name = productDisplayName(prod);
-        const price = Number(prod.price_usd).toFixed(2).replace(/\.00$/, "");
-        keyboard.push([{
-          text: `${name} - $${price} ${stockLabel}`,
-          ...productButtonIcon(prod),
-          ...(verified ? { style: stock > 0 ? "success" : "danger" } : {}),
-          callback_data: `prod_${prod.id}`
-        }]);
+        keyboard.push([productListButton(prod, `prod_${prod.id}`, verified)]);
       });
     }
 

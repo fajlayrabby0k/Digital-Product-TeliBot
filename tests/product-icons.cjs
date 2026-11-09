@@ -13,6 +13,7 @@ const DB = { prepare(sql) {
       if (sql.includes('FROM products')) return Number(args[0]) === product.id ? {...product} : null;
       return null;
     },
+    async all() { return {results:[{...product,stock_qty:0,price_usd:5}]}; },
     async run() {
       if (sql.startsWith('UPDATE products SET custom_icon')) { product.custom_icon = args[0]; writes++; }
       if (sql.startsWith('INSERT OR REPLACE INTO admin_states')) state = { state: 'awaiting_product_icon', data: args[1] };
@@ -39,6 +40,14 @@ const callback = (data, id=1) => api.handleUpdate({callback_query:{id:'cb',data,
   assert.equal(api.renderProductDescription(null), 'Digital License');
   for (const icon of ['🎬','🛡️','👨‍💻','🇧🇩','1️⃣']) assert.equal(api.validProductIcon(icon),true);
   for (const icon of ['hello','🎬🤖','<b>','https://test.test/a.png']) assert.equal(api.validProductIcon(icon),false);
+  for (const [menu, destination] of [['adm_manage_products','adm_prod_details_5'],['adm_price_menu','adm_setprice_5'],['adm_stock_menu','adm_addstock_5']]) {
+    await callback(menu);
+    const button=messages.at(-1).reply_markup.inline_keyboard[0][0];
+    assert.equal(button.text,'🛡️ Provider VPN - $5 (0)');
+    assert.equal(button.style,'danger');
+    assert.equal(button.callback_data,destination);
+    assert(!/[🔴🟢]/u.test(button.text));
+  }
   await callback('adm_icon_5');
   assert(messages.at(-1).reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='adm_iconcustom_5'));
   await callback('adm_iconpick_5_🎬');
