@@ -88,6 +88,7 @@ export default {
     // 4. Telegram Webhook Handler
     if (request.method === "POST" && (url.pathname === "/api/webhook" || url.pathname === "/")) {
       try {
+        if (!await authenticateTelegramWebhook(request,env)) return new Response("Webhook authentication required", {status:403});
         const update = await request.json();
         if (ctx && typeof ctx.waitUntil === "function") {
           ctx.waitUntil(handleUpdate(update, env, url.origin, ctx).catch(error => console.error("Webhook processing error:", error)));
@@ -114,7 +115,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-speed-1";
+const DB_SCHEMA_VERSION = "2026-11-speed-2-redeem";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -146,6 +147,7 @@ async function initializeDatabase(db, force) {
       `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`,
       `CREATE TABLE IF NOT EXISTS admin_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
       `CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
+      `CREATE TABLE IF NOT EXISTS redeem_codes (code_hash TEXT PRIMARY KEY, amount_cents INTEGER NOT NULL CHECK(amount_cents > 0), created_by INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, redeemed_by INTEGER DEFAULT NULL, redeemed_at DATETIME DEFAULT NULL, redemption_token TEXT UNIQUE DEFAULT NULL, redeemed_bdt INTEGER DEFAULT NULL);`,
       `CREATE TABLE IF NOT EXISTS bep20_payment_claims (tx_hash TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_wei TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`,
       `CREATE TABLE IF NOT EXISTS binance_payment_claims (transaction_id TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_usdt TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`
     ];
@@ -183,6 +185,7 @@ async function initializeDatabase(db, force) {
       else for (const sql of missing) await db.prepare(sql).run();
     }
     const indexes = [
+      "CREATE UNIQUE INDEX IF NOT EXISTS deposits_redeem_once ON deposits(trx_id) WHERE method = 'REDEEM'",
       "CREATE INDEX IF NOT EXISTS inventory_available ON inventory(product_id, is_sold, id)",
       "CREATE INDEX IF NOT EXISTS inventory_order ON inventory(order_id, is_sold)",
       "CREATE INDEX IF NOT EXISTS orders_user_history ON orders(user_id, id DESC)",
@@ -268,6 +271,33 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
 // ====================================================================
 // Telegram API Helpers
 // ====================================================================
+const webhookBootstrapCache = new WeakMap();
+async function telegramWebhookSecret(botToken) {
+  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(`telibot:webhook:v1:${botToken}`));
+  return Array.from(new Uint8Array(bytes),byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+
+async function authenticateTelegramWebhook(request,env) {
+  // Local development without a bot token cannot send Telegram messages.
+  if (!env.BOT_TOKEN) return true;
+  const expected=env.TELEGRAM_WEBHOOK_SECRET || await telegramWebhookSecret(env.BOT_TOKEN);
+  if (request.headers.get('X-Telegram-Bot-Api-Secret-Token')===expected) return true;
+  if (env.TELEGRAM_WEBHOOK_SECRET) return false;
+  const previous=webhookBootstrapCache.get(env.DB);
+  if (previous?.token===env.BOT_TOKEN && previous.until>Date.now()) return false;
+  webhookBootstrapCache.set(env.DB,{token:env.BOT_TOKEN,until:Date.now()+60000});
+  // Upgrade an existing webhook without changing its URL or dropping pending updates.
+  // Never process the unauthenticated update used to trigger this configuration.
+  const info=await callTg(env,'getWebhookInfo',{});
+  if (!info.ok || !info.result?.url) return false;
+  try {
+    const saved=new URL(info.result.url), incoming=new URL(request.url);
+    if (saved.origin!==incoming.origin || saved.pathname!==incoming.pathname) return false;
+  } catch (_) {return false;}
+  await callTg(env,'setWebhook',{url:info.result.url,secret_token:expected,drop_pending_updates:false,max_connections:info.result.max_connections||40});
+  return false;
+}
+
 async function callTg(env, method, payload) {
   if (!env.BOT_TOKEN) return { ok: false, error: "BOT_TOKEN missing" };
   const controller = new AbortController();
@@ -622,13 +652,119 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   await processReferralCommission(env, chatId, totalUsd, prod.name);
 }
 
+function redeemAmountCents(text) {
+  const value=String(text).trim().replace(/^\$/, '');
+  if (!/^\d+(?:\.\d{1,2})?$/.test(value)) return null;
+  const [whole,fraction='']=value.split('.');
+  const cents=Number(whole)*100+Number(fraction.padEnd(2,'0'));
+  return Number.isSafeInteger(cents)&&cents>0&&cents<=100000000 ? cents : null;
+}
+
+function normalizeRedeemCode(text) {
+  let value=String(text).trim();
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url=new URL(value);
+      if (!['t.me','telegram.me'].includes(url.hostname)) return null;
+      value=url.searchParams.get('start')||'';
+    } catch (_) {return null;}
+  }
+  value=value.replace(/^redeem_/i,'').toUpperCase();
+  return /^RDM-[A-F0-9]{32}$/.test(value)?value:null;
+}
+
+async function redeemCodeHash(code) {
+  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(code));
+  return Array.from(new Uint8Array(bytes),byte=>byte.toString(16).padStart(2,'0')).join('');
+}
+
+async function createRedeemCode(env,chatId,amountCents) {
+  if (String(chatId)!==String(env.ADMIN_ID)) throw new Error('Admin access required');
+  if (!Number.isSafeInteger(amountCents)||amountCents<=0||amountCents>100000000) throw new Error('Invalid redeem amount');
+  for (let attempt=0;attempt<3;attempt++) {
+    const bytes=crypto.getRandomValues(new Uint8Array(16));
+    const code='RDM-'+Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('').toUpperCase();
+    const hash=await redeemCodeHash(code);
+    const result=await env.DB.prepare('INSERT OR IGNORE INTO redeem_codes (code_hash, amount_cents, created_by) VALUES (?, ?, ?)').bind(hash,amountCents,chatId).run();
+    if (result.meta.changes===1) return code;
+  }
+  throw new Error('Could not generate a unique code');
+}
+
+async function handleRedeemAdminText(env,chatId,text,state) {
+  if (String(chatId)!==String(env.ADMIN_ID)||state.state!=='awaiting_redeem_amount') return false;
+  if (text.startsWith('/')) {await clearAdminState(env,chatId);await sendAdminDashboard(env,chatId);return true;}
+  const cents=redeemAmountCents(text);
+  if (cents===null) {await sendMsg(env,chatId,'Enter a USD amount from $0.01 to $1,000,000 with up to 2 decimal places (e.g. 5 or 10.50). Send /cancel to cancel.');return true;}
+  let code;
+  try {code=await createRedeemCode(env,chatId,cents);} catch (_) {await sendMsg(env,chatId,'Code could not be created. Please retry.');return true;}
+  await clearAdminState(env,chatId);
+  let username=env.BOT_USERNAME;
+  if (!username) {const me=await callTg(env,'getMe',{});if(me.ok)username=me.result?.username;}
+  if (typeof username==='string') username=username.replace(/^@/,'');
+  const link=typeof username==='string'&&/^[A-Za-z0-9_]+$/.test(username)?`https://t.me/${username}?start=redeem_${code}`:null;
+  const buttons=[[{text:'📋 Copy Code',copy_text:{text:code}}]];
+  if(link)buttons.push([{text:'🔗 Copy Redeem Link',copy_text:{text:link}}]);
+  buttons.push([{text:'➕ Generate Another',callback_data:'adm_redeem_generate'},{text:'🔙 Admin Panel',callback_data:'admin_panel'}]);
+  await sendMsg(env,chatId,`🎁 <b>Redeem Code Created</b>\n\nAmount: <b>$${(cents/100).toFixed(2)} USD</b>\nCode: <code>${code}</code>${link?`\n\nRedeem link:\n${link}`:''}\n\n<i>Active immediately, no expiry. It can be redeemed once only. Save and share the code privately; anyone holding it can redeem the balance.</i>`,buttons);
+  return true;
+}
+
+async function redeemWalletCode(env,chatId,text) {
+  try {
+    const code=normalizeRedeemCode(text);
+    if (!code) return {success:false,message:'Invalid code. Paste the full redeem code or redeem link.'};
+    const hash=await redeemCodeHash(code);
+    const [voucher,rawRate]=await Promise.all([
+      env.DB.prepare('SELECT amount_cents, redeemed_by FROM redeem_codes WHERE code_hash = ?').bind(hash).first(),
+      getSetting(env,'usd_to_bdt_rate','125')
+    ]);
+    if (!voucher) return {success:false,message:'Redeem code not found. Please check the code.'};
+    if (voucher.redeemed_by!==null) return {success:false,message:'This redeem code has already been used.'};
+    const rate=Number(rawRate);
+    if (!Number.isFinite(rate)||rate<=0) return {success:false,message:'Wallet exchange rate is unavailable. Please contact admin.'};
+    const token=crypto.randomUUID();
+    const proof='EXISTS (SELECT 1 FROM redeem_codes WHERE code_hash = ? AND redemption_token = ? AND redeemed_by = ?)';
+    let results;
+    try {
+      results=await env.DB.batch([
+        env.DB.prepare("UPDATE redeem_codes SET redeemed_by = ?, redeemed_at = CURRENT_TIMESTAMP, redemption_token = ?, redeemed_bdt = ROUND(amount_cents / 100.0 * ?) WHERE code_hash = ? AND redeemed_by IS NULL AND EXISTS (SELECT 1 FROM users WHERE user_id = ?)").bind(chatId,token,rate,hash,chatId),
+        env.DB.prepare(`UPDATE users SET balance_usd = balance_usd + (SELECT amount_cents / 100.0 FROM redeem_codes WHERE code_hash = ? AND redemption_token = ?), balance_bdt = balance_bdt + (SELECT redeemed_bdt FROM redeem_codes WHERE code_hash = ? AND redemption_token = ?) WHERE user_id = ? AND ${proof}`).bind(hash,token,hash,token,chatId,hash,token,chatId),
+        env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, amount_bdt, trx_id, status) SELECT users.user_id, users.username, 'REDEEM', redeem_codes.amount_cents / 100.0, redeem_codes.redeemed_bdt, ?, 'completed' FROM users JOIN redeem_codes ON redeem_codes.redeemed_by = users.user_id WHERE users.user_id = ? AND redeem_codes.code_hash = ? AND redeem_codes.redemption_token = ?").bind(`REDEEM:${hash}`,chatId,hash,token)
+      ]);
+    } catch (_) {return {success:false,message:'Redemption could not be completed. Your code was not consumed if the transaction failed. Please retry or contact admin.'};}
+    if (results[0].meta.changes!==1) return {success:false,message:'This code has already been redeemed or your account is unavailable.'};
+    return {success:true,amountUsd:voucher.amount_cents/100};
+  } catch (_) { return {success:false,message:'Redemption is temporarily unavailable. Please retry or contact admin.'}; }
+
+}
+
+async function submitRedeemCode(env,chatId,text,sessionData = null) {
+  const result=await redeemWalletCode(env,chatId,text);
+  if (!result.success) {await sendMsg(env,chatId,`⚠️ ${result.message}`,[[{text:'❌ Cancel',callback_data:'redeem_cancel'}]]);return;}
+  if(sessionData !== null) await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state = 'awaiting_redeem_code' AND data = ?").bind(chatId,sessionData).run().catch(()=>{});
+  const user=await env.DB.prepare('SELECT balance_usd FROM users WHERE user_id = ?').bind(chatId).first().catch(()=>null);
+  await sendMsg(env,chatId,`🎁 <b>Redeem Successful!</b>\n\nAdded: <b>$${result.amountUsd.toFixed(2)} USD</b>${user?`\nWallet balance: <b>$${Number(user.balance_usd).toFixed(2)} USD</b>`:''}`,[[{text:'🛍️ Open Shop',callback_data:'shop'},{text:'💳 Deposit',callback_data:'deposit'}]]);
+}
+
+async function handleRedeemInput(env,chatId,text,state) {
+  if (state?.state!=='awaiting_redeem_code') return false;
+  if (text.startsWith('/')) {
+    await clearBinanceInput(env,chatId);
+    if(text==='/cancel'){await sendDeposit(env,chatId);return true;}
+    return false;
+  }
+  await submitRedeemCode(env,chatId,text,state.data);
+  return true;
+}
+
 // ====================================================================
 // Deposit Instructions Renderer
 // ====================================================================
 const BINANCE_DEPOSIT_MAX = 10;
 
 async function clearBinanceInput(env, chatId) {
-  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state IN ('awaiting_binance_amount', 'awaiting_binance_receipt', 'awaiting_bep20_amount', 'awaiting_bep20_hash')").bind(chatId).run();
+  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state IN ('awaiting_binance_amount', 'awaiting_binance_receipt', 'awaiting_bep20_amount', 'awaiting_bep20_hash', 'awaiting_redeem_code')").bind(chatId).run();
 }
 
 async function showBinanceInstructions(env, chatId, type, invoice, messageId = null) {
@@ -868,8 +1004,13 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Admin Text States
     if (String(chatId) === String(env.ADMIN_ID)) {
-      const adminState = await env.DB.prepare("SELECT * FROM admin_states WHERE user_id = ?").bind(chatId).first();
+      let adminState = await env.DB.prepare("SELECT * FROM admin_states WHERE user_id = ?").bind(chatId).first();
+      if (adminState?.state === 'awaiting_redeem_amount' && text.startsWith('/')) {
+        await clearAdminState(env,chatId);adminState=null;
+        if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
+      }
       if (adminState && adminState.state) {
+        if (await handleRedeemAdminText(env,chatId,text,adminState)) return;
         if (await handleProductIconText(env, chatId, text, adminState)) return;
         if (await handleBinanceSettingText(env, chatId, text, adminState)) return;
         if (await handleBep20SettingText(env, chatId, text, adminState)) return;
@@ -889,10 +1030,13 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Mandatory Force Join Gate
     if (String(chatId) !== String(env.ADMIN_ID)) {
-      const forceCheck = await checkForceJoin(env, chatId, Boolean(msg.reply_to_message || /^awaiting_(?:binance|bep20)_/.test(userState?.state || "")));
+      const forceCheck = await checkForceJoin(env, chatId, Boolean(userState?.state === "awaiting_redeem_code" || /^\/start(?:@\w+)?\s+redeem_/i.test(text) || msg.reply_to_message || /^awaiting_(?:binance|bep20)_/.test(userState?.state || "")));
       if (!forceCheck.passed) { await sendForceJoinScreen(env, chatId, forceCheck); return; }
     }
 
+    const redeemStart=text.match(/^\/start(?:@\w+)?\s+redeem_(RDM-[A-Fa-f0-9]{32})$/i);
+    if (redeemStart) {await clearBinanceInput(env,chatId);await submitRedeemCode(env,chatId,redeemStart[1]);return;}
+    if (await handleRedeemInput(env,chatId,text,userState)) return;
     if (await handleBep20Input(env, chatId, username, text, userState)) return;
     if (await handleBinanceInput(env, chatId, username, text, userState)) return;
 
@@ -1066,8 +1210,21 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Force Join Guard
     if (String(chatId) !== String(env.ADMIN_ID) && !data.startsWith("adm_") && !data.startsWith("admin_")) {
-      const forceCheck = await checkForceJoin(env, chatId, /^(?:wallet_pay_check_|direct_pay_|pay_|dep_)/.test(data));
+      const forceCheck = await checkForceJoin(env, chatId, /^(?:wallet_pay_check_|direct_pay_|pay_|dep_|redeem_)/.test(data));
       if (!forceCheck.passed) { await sendForceJoinScreen(env, chatId, forceCheck, messageId); return; }
+    }
+
+    if (data === 'redeem_open') {
+      await clearBinanceInput(env,chatId);
+      if(String(chatId)===String(env.ADMIN_ID))await clearAdminState(env,chatId);
+      await env.DB.prepare("INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, 'awaiting_redeem_code', ?)").bind(chatId,JSON.stringify({sessionId:crypto.randomUUID()})).run();
+      await editMsg(env,chatId,messageId,'🎁 <b>Redeem Code</b>\n\nPaste your redeem code or redeem link below. The assigned USD balance will be added to your wallet.\n\n<i>Each code works once only.</i>',[[{text:'❌ Cancel',callback_data:'redeem_cancel'}]]);
+      return;
+    }
+    if (data === 'redeem_cancel') {
+      await clearBinanceInput(env,chatId);
+      await sendDeposit(env,chatId,messageId);
+      return;
     }
 
     // Navigation Callbacks
@@ -1303,6 +1460,20 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     // ----------------------------------------------------------------
     if (data === "admin_panel") {
       if (String(chatId) === String(env.ADMIN_ID)) { await clearAdminState(env, chatId); await sendAdminDashboard(env, chatId, messageId); }
+      return;
+    }
+
+    if (data === 'adm_redeem_menu') {
+      if(String(chatId)!==String(env.ADMIN_ID))return;
+      await clearAdminState(env,chatId);
+      await editMsg(env,chatId,messageId,'🎁 <b>Redeem Codes</b>\n\nGenerate a voucher with a USD amount. It is active immediately, has no expiry and can be redeemed once only.',[[{text:'➕ Generate Code',callback_data:'adm_redeem_generate'}],[{text:'🔙 Admin Panel',callback_data:'admin_panel'}]]);
+      return;
+    }
+    if (data === 'adm_redeem_generate') {
+      if(String(chatId)!==String(env.ADMIN_ID))return;
+      await clearBinanceInput(env,chatId);
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_redeem_amount', '{}')").bind(chatId).run();
+      await editMsg(env,chatId,messageId,'🎁 <b>Generate Redeem Code</b>\n\nEnter the amount in USD (e.g. <code>5</code> or <code>10.50</code>):',[[{text:'❌ Cancel',callback_data:'adm_redeem_menu'}]]);
       return;
     }
 
@@ -2315,6 +2486,7 @@ async function sendDeposit(env, chatId, editMessageId = null) {
     [{ text: "🟢 bKash", callback_data: "dep_method_bkash" }, { text: "🟠 Nagad", callback_data: "dep_method_nagad" }],
     [{ text: "🟣 Rocket", callback_data: "dep_method_rocket" }],
     [{ text: "🟡 Binance Pay (Auto)", callback_data: "dep_method_binance" }, { text: "🔵 BEP20 USDT (Auto)", callback_data: "dep_method_bep20" }],
+    [{ text: "🎁 Redeem Code", callback_data: "redeem_open" }],
     [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, text, buttons);
@@ -2352,6 +2524,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{ text: `🔒 Force Join (${forceStatus})`, callback_data: "adm_force_menu" }, { text: "📢 Broadcast Message", callback_data: "adm_broadcast" }],
     [{ text: `💱 1 USD = BDT (${rate})`, callback_data: "adm_set_rate" }, { text: `🎁 Referral % (${commPct}%)`, callback_data: "adm_set_ref_comm" }],
     [{ text: "⚙️ Payment & Auto-Verify", callback_data: "adm_payment_settings" }, { text: "📞 Support Contact", callback_data: "adm_set_support" }],
+    [{ text: "🎁 Redeem Codes", callback_data: "adm_redeem_menu" }],
     [{ text: "🏪 Back to Store Home", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, report, buttons);

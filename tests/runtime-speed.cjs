@@ -9,11 +9,11 @@ const source=fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replac
 function load(){const context=vm.createContext({console,Intl,URL,URLSearchParams,AbortController,setTimeout,clearTimeout,Date:class extends Date{static now(){return clock;}},
  capture:async(_env,method,payload)=>{tgCalls.push(method);if(method==='getChatMember'){await new Promise(r=>setTimeout(r,5));return {ok:true,result:{status:member?'member':'left'}};}if(method==='editMessageText'&&notModified)return {ok:false,description:'Bad Request: message is not modified'};return {ok:true,result:{message_id:9}};},
  fetch:async()=>{providerCalls++;return {ok:true,json:async()=>({products:[{id:'provider-a',name:'A',price:2,stock:providerStock,available:true}]})};}});
- vm.runInContext(source+'\ncallTg=capture;globalThis.api={ensureDbReady,getSetting,sendAdminDashboard,sendHomeDashboard,checkForceJoin,syncExternalProducts};',context);return context.api;}
+ vm.runInContext(source+'\ncallTg=capture;globalThis.api={schemaVersion:DB_SCHEMA_VERSION,ensureDbReady,getSetting,sendAdminDashboard,sendHomeDashboard,checkForceJoin,syncExternalProducts};',context);return context.api;}
 (async()=>{
  let api=load();let start=performance.now();await Promise.all([api.ensureDbReady(DB),api.ensureDbReady(DB),api.ensureDbReady(DB)]);const installationCalls=networkCalls;
  assert(installationCalls<20,'initial migrations must batch database work and share one initialization');
- assert.equal(sqlite.prepare("SELECT value FROM settings WHERE key='__schema_version'").get().value,'2026-11-speed-1');
+ assert.equal(sqlite.prepare("SELECT value FROM settings WHERE key='__schema_version'").get().value,api.schemaVersion);
  const plan=sqlite.prepare('EXPLAIN QUERY PLAN SELECT COUNT(*) FROM inventory WHERE product_id=2 AND is_sold=0').all();assert(plan.some(row=>row.detail.includes('inventory_available')));
  reset();api=load();start=performance.now();await api.ensureDbReady(DB);const coldMs=performance.now()-start;assert.equal(networkCalls,1,'a new isolate must reuse the persisted schema version');
  assert.equal(sqlite.prepare('SELECT COUNT(*) AS n FROM products').get().n,3);
