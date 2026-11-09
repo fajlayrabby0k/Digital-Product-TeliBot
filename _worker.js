@@ -126,7 +126,8 @@ async function ensureDbReady(db) {
       `CREATE TABLE IF NOT EXISTS deposits (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, method TEXT NOT NULL, amount_usd REAL NOT NULL DEFAULT 0, amount_bdt REAL NOT NULL DEFAULT 0, trx_id TEXT DEFAULT '', status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`,
       `CREATE TABLE IF NOT EXISTS admin_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
-      `CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`
+      `CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
+      `CREATE TABLE IF NOT EXISTS binance_payment_claims (transaction_id TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_usdt TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`
     ];
     for (const q of schema) await db.prepare(q).run();
 
@@ -351,76 +352,94 @@ async function verifyBscUsdtTx(env, txHash, expectedUsd) {
 // ====================================================================
 // Binance Pay Auto-Verification Engine
 // ====================================================================
-async function hmacSha512(key, message) {
-  const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw", enc.encode(key), { name: "HMAC", hash: "SHA-512" }, false, ["sign"]
-  );
-  const signature = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(message));
-  return Array.from(new Uint8Array(signature)).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
+async function handleBinanceSettingText(env, chatId, text, state) {
+  if (String(chatId) !== String(env.ADMIN_ID) || state.state !== "awaiting_setting_binance") return false;
+  if (text === "/cancel") {
+    await clearAdminState(env, chatId);
+    await sendMsg(env, chatId, "Binance Pay ID change cancelled.");
+    return true;
+  }
+  if (!/^\d{5,20}$/.test(text.trim())) {
+    await sendMsg(env, chatId, "Send your numeric Binance Pay ID, or /cancel. Do not send an API key or Secret here.");
+    return true;
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('binance_id', ?)").bind(text.trim()).run();
+  await clearAdminState(env, chatId);
+  await sendMsg(env, chatId, "✅ Binance Pay ID updated.", [[{ text: "Payment Settings", callback_data: "adm_payment_settings" }]]);
+  return true;
 }
 
-async function verifyBinancePayOrder(env, binanceOrderId, expectedUsd) {
+function invoiceTimestamp(value) {
+  const normalized = String(value || "").replace(" ", "T");
+  return Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized) ? normalized : `${normalized}Z`);
+}
+
+function usdtUnits(value) {
+  const text = String(value);
+  if (!/^\d+(?:\.\d{1,8})?$/.test(text)) return null;
+  const [whole, fraction = ""] = text.split(".");
+  return BigInt(whole) * 100000000n + BigInt(fraction.padEnd(8, "0"));
+}
+
+async function verifyBinancePayOrder(env, transactionId, expectedUsd, invoice = null) {
   try {
-    const cleanId = binanceOrderId.trim().replace(/[^a-zA-Z0-9]/g, "");
-    if (!cleanId || cleanId.length < 6) {
-      return { success: false, reason: "invalid_format", message: "Invalid Binance Order / Transaction ID format." };
+    const cleanId = String(transactionId).trim();
+    if (!/^[a-zA-Z0-9]{6,64}$/.test(cleanId)) {
+      return { success: false, reason: "invalid_format", message: "Enter the exact Binance Pay Transaction ID from your receipt." };
     }
-
-    // Replay attack check
-    const usedOrder = await env.DB.prepare("SELECT id FROM orders WHERE trx_id = ? AND status = 'completed'").bind(cleanId).first();
-    const usedDep = await env.DB.prepare("SELECT id FROM deposits WHERE trx_id = ? AND status = 'completed'").bind(cleanId).first();
-    if (usedOrder || usedDep) {
-      return { success: false, reason: "already_used", message: "This Binance Order ID has already been redeemed!" };
+    if ((await getSetting(env, "binance_auto_verify", "1")) !== "1") {
+      return { success: false, reason: "manual_approval", message: "Automatic verification is disabled; admin confirmation is required." };
     }
-
-    const apiKey = await getSetting(env, "binance_pay_api_key", "");
-    const apiSecret = await getSetting(env, "binance_pay_secret", "");
-
-    // 1. If Official Binance Pay Merchant API credentials exist:
-    if (apiKey && apiSecret) {
-      const timestamp = Date.now().toString();
-      const nonce = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-      const reqBody = JSON.stringify({ orderId: cleanId });
-      const payloadToSign = `${timestamp}\n${nonce}\n${reqBody}\n`;
-      const signature = await hmacSha512(apiSecret, payloadToSign);
-
-      const resp = await fetch("https://bpay.binanceapi.com/binancepay/openapi/v2/order/query", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "BinancePay-Timestamp": timestamp,
-          "BinancePay-Nonce": nonce,
-          "BinancePay-Certificate-SN": apiKey,
-          "BinancePay-Signature": signature
-        },
-        body: reqBody
-      });
-
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data && data.status === "SUCCESS" && data.data) {
-          const orderData = data.data;
-          const status = (orderData.status || "").toUpperCase();
-          if (status === "PAID" || status === "SUCCESS") {
-            const orderAmount = parseFloat(orderData.orderAmount || orderData.totalFee || 0);
-            if (orderAmount >= (expectedUsd - 0.05)) {
-              return { success: true, paidAmount: orderAmount, orderId: cleanId };
-            } else {
-              return { success: false, reason: "amount_low", message: `Binance order amount ($${orderAmount}) is less than required ($${expectedUsd}).` };
-            }
-          } else {
-            return { success: false, reason: "not_paid", message: `Binance payment status is ${status}, not paid.` };
-          }
-        }
-      }
+    const apiKey = env.BINANCE_API_KEY;
+    const apiSecret = env.BINANCE_API_SECRET;
+    if (!apiKey || !apiSecret) return { success: false, reason: "not_configured", message: "Binance verification is not configured. Please contact admin." };
+    const createdAt = invoiceTimestamp(invoice?.created_at);
+    const now = Date.now();
+    if (!invoice || !["order", "deposit"].includes(invoice.type) || invoice.status !== "pending" ||
+        !Number.isFinite(createdAt) || createdAt > now || createdAt < now - 7 * 86400000 ||
+        !Number.isFinite(expectedUsd) || expectedUsd < 0) {
+      return { success: false, reason: "invalid_invoice", message: "This invoice is not payable or is over 7 days old. Please contact admin." };
     }
+    const [usedOrder, usedDeposit, claimed] = await Promise.all([
+      env.DB.prepare("SELECT id FROM orders WHERE trx_id = ? AND status = 'completed'").bind(cleanId).first(),
+      env.DB.prepare("SELECT id FROM deposits WHERE trx_id = ? AND status = 'completed'").bind(cleanId).first(),
+      env.DB.prepare("SELECT transaction_id FROM binance_payment_claims WHERE transaction_id = ? OR (invoice_type = ? AND invoice_id = ?)").bind(cleanId, invoice.type, invoice.id).first()
+    ]);
+    if (usedOrder || usedDeposit || claimed) return { success: false, reason: "already_used", message: "This payment or invoice has already been submitted. Please contact admin if delivery is pending." };
 
-    // A transaction ID's format is never evidence that money was received.
-    // Until a supported history API is configured, require manual confirmation.
-    return { success: false, reason: "manual_approval", message: "Sent for manual confirmation." };
-  } catch (err) {
-    return { success: false, reason: "error", message: `Binance verification error: ${err.message}` };
+    const params = new URLSearchParams({ startTime: String(createdAt), endTime: String(now), limit: "100", recvWindow: "10000", timestamp: String(now) });
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(apiSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const bytes = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(params.toString()));
+    const signature = Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, "0")).join("");
+    const response = await fetchWithTimeout(`https://api.binance.com/sapi/v1/pay/transactions?${params}&signature=${signature}`, {
+      method: "GET", headers: { "X-MBX-APIKEY": apiKey }
+    }, 6000);
+    const data = await response.json();
+    if (!response.ok || data.success !== true || data.code !== "000000" || !Array.isArray(data.data)) {
+      return { success: false, reason: "api_rejected", message: "Binance could not verify payment. Admin should check API Read access, IP restrictions, account eligibility and regional access." };
+    }
+    const payment = data.data.find(row => typeof row.transactionId === "string" && row.transactionId === cleanId);
+    if (!payment) return { success: false, reason: "not_found", message: "Payment not found in recent Binance Pay history. Use the Pay Transaction ID, wait briefly, then retry; contact admin if it persists." };
+    // Official Pay history: positive amount = income; negative amount = expenditure.
+    const amount = usdtUnits(payment.amount);
+    const required = usdtUnits(expectedUsd.toFixed(8));
+    if (!["PAY", "C2C"].includes(payment.orderType) || payment.currency !== "USDT" || amount === null || amount <= 0n ||
+        !Number.isFinite(payment.transactionTime) || payment.transactionTime < createdAt || payment.transactionTime > now ||
+        (payment.status !== undefined && !["SUCCESS", "COMPLETED", "PAID"].includes(payment.status))) {
+      return { success: false, reason: "invalid_payment", message: "Payment must be incoming USDT sent after this invoice was created. Outgoing transfers, refunds and rewards are not accepted." };
+    }
+    if (required === null || amount < required) return { success: false, reason: "amount_low", message: "The received USDT amount is less than the invoice total." };
+    // Database uniqueness serializes concurrent submissions across orders and deposits.
+    try {
+      await env.DB.prepare("INSERT INTO binance_payment_claims (transaction_id, invoice_type, invoice_id, user_id, amount_usdt) VALUES (?, ?, ?, ?, ?)")
+        .bind(cleanId, invoice.type, invoice.id, invoice.user_id, payment.amount).run();
+    } catch (_) {
+      return { success: false, reason: "claim_failed", message: "This payment could not be reserved. It may already be in use; contact admin." };
+    }
+    return { success: true, paidAmount: Number(payment.amount), orderId: cleanId };
+  } catch (_) {
+    // Do not expose signed URLs, headers, account data or credentials in errors.
+    return { success: false, reason: "unavailable", message: "Binance verification is temporarily unavailable. No automatic approval was issued. Please retry or contact admin." };
   }
 }
 
@@ -432,9 +451,15 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
   const orderQty = order.quantity || 1;
 
   if (order.is_external === 1) {
-    await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
+    await env.DB.prepare("UPDATE orders SET status = 'paid_pending_delivery', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     const apiRes = await dispatchExternalOrder(env, order, orderQty, orderId);
-    const creds = apiRes.success ? apiRes.credentials : "Order registered with external provider. Details arriving shortly.";
+    if (!apiRes.success) {
+      await sendMsg(env, chatId, `✅ Payment verified for Order #${orderId}. Delivery is pending; admin has been notified. Do not pay again.`);
+      await sendMsg(env, env.ADMIN_ID, `⚠️ Paid Order #${orderId} needs manual delivery. Provider delivery was not confirmed. Check provider order history before retrying.`);
+      return;
+    }
+    const creds = apiRes.credentials;
+    await env.DB.prepare("UPDATE orders SET status = 'completed' WHERE id = ?").bind(orderId).run();
     if (apiRes.success) {
       await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(orderQty, order.product_id).run();
     }
@@ -448,14 +473,13 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
   }
 
   // Local Stock Order
-  const { results: items } = await env.DB.prepare("SELECT * FROM inventory WHERE product_id = ? AND is_sold = 0 LIMIT ?").bind(order.product_id, orderQty).all();
+  // Claim local inventory with one atomic write to prevent concurrent double delivery.
+  await env.DB.prepare("UPDATE inventory SET is_sold = 1, order_id = ? WHERE id IN (SELECT id FROM inventory WHERE product_id = ? AND is_sold = 0 ORDER BY id LIMIT ?)")
+    .bind(orderId, order.product_id, orderQty).run();
+  const { results: items } = await env.DB.prepare("SELECT * FROM inventory WHERE order_id = ? AND is_sold = 1").bind(orderId).all();
   if (items && items.length >= orderQty) {
     await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
-    const lines = [];
-    for (const it of items) {
-      await env.DB.prepare("UPDATE inventory SET is_sold = 1, order_id = ? WHERE id = ?").bind(orderId, it.id).run();
-      lines.push(it.item_data);
-    }
+    const lines = items.map(item => item.item_data);
     await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${lines.join("\n\n")}</code></blockquote>`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
@@ -463,7 +487,7 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
     await sendMsg(env, env.ADMIN_ID, `✅ <b>Order #${orderId} Auto-Verified & Delivered from Stock!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
     await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
   } else {
-    await env.DB.prepare("UPDATE orders SET trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
+    await env.DB.prepare("UPDATE orders SET status = 'paid_pending_delivery', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     await sendMsg(env, chatId, `✅ <b>Payment Verified!</b>\n\nOrder ID: #${orderId}\n⚠️ Local stock is being restocked. Admin has been notified to deliver your order immediately!`);
     await sendMsg(env, env.ADMIN_ID, `🚨 <b>Order #${orderId} Verified but Local Stock Insufficient!</b> Please deliver manually.`);
   }
@@ -543,7 +567,7 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
   } else if (method === "binance") {
     mTitle = "Binance Pay ID (Auto-Credit)";
     accNum = await getSetting(env, "binance_id", "6029752069");
-    promptDetails = "⚡ <b>Instant Credit:</b> After sending USDT, please <b>REPLY to this message</b> with your <b>Binance Order ID / Transaction ID</b> to have your wallet credited automatically!";
+    promptDetails = "⚡ <b>Instant Credit:</b> After sending USDT, please <b>REPLY to this message</b> with your <b>Binance Pay Transaction ID</b> to have your wallet credited automatically!";
   } else if (method === "bep20") {
     mTitle = "BEP20 USDT (Blockchain Auto-Credit)";
     accNum = await getSetting(env, "bep20_addr", "0x71C...YourWalletAddress");
@@ -613,6 +637,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const adminState = await env.DB.prepare("SELECT * FROM admin_states WHERE user_id = ?").bind(chatId).first();
       if (adminState && adminState.state) {
         if (await handleProductIconText(env, chatId, text, adminState)) return;
+        if (await handleBinanceSettingText(env, chatId, text, adminState)) return;
         const handled = await handleAdminTextState(env, chatId, text, adminState);
         if (handled) return;
       }
@@ -645,6 +670,10 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
           const orderId = m[1];
           const order = await env.DB.prepare("SELECT o.*, p.name as product_name, p.is_external, p.external_id, p.api_stock FROM orders o JOIN products p ON o.product_id = p.id WHERE o.id = ?").bind(orderId).first();
           if (order) {
+            if (String(order.user_id) !== String(chatId) || order.status !== "pending") {
+              await sendMsg(env, chatId, "This order is not payable by this account.");
+              return;
+            }
             const cleanText = text.trim();
             const method = (order.payment_method || "").toUpperCase();
 
@@ -665,7 +694,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
             // B. Binance Pay Auto-Verification
             if (method === "BINANCE") {
               await sendMsg(env, chatId, `🔍 <b>Verifying Binance Pay Order ID...</b>\n\nOrder ID: <code>${cleanText}</code>\nPlease wait a moment.`);
-              const binanceRes = await verifyBinancePayOrder(env, cleanText, order.amount_usd);
+              const binanceRes = await verifyBinancePayOrder(env, cleanText, order.amount_usd, { ...order, type: "order" });
 
               if (binanceRes.success) {
                 await completeSuccessfulOrder(env, order, cleanText, chatId);
@@ -695,6 +724,10 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         const dRow = depId ? await env.DB.prepare("SELECT * FROM deposits WHERE id = ?").bind(depId).first() : null;
 
         if (dRow) {
+          if (String(dRow.user_id) !== String(chatId) || dRow.status !== "pending") {
+            await sendMsg(env, chatId, "This deposit is not payable by this account.");
+            return;
+          }
           const depMethod = (dRow.method || "").toUpperCase();
 
           // BEP20 Auto-Deposit
@@ -724,14 +757,16 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
           // Binance Pay Auto-Deposit
           if (depMethod === "BINANCE") {
             await sendMsg(env, chatId, `🔍 <b>Verifying Binance Pay Deposit...</b>\n\nOrder ID: <code>${cleanText}</code>`);
-            const binanceRes = await verifyBinancePayOrder(env, cleanText, dRow.amount_usd || 1.0);
+            const binanceRes = await verifyBinancePayOrder(env, cleanText, dRow.amount_usd || 0, { ...dRow, type: "deposit" });
             if (binanceRes.success) {
               const creditedUsd = binanceRes.paidAmount;
               const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
               const creditedBdt = Math.round(creditedUsd * rate);
 
-              await env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ?").bind(creditedUsd, creditedBdt, cleanText, depId).run();
-              await env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(creditedUsd, creditedBdt, chatId).run();
+              await env.DB.batch([
+                env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ?").bind(creditedUsd, creditedBdt, cleanText, depId),
+                env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(creditedUsd, creditedBdt, chatId)
+              ]);
               const u = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
 
               await sendMsg(env, chatId, `🎉 <b>Binance Deposit Verified & Credited Automatically!</b>\n\nDeposit ID: #${depId}\nCredited: <b>+$${creditedUsd.toFixed(2)} USD (≈ ৳${creditedBdt} BDT)</b>\nNew Wallet Balance: <b>$${u.balance_usd.toFixed(2)} USD</b>`, [
@@ -740,6 +775,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
               await sendMsg(env, env.ADMIN_ID, `✅ <b>Binance Deposit #${depId} Auto-Credited!</b>\nUser: ${username} (ID: <code>${chatId}</code>)\nAmount: $${creditedUsd.toFixed(2)} USD\nOrder ID: <code>${cleanText}</code>`);
               return;
             }
+            await sendMsg(env, chatId, `⚠️ Binance verification: ${escapeHtml(binanceRes.message)}`);
+            return;
           }
 
           await env.DB.prepare("UPDATE deposits SET trx_id = ? WHERE id = ?").bind(cleanText, depId).run();
@@ -783,6 +820,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     const data = cb.data;
     const chatId = cb.message.chat.id;
     const messageId = cb.message.message_id;
+    if ((data.startsWith("adm_") || data.startsWith("admin_")) && String(chatId) !== String(env.ADMIN_ID)) return;
 
     // Immediately acknowledge callback query to clear button loading spinner
     const acknowledgement = ansCb(env, cb.id).catch(() => {});
@@ -982,7 +1020,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       } else if (method === "binance") {
         mTitle = "Binance Pay (Instant Auto-Verify)";
         accNum = await getSetting(env, "binance_id", "6029752069");
-        customInstructions = `👉 <b>Send Funds to Binance Pay ID:</b>\n<code>${accNum}</code>\n\n⚡ <b>Instant Verification:</b> After sending, please <b>REPLY to this message</b> with your <b>Binance Order ID / Transaction ID</b> (found in your Binance payment receipt). The bot will auto-verify and deliver immediately!`;
+        customInstructions = `👉 <b>Send Funds to Binance Pay ID:</b>\n<code>${accNum}</code>\n\n⚡ <b>Instant Verification:</b> After sending, please <b>REPLY to this message</b> with your <b>Binance Pay Transaction ID</b> (found in your Binance payment receipt). The bot will auto-verify and deliver immediately!`;
       } else if (method === "bep20") {
         mTitle = "BEP20 USDT (Blockchain Auto-Verify)";
         accNum = await getSetting(env, "bep20_addr", "0x71C...YourWalletAddress");
@@ -1375,7 +1413,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const binanceAuto = (await getSetting(env, "binance_auto_verify", "1")) === "1";
       const bep20 = await getSetting(env, "bep20_addr", "0x71C...YourAddress");
 
-      await editMsg(env, chatId, messageId, `⚙️ <b>Payment Accounts & Auto-Verification Settings:</b>\n\n• bKash: <code>${bkash}</code>\n• Nagad: <code>${nagad}</code>\n• Rocket: <code>${rocket}</code>\n• Binance Pay ID: <code>${binance}</code>\n• Binance Auto-Verify: <b>${binanceAuto ? "🟢 Enabled (Instant Order ID Delivery)" : "⚪ Manual Verification"}</b>\n• BEP20 USDT (BSC): <code>${bep20}</code> <i>(Auto-verified via Blockchain)</i>`, [
+      await editMsg(env, chatId, messageId, `⚙️ <b>Payment Accounts & Auto-Verification Settings:</b>\n\n• bKash: <code>${bkash}</code>\n• Nagad: <code>${nagad}</code>\n• Rocket: <code>${rocket}</code>\n• Binance Pay ID: <code>${binance}</code>\n• Binance Auto-Verify: <b>${binanceAuto ? "🟢 Enabled (Personal Pay History API)" : "⚪ Manual Verification"}</b>\n• BEP20 USDT (BSC): <code>${bep20}</code> <i>(Auto-verified via Blockchain)</i>`, [
         [{ text: "✏️ Change bKash", callback_data: "adm_set_bkash" }, { text: "✏️ Change Nagad", callback_data: "adm_set_nagad" }],
         [{ text: "✏️ Change Rocket", callback_data: "adm_set_rocket" }, { text: "✏️ Change Binance Pay ID", callback_data: "adm_set_binance" }],
         [{ text: `🤖 Binance Auto-Verify: ${binanceAuto ? "ON" : "OFF"}`, callback_data: "adm_toggle_binance_auto" }],
@@ -1749,9 +1787,13 @@ async function dispatchExternalOrder(env, prod, quantity, orderId) {
     if (vResp.ok || vResp.status === 201 || vResp.status === 200) {
       const resData = await vResp.json();
       providerCatalogCache.delete(env.DB);
-      const items = resData.items || [];
-      const credentials = items.map(it => it.content).join("\n\n");
-      return { success: true, externalOrderId: String(resData.order_id || ""), credentials: credentials || (resData.order_id ? `Order Delivered: #${resData.order_id}` : "Delivered"), message: "Delivered via Provider API." };
+      const items = Array.isArray(resData.items) ? resData.items : [];
+      const delivered = items.filter(item => typeof item.content === "string" && item.content.trim());
+      if (delivered.length < quantity || (resData.status && !["completed", "success", "delivered"].includes(String(resData.status).toLowerCase()))) {
+        return { success: false, externalOrderId: String(resData.order_id || ""), message: "Provider order accepted but product delivery is not confirmed." };
+      }
+      const credentials = delivered.map(item => item.content).join("\n\n");
+      return { success: true, externalOrderId: String(resData.order_id || ""), credentials, message: "Delivered via Provider API." };
     }
     return { success: false, message: `API status ${vResp.status}` };
   } catch (err) { return { success: false, message: err.message }; }
