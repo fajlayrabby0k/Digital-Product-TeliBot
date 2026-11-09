@@ -89,8 +89,11 @@ export default {
     if (request.method === "POST" && (url.pathname === "/api/webhook" || url.pathname === "/")) {
       try {
         const update = await request.json();
-        await ensureDbReady(env.DB);
-        await handleUpdate(update, env, url.origin, ctx);
+        if (ctx && typeof ctx.waitUntil === "function") {
+          ctx.waitUntil(handleUpdate(update, env, url.origin, ctx).catch(error => console.error("Webhook processing error:", error)));
+        } else {
+          await handleUpdate(update, env, url.origin, ctx);
+        }
         return new Response("OK", { status: 200 });
       } catch (e) {
         console.error("Webhook error:", e);
@@ -816,9 +819,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Navigation Callbacks
     if (data === "home") { await clearAdminState(env, chatId); await sendHomeDashboard(env, chatId, user, firstName, messageId); return; }
-    if (data === "shop") {
+    if (data === "shop" || data === "shop_refresh") {
       try {
-        await sendProductsDirectly(env, chatId, messageId);
+        await sendProductsDirectly(env, chatId, messageId, data === "shop_refresh");
       } catch (e) {
         console.error("Error in shop callback:", e);
         await sendMsg(env, chatId, `⚠️ <b>Error opening shop:</b> <code>${escapeHtml(e.message)}</code>`);
@@ -851,6 +854,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
 
     // Product Details & Quantity Selector
+    if (data.startsWith("prod_refresh_")) { await sendProductDetailView(env, chatId, data.slice("prod_refresh_".length), messageId, true); return; }
     if (data.startsWith("prod_")) { await sendProductDetailView(env, chatId, data.replace("prod_", ""), messageId); return; }
     if (data.startsWith("buynow_")) {
       const parts = data.replace("buynow_", "").split("_");
@@ -1561,9 +1565,9 @@ function providerStock(item) {
 }
 
 // Use the same provider formats and reconciliation for detail and checkout.
-async function fetchLiveProductStock(env, prod) {
+async function fetchLiveProductStock(env, prod, forceFresh = true) {
   if (!prod || prod.is_external !== 1 || !prod.external_id) return prod;
-  const result = await syncExternalProducts(env, null, null, false, String(prod.external_id));
+  const result = await syncExternalProducts(env, null, null, false, String(prod.external_id), forceFresh);
   if (!result.success) return { ...prod, stock_verified: false };
   const fresh = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prod.id).first();
   return { ...(fresh || prod), stock_verified: Boolean(fresh) };
@@ -1582,20 +1586,29 @@ async function checkExternalStock(env, chatId, prod, quantity) {
   return true;
 }
 
-// Full live sync for all external products
-async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual = false, targetExternalId = null) {
+// Five-second browsing cache, isolated by database and provider configuration.
+// Checkout, manual sync and explicit Refresh always bypass cached results.
+const providerCatalogCache = new WeakMap();
+async function readProviderCatalog(db, baseUrl, key, forceFresh = true) {
+  const cached = providerCatalogCache.get(db);
+  const matches = cached && cached.baseUrl === baseUrl && cached.key === key;
+  if (!forceFresh && matches && cached.items && Date.now() < cached.expiresAt) return cached.items;
+  if (matches && cached.pending) return cached.pending;
+  const entry = { baseUrl, key, items: null, expiresAt: 0, pending: null };
+  providerCatalogCache.set(db, entry);
+  entry.pending = fetchProviderCatalog(baseUrl, key);
   try {
-    const [configuredUrl, configuredKey, configuredRate, configuredMargin] = await Promise.all([
-      apiUrl ?? getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io"),
-      apiKey ?? getSetting(env, "external_api_key", ""),
-      getSetting(env, "usd_to_bdt_rate", "125"),
-      getSetting(env, "external_profit_margin", "20")
-    ]);
-    let baseUrl = configuredUrl.trim().replace(/\/+$/, "");
-    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
-    const key = configuredKey;
-    if (!key) return { success: false, message: "Please configure your External API Key in Admin Panel." };
+    const items = await entry.pending;
+    entry.items = items;
+    entry.expiresAt = Date.now() + 5000;
+    return items;
+  } catch (error) {
+    if (providerCatalogCache.get(db) === entry) providerCatalogCache.delete(db);
+    throw error;
+  } finally { entry.pending = null; }
+}
 
+async function fetchProviderCatalog(baseUrl, key) {
     let items = null;
     let isVexorix = false;
 
@@ -1637,7 +1650,26 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       } catch (_) {}
     }
 
-    if (!Array.isArray(items)) return { success: false, message: `Could not fetch products. Check API key and Base URL (${baseUrl}).` };
+    if (!Array.isArray(items)) throw new Error("Could not fetch provider products.");
+    return items;
+
+}
+
+// Full live sync for all external products
+async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual = false, targetExternalId = null, forceFresh = true) {
+  try {
+    const [configuredUrl, configuredKey, configuredRate, configuredMargin] = await Promise.all([
+      apiUrl ?? getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io"),
+      apiKey ?? getSetting(env, "external_api_key", ""),
+      getSetting(env, "usd_to_bdt_rate", "125"),
+      getSetting(env, "external_profit_margin", "20")
+    ]);
+    let baseUrl = configuredUrl.trim().replace(/\/+$/, "");
+    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
+    const key = configuredKey;
+    if (!key) return { success: false, message: "Please configure your External API Key in Admin Panel." };
+
+    const items = await readProviderCatalog(env.DB, baseUrl, key, forceFresh);
 
     const rate = parseFloat(configuredRate);
     const margin = parseFloat(configuredMargin);
@@ -1722,6 +1754,7 @@ async function dispatchExternalOrder(env, prod, quantity, orderId) {
 
     if (vResp.ok || vResp.status === 201 || vResp.status === 200) {
       const resData = await vResp.json();
+      providerCatalogCache.delete(env.DB);
       const items = resData.items || [];
       const credentials = items.map(it => it.content).join("\n\n");
       return { success: true, externalOrderId: String(resData.order_id || ""), credentials: credentials || (resData.order_id ? `Order Delivered: #${resData.order_id}` : "Delivered"), message: "Delivered via Provider API." };
@@ -1830,12 +1863,12 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
   return await sendMsg(env, chatId, welcome, keyboard);
 }
 
-async function sendProductsDirectly(env, chatId, editMessageId = null) {
+async function sendProductsDirectly(env, chatId, editMessageId = null, forceFresh = false) {
   try {
     await ensureDbReady(env.DB);
 
-    // Await the provider before rendering so Refresh displays the new quantity.
-    const stockSync = await syncExternalProducts(env);
+    // Reuse a recent browsing result; explicit Refresh still fetches the provider.
+    const stockSync = await syncExternalProducts(env, null, null, false, null, forceFresh);
 
     // Defensively query products
     let prods = [];
@@ -1859,7 +1892,7 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
     }
 
     keyboard.push([
-      { text: "🔄 Refresh Stock", callback_data: "shop" },
+      { text: "🔄 Refresh Stock", callback_data: "shop_refresh" },
       { text: "🏠 Main Menu", callback_data: "home" }
     ]);
 
@@ -1881,7 +1914,7 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
   }
 }
 
-async function sendProductDetailView(env, chatId, prodId, editMessageId = null) {
+async function sendProductDetailView(env, chatId, prodId, editMessageId = null, forceFresh = false) {
   try {
     let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
     if (!prod) {
@@ -1889,7 +1922,7 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null) 
       return;
     }
 
-    if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
+    if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod, forceFresh);
 
     const stockRow = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE product_id = ? AND is_sold = 0").bind(prodId).first();
     const stockCount = prod.is_external ? (prod.api_stock || 0) : (stockRow ? stockRow.count : 0);
@@ -1912,7 +1945,7 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null) 
       buttons.push([{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]);
     }
     buttons.push([
-      { text: "🔄 Refresh Stock", callback_data: `prod_${prod.id}` },
+      { text: "🔄 Refresh Stock", callback_data: `prod_refresh_${prod.id}` },
       { text: "◀️ Back to Shop", callback_data: "shop" }
     ]);
 
@@ -1932,7 +1965,7 @@ async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId
   try {
     let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
     if (!prod) return;
-    if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
+    if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod, false);
     if (!await checkExternalStock(env, chatId, prod, quantity)) return;
 
     const user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
