@@ -1487,8 +1487,11 @@ function providerEmojiId(item) {
 function productListButton(product, callbackData, verified = true) {
   const stock = product.stock_qty || 0;
   const price = Number(product.price_usd).toFixed(2).replace(/\.00$/, "");
+  // Old imports may already contain stock-status dots in the stored name.
+  // Remove only leading status markers; retain the actual product branding.
+  const name = productDisplayName(product).replace(/^(?:\s*[🔴🟢])+\s*/u, "").trim();
   return {
-    text: `${productDisplayName(product)} - $${price} (${verified ? stock : "?"})`,
+    text: `${name} - $${price} (${verified ? stock : "?"})`,
     ...productButtonIcon(product),
     ...(verified ? { style: stock > 0 ? "success" : "danger" } : {}),
     callback_data: callbackData
