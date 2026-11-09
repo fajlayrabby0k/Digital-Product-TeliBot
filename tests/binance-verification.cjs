@@ -52,8 +52,10 @@ const verify=(settings=env,inv=invoice,expected=5)=>context.api.verifyBinancePay
  assert.equal((await verify(env,{...invoice,type:'deposit'},5)).reason,'amount_high');
  assert.equal(claims.length,0);
  const originalCreated=invoice.created_at;
- invoice.created_at=new Date(now-10*60000).toISOString();
+ invoice.created_at=new Date(now-15*60000).toISOString();
  records=[{...incoming,transactionTime:now-6*60000}];
+ assert.equal((await verify()).success,true,'payment between five and ten minutes old must be accepted');
+ claims=[];records=[{...incoming,transactionTime:now-11*60000}];
  assert.equal((await verify()).reason,'payment_expired');assert.equal(claims.length,0);
  invoice.created_at=originalCreated;
  // A successful payment must not be described as delivered if the provider fails.

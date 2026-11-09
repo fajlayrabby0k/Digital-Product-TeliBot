@@ -428,7 +428,7 @@ async function verifyBinancePayOrder(env, transactionId, expectedUsd, invoice = 
         (payment.status !== undefined && !["SUCCESS", "COMPLETED", "PAID"].includes(payment.status))) {
       return { success: false, reason: "invalid_payment", message: "Payment must be incoming USDT sent after this invoice was created. Outgoing transfers, refunds and rewards are not accepted." };
     }
-    if (now - payment.transactionTime > 5 * 60000) return { success: false, reason: "payment_expired", message: "Submit the Order ID within 5 minutes of paying. This payment needs admin review; do not pay again." };
+    if (now - payment.transactionTime > 10 * 60000) return { success: false, reason: "payment_expired", message: "Submit the Order ID within 10 minutes of paying. This payment needs admin review; do not pay again." };
     if (invoice.type === "deposit" && amount > 1000000000n) return { success: false, reason: "amount_high", message: "Binance Pay deposits are limited to $10.00. Contact admin about this payment; use USDT BEP20 for larger deposits." };
     if (required === null || amount < required) return { success: false, reason: "amount_low", message: "The received USDT amount is less than the invoice total." };
     // Database uniqueness serializes concurrent submissions across orders and deposits.
@@ -563,7 +563,7 @@ async function clearBinanceInput(env, chatId) {
 
 async function showBinanceInstructions(env, chatId, type, invoice, messageId = null) {
   const payId = String(await getSetting(env, "binance_id", ""));
-  const text = `💳 <b>Binance Pay</b>\n\nSend <b>$${Number(invoice.amount_usd).toFixed(2)} USDT</b> to this Pay ID:\n<blockquote><code>${escapeHtml(payId)}</code></blockquote>\nThen tap <b>Enter Order ID</b> and paste the Order ID from your Binance Pay receipt.\n\n<i>Submit the Order ID within 5 minutes of paying.</i>`;
+  const text = `💳 <b>Binance Pay</b>\n\nSend <b>$${Number(invoice.amount_usd).toFixed(2)} USDT</b> to this Pay ID:\n<blockquote><code>${escapeHtml(payId)}</code></blockquote>\nThen tap <b>Enter Order ID</b> and paste the Order ID from your Binance Pay receipt.\n\n<i>Submit the Order ID within 10 minutes of paying.</i>`;
   const keyboard = [
     [{ text: "📋 Copy Pay ID", copy_text: { text: payId } }, { text: "⚡ Enter Order ID", callback_data: `binance_enter_${type}_${invoice.id}` }],
     [{ text: "⏪ Back", callback_data: type === "deposit" ? "deposit" : `prod_${invoice.product_id}` }]
