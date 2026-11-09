@@ -1424,22 +1424,14 @@ async function checkResellerAccount(env) {
   } catch (_) { return null; }
 }
 
-function smartProductIcon(name) {
-  if (!name) return "⚡ Product";
-  const str = String(name).trim();
-  if (/[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]/u.test(str)) return str;
-  const low = str.toLowerCase();
-  if (low.includes("prime") || low.includes("amazon") || low.includes("netflix") || low.includes("disney") || low.includes("hulu") || low.includes("ott")) return `🍿 ${str}`;
-  if (low.includes("spotify") || low.includes("music") || low.includes("tidal") || low.includes("deezer")) return `🎵 ${str}`;
-  if (low.includes("chatgpt") || low.includes("openai") || low.includes("claude") || low.includes("gemini") || low.includes("ai") || low.includes("lovable") || low.includes("cursor")) return `🤖 ${str}`;
-  if (low.includes("vpn") || low.includes("nord") || low.includes("express") || low.includes("surfshark") || low.includes("proxy")) return `🛡️ ${str}`;
-  if (low.includes("canva") || low.includes("adobe") || low.includes("figma") || low.includes("design") || low.includes("photoshop")) return `🎨 ${str}`;
-  if (low.includes("youtube") || low.includes("yt") || low.includes("video")) return `📺 ${str}`;
-  if (low.includes("telegram") || low.includes("tg") || low.includes("member") || low.includes("boost")) return `📱 ${str}`;
-  if (low.includes("windows") || low.includes("office") || low.includes("key") || low.includes("license")) return `🔑 ${str}`;
-  if (low.includes("course") || low.includes("udemy") || low.includes("coursera") || low.includes("edu")) return `🎓 ${str}`;
-  if (low.includes("gift") || low.includes("card") || low.includes("voucher")) return `🎁 ${str}`;
-  return `⚡ ${str}`;
+// Preserve the provider's branding instead of guessing an icon from the name.
+function providerProductName(item) {
+  const name = String(item.name || item.title || item.product_name || "External Product").trim();
+  const icon = item.emoji ?? item.icon;
+  // Button labels accept text emoji, not image URLs or custom-emoji IDs.
+  if (typeof icon !== "string" || !/\p{Extended_Pictographic}/u.test(icon) ||
+      /https?:\/\//i.test(icon) || /\p{Extended_Pictographic}/u.test(name)) return name;
+  return `${icon.trim()} ${name}`;
 }
 
 // Never invent stock when a provider omits its quantity.
@@ -1502,6 +1494,8 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
           items = vData.products.map(p => ({
             id: p.id,
             name: p.name,
+            emoji: p.emoji,
+            icon: p.icon,
             desc: p.description ? (p.description + (p.how_to_use ? `\n\n📖 Instructions:\n${p.how_to_use}` : "")) : (p.how_to_use || "Digital License"),
             rate: p.price,
             stock: providerStock(p)
@@ -1539,8 +1533,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       seenIds.add(extId);
       if (targetExternalId !== null && extId !== targetExternalId) continue;
 
-      const rawName = item.name || item.title || item.product_name || "External Product";
-      const name = smartProductIcon(rawName);
+      const name = providerProductName(item);
       const desc = item.desc || item.description || `Automated digital product delivered via API. (ID: ${extId})`;
       const baseCostPrice = parseFloat(item.rate || item.price || item.cost || 1.0);
       const apiStock = providerStock(item);
@@ -1742,7 +1735,7 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
         const stock = prod.stock_qty || 0;
         const verified = !(prod.is_external && !stockSync.success);
         const stockLabel = verified ? `(${stock})` : "(?)";
-        const name = prod.name.replace(/[🔴🟢]/gu, "").trim();
+        const name = prod.is_external ? prod.name : prod.name.replace(/[🔴🟢]/gu, "").trim();
         const price = Number(prod.price_usd).toFixed(2).replace(/\.00$/, "");
         keyboard.push([{
           text: `${name} - $${price} ${stockLabel}`,
