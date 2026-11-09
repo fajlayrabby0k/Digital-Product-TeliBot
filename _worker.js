@@ -143,6 +143,8 @@ async function ensureDbReady(db) {
       "ALTER TABLE products ADD COLUMN api_stock INTEGER DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN provider_emoji_id TEXT DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN bep20_wallet TEXT DEFAULT NULL;",
+      "ALTER TABLE deposits ADD COLUMN bep20_wallet TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN quantity INTEGER DEFAULT 1;",
       "ALTER TABLE orders ADD COLUMN amount_usd REAL DEFAULT 0;",
       "ALTER TABLE orders ADD COLUMN amount_bdt REAL DEFAULT 0;"
@@ -298,7 +300,7 @@ async function verifyBscUsdtTx(env, txHash, expectedUsd, invoice = null) {
       env.DB.prepare("SELECT id FROM orders WHERE LOWER(trx_id) = ? AND status = 'completed'").bind(hash).first(),
       env.DB.prepare("SELECT id FROM deposits WHERE LOWER(trx_id) = ? AND status = 'completed'").bind(hash).first(),
       env.DB.prepare("SELECT tx_hash FROM bep20_payment_claims WHERE tx_hash = ? OR (invoice_type = ? AND invoice_id = ?)").bind(hash, invoice.type, invoice.id).first(),
-      getSetting(env, "bep20_addr", "")
+      invoice.bep20_wallet ?? getSetting(env, "bep20_addr", "")
     ]);
     if (usedOrder || usedDeposit || claim) return { success: false, reason: "already_used", message: "This transaction or invoice has already been submitted. Contact admin if delivery is pending." };
     const wallet = String(address).trim().toLowerCase();
@@ -570,7 +572,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
 const BINANCE_DEPOSIT_MAX = 10;
 
 async function clearBinanceInput(env, chatId) {
-  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state IN ('awaiting_binance_amount', 'awaiting_binance_receipt')").bind(chatId).run();
+  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state IN ('awaiting_binance_amount', 'awaiting_binance_receipt', 'awaiting_bep20_amount', 'awaiting_bep20_hash')").bind(chatId).run();
 }
 
 async function showBinanceInstructions(env, chatId, type, invoice, messageId = null) {
@@ -650,7 +652,87 @@ async function handleBinanceInput(env, chatId, username, text, state) {
   return true;
 }
 
+async function showBep20Instructions(env, chatId, type, invoice, messageId = null) {
+  const address = String(invoice.bep20_wallet || await getSetting(env, 'bep20_addr', '')).trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address) || /^0x0{40}$/.test(address)) {
+    await sendMsg(env,chatId,'BEP20 payment address is not configured. Please contact admin before sending funds.');
+    return;
+  }
+  const table=type==='order'?'orders':'deposits';
+  const saved=await env.DB.prepare(`UPDATE ${table} SET bep20_wallet = ? WHERE id = ? AND user_id = ? AND status = 'pending'`).bind(address,invoice.id,chatId).run();
+  if (saved.meta.changes!==1) { await sendMsg(env,chatId,'This invoice is not payable.');return; }
+  const text=`💵 <b>USDT BEP20 ${type==='order'?'Payment':'Deposit'}</b>\nNetwork: <b>BNB Smart Chain (BEP20)</b>\n\nSend <b>${Number(invoice.amount_usd).toFixed(2)} USDT</b> to:\n<blockquote><code>${escapeHtml(address)}</code></blockquote>\nAfter paying, tap <b>Enter TxHash</b> and paste the blockchain transaction hash from your receipt.\n\n<i>Verification requires 12 confirmations. Cover withdrawal fees so the required USDT amount reaches this address. Use a TxHash, not a Binance Pay Order ID.</i>`;
+  const buttons=[
+    [{text:'📋 Copy Wallet Address',copy_text:{text:address}},{text:'⚡ Enter TxHash',callback_data:`bep20_enter_${type}_${invoice.id}`}],
+    [{text:'⏪ Back',callback_data:type==='order'?`prod_${invoice.product_id}`:'deposit'}]
+  ];
+  return messageId ? await editMsg(env,chatId,messageId,text,buttons) : await sendMsg(env,chatId,text,buttons);
+}
+
+async function startBep20Deposit(env, chatId, username, amount = 0, messageId = null) {
+  await clearBinanceInput(env,chatId);
+  if (!Number.isFinite(amount) || amount<0) {await sendMsg(env,chatId,'Enter a positive USDT amount.');return;}
+  if (amount===0) {
+    await env.DB.prepare("INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, 'awaiting_bep20_amount', '{}')").bind(chatId).run();
+    const text='💵 <b>USDT BEP20 Deposit</b>\n\nHow much USDT would you like to deposit?\n\n<i>Type the amount in chat (e.g. 50).</i>';
+    const buttons=[[{text:'⏪ Back',callback_data:'deposit'}]];
+    return messageId ? await editMsg(env,chatId,messageId,text,buttons) : await sendMsg(env,chatId,text,buttons);
+  }
+  const address=String(await getSetting(env,'bep20_addr','')).trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address) || /^0x0{40}$/.test(address)) {await sendMsg(env,chatId,'Admin must configure the BEP20 receive address before you deposit.');return;}
+  const result=await env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, bep20_wallet, status) VALUES (?, ?, 'BEP20', ?, ?, 'pending')").bind(chatId,username,amount,address).run();
+  if (!result.meta?.last_row_id) throw new Error('Could not create BEP20 deposit invoice.');
+  return await showBep20Instructions(env,chatId,'deposit',{id:result.meta.last_row_id,amount_usd:amount,bep20_wallet:address},messageId);
+}
+
+async function submitBep20Payment(env, chatId, type, invoice, txHash) {
+  if (!invoice || String(invoice.user_id)!==String(chatId) || invoice.status!=='pending' || String(type==='order'?invoice.payment_method:invoice.method).toUpperCase()!=='BEP20') {
+    await sendMsg(env,chatId,'This invoice is not payable by this account.');return;
+  }
+  await sendMsg(env,chatId,'🔍 Verifying the BEP20 USDT transfer…');
+  const result=await verifyBscUsdtTx(env,txHash,invoice.amount_usd||0,{...invoice,type});
+  if (!result.success) {
+    await sendMsg(env,chatId,`⚠️ ${escapeHtml(result.message)}`,[[{text:'❌ Cancel',callback_data:'bep20_cancel'}]]);return;
+  }
+  if (type==='order') {
+    const reserved=await env.DB.prepare("UPDATE orders SET status = 'paid_pending_delivery', trx_id = ? WHERE id = ? AND user_id = ? AND status = 'pending'").bind(result.txHash,invoice.id,chatId).run();
+    if (reserved.meta.changes!==1) {await sendMsg(env,chatId,'This order has already been processed. Contact admin if delivery is pending.');return;}
+    await completeSuccessfulOrder(env,invoice,result.txHash,chatId);
+  } else {
+    const bdt=Math.round(result.paidAmount*parseFloat(await getSetting(env,'usd_to_bdt_rate','125')));
+    const settled=await env.DB.batch([
+      env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ? AND EXISTS (SELECT 1 FROM deposits WHERE id = ? AND user_id = ? AND status = 'pending')").bind(result.paidAmount,bdt,chatId,invoice.id,chatId),
+      env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ? AND user_id = ? AND status = 'pending'").bind(result.paidAmount,bdt,result.txHash,invoice.id,chatId)
+    ]);
+    if (settled[0].meta.changes!==1) {await sendMsg(env,chatId,'This deposit has already been processed. Contact admin if the balance is incorrect.');return;}
+    await sendMsg(env,chatId,`✅ <b>BEP20 deposit verified!</b>\n\n<b>${result.paidAmount.toFixed(2)} USDT</b> added to your wallet.`,[[{text:'🛍️ Open Shop',callback_data:'shop'}]]);
+    await sendMsg(env,env.ADMIN_ID,`✅ BEP20 deposit #${invoice.id}: ${result.paidAmount.toFixed(2)} USDT credited to user ${chatId}.`);
+  }
+  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state = 'awaiting_bep20_hash' AND data = ?").bind(chatId,JSON.stringify({type,id:invoice.id})).run();
+}
+
+async function handleBep20Input(env,chatId,username,text,state) {
+  if (!['awaiting_bep20_amount','awaiting_bep20_hash'].includes(state?.state)) return false;
+  if (text.startsWith('/')) {
+    await clearBinanceInput(env,chatId);
+    if(text==='/cancel'){await sendMsg(env,chatId,'Cancelled.');return true;}
+    return false;
+  }
+  if (state.state==='awaiting_bep20_amount') {
+    if (!/^\d+(?:\.\d{1,2})?$/.test(text) || !Number.isFinite(Number(text)) || Number(text)<=0) {await sendMsg(env,chatId,'Enter a positive USDT amount with up to two decimal places, e.g. 50 or 50.01.');return true;}
+    await startBep20Deposit(env,chatId,username,Number(text));return true;
+  }
+  const data=JSON.parse(state.data);
+  if (!['order','deposit'].includes(data.type)) {await clearBinanceInput(env,chatId);return true;}
+  const invoice=data.type==='order'
+    ? await env.DB.prepare('SELECT o.*, p.name as product_name, p.is_external, p.external_id FROM orders o JOIN products p ON o.product_id = p.id WHERE o.id = ?').bind(data.id).first()
+    : await env.DB.prepare('SELECT * FROM deposits WHERE id = ?').bind(data.id).first();
+  await submitBep20Payment(env,chatId,data.type,invoice,text);
+  return true;
+}
+
 async function renderDepositInstructions(env, chatId, username, method, neededAmount, messageId) {
+  if (method === "bep20") return await startBep20Deposit(env, chatId, username, neededAmount, messageId);
   if (method === "binance") return await startBinanceDeposit(env, chatId, username, neededAmount, messageId);
   let mTitle = "bKash Personal";
   let accNum = await getSetting(env, "bkash_num", "017XXXXXXXX");
@@ -662,10 +744,6 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
   } else if (method === "rocket") {
     mTitle = "Rocket Personal";
     accNum = await getSetting(env, "rocket_num", "017XXXXXXXX");
-  } else if (method === "bep20") {
-    mTitle = "BEP20 USDT (Blockchain Auto-Credit)";
-    accNum = await getSetting(env, "bep20_addr", "0x71C...YourWalletAddress");
-    promptDetails = "⚡ <b>Instant Credit:</b> After sending USDT on BSC, please <b>REPLY to this message</b> with your <b>Transaction Hash (TxHash)</b>. Your wallet will be credited after 12 confirmations. Ensure withdrawal fees do not reduce the required amount!";
   }
 
   const res = await env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, status) VALUES (?, ?, ?, ?, 'pending')").bind(chatId, username, method.toUpperCase(), neededAmount).run();
@@ -754,6 +832,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       if (!forceCheck.passed) { await sendForceJoinScreen(env, chatId, forceCheck); return; }
     }
 
+    if (await handleBep20Input(env, chatId, username, text, userState)) return;
     if (await handleBinanceInput(env, chatId, username, text, userState)) return;
 
     // Automatic Payment Verification upon Reply with TxID / Order ID
@@ -774,18 +853,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
             const cleanText = text.trim();
             const method = (order.payment_method || "").toUpperCase();
 
-            // A. BEP20 USDT Auto-Verification
             if (method === "BEP20") {
-              await sendMsg(env, chatId, `🔍 <b>Verifying your BEP20 USDT transaction on BSC blockchain...</b>\n\nTxHash: <code>${cleanText}</code>\nPlease wait a few seconds.`);
-              const verifyRes = await verifyBscUsdtTx(env, cleanText, order.amount_usd, { ...order, type: "order" });
-
-              if (verifyRes.success) {
-                await completeSuccessfulOrder(env, order, verifyRes.txHash, chatId);
-                return;
-              } else {
-                await sendMsg(env, chatId, `❌ <b>BEP20 Verification Failed:</b>\n\n${verifyRes.message}\n\n<i>If your transfer was just sent, please wait 15-30 seconds for BSC network block confirmation and reply again.</i>`);
-                return;
-              }
+              await submitBep20Payment(env,chatId,"order",order,cleanText);
+              return;
             }
 
             // Legacy Reply submissions use the same verification path as Enter Order ID.
@@ -819,30 +889,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
           }
           const depMethod = (dRow.method || "").toUpperCase();
 
-          // BEP20 Auto-Deposit
           if (depMethod === "BEP20") {
-            await sendMsg(env, chatId, `🔍 <b>Verifying your BEP20 USDT deposit on BSC blockchain...</b>\n\nTxHash: <code>${cleanText}</code>`);
-            const verifyRes = await verifyBscUsdtTx(env, cleanText, dRow.amount_usd || 0, { ...dRow, type: "deposit" });
-            if (verifyRes.success) {
-              const creditedUsd = verifyRes.paidAmount;
-              const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
-              const creditedBdt = Math.round(creditedUsd * rate);
-
-              await env.DB.batch([
-                env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ?").bind(creditedUsd, creditedBdt, verifyRes.txHash, depId),
-                env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(creditedUsd, creditedBdt, chatId)
-              ]);
-              const u = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
-
-              await sendMsg(env, chatId, `🎉 <b>Deposit Verified & Credited Automatically!</b>\n\nDeposit ID: #${depId}\nCredited: <b>+$${creditedUsd.toFixed(2)} USDT (≈ ৳${creditedBdt} BDT)</b>\nNew Wallet Balance: <b>$${u.balance_usd.toFixed(2)} USD</b>`, [
-                [{ text: "🛒 Open Shop", callback_data: "shop" }]
-              ]);
-              await sendMsg(env, env.ADMIN_ID, `✅ <b>BEP20 Deposit #${depId} Auto-Credited!</b>\nUser: ${username} (ID: <code>${chatId}</code>)\nAmount: $${creditedUsd.toFixed(2)} USDT\nTxHash: <code>${cleanText}</code>`);
-              return;
-            } else {
-              await sendMsg(env, chatId, `❌ <b>BEP20 Verification Failed:</b>\n\n${verifyRes.message}`);
-              return;
-            }
+            await submitBep20Payment(env,chatId,"deposit",dRow,cleanText);
+            return;
           }
 
           if (depMethod === "BINANCE") {
@@ -921,6 +970,24 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await env.DB.prepare("INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, 'awaiting_binance_receipt', ?)")
         .bind(chatId, JSON.stringify({ type, id: invoice.id })).run();
       await editMsg(env, chatId, messageId, "⚡ <b>Order ID</b>\n\nPaste the Order ID from your Binance Pay receipt below:", [[{ text: "❌ Cancel", callback_data: "binance_cancel" }]]);
+      return;
+    }
+
+    if (data === 'bep20_cancel') {
+      await clearBinanceInput(env,chatId);
+      await sendDeposit(env,chatId,messageId);
+      return;
+    }
+    const bep20Entry=data.match(/^bep20_enter_(order|deposit)_(\d+)$/);
+    if (bep20Entry) {
+      const [,type,id]=bep20Entry;
+      const invoice=await env.DB.prepare(type==='order'?'SELECT * FROM orders WHERE id = ?':'SELECT * FROM deposits WHERE id = ?').bind(id).first();
+      if (!invoice || String(invoice.user_id)!==String(chatId) || invoice.status!=='pending' || String(type==='order'?invoice.payment_method:invoice.method).toUpperCase()!=='BEP20') {
+        await sendMsg(env,chatId,'This invoice is not payable by this account.');return;
+      }
+      await clearBinanceInput(env,chatId);
+      await env.DB.prepare("INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, 'awaiting_bep20_hash', ?)").bind(chatId,JSON.stringify({type,id:invoice.id})).run();
+      await editMsg(env,chatId,messageId,'⚡ <b>Transaction Hash (TxHash)</b>\n\nPaste the BEP20 blockchain TxHash from your receipt below (0x followed by 64 hex characters):',[[{text:'❌ Cancel',callback_data:'bep20_cancel'}]]);
       return;
     }
 
@@ -1093,6 +1160,10 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
       const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, amount_usd, amount_bdt, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')").bind(chatId, username, prodId, qty, method.toUpperCase(), totalUsd, totalBdt).run();
       const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
+      if (method === "bep20") {
+        await showBep20Instructions(env, chatId, "order", { id: orderId, product_id: prod.id, amount_usd: totalUsd }, messageId);
+        return;
+      }
       if (method === "binance") {
         await showBinanceInstructions(env, chatId, "order", { id: orderId, product_id: prod.id, amount_usd: totalUsd }, messageId);
         return;
@@ -1114,10 +1185,6 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         mTitle = "Rocket Personal";
         accNum = await getSetting(env, "rocket_num", "017XXXXXXXX");
         customInstructions = `👉 <b>Send Money to:</b>\n<code>${accNum}</code>\n\n⚠️ After payment, please <b>REPLY to this message</b> with your <b>Rocket Transaction ID</b>.`;
-      } else if (method === "bep20") {
-        mTitle = "BEP20 USDT (Blockchain Auto-Verify)";
-        accNum = await getSetting(env, "bep20_addr", "0x71C...YourWalletAddress");
-        customInstructions = `👉 <b>Send exact amount to BEP20 (BSC) Address:</b>\n<code>${accNum}</code>\nNetwork: <b>BNB Smart Chain (BEP20)</b>\nToken: <b>USDT</b>\n\n⚡ <b>Instant Verification:</b> After sending, please <b>REPLY to this message</b> with your <b>Transaction Hash (TxHash)</b> (e.g. <code>0x4a7b...</code>). After 12 confirmations, the bot will verify and deliver automatically. Ensure the received amount covers the total after withdrawal fees.`;
       }
 
       const checkoutText = `💳 <b>Payment Instructions — ${mTitle}</b>\n\n` +
