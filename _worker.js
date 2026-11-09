@@ -197,6 +197,12 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;");
 }
 
+// Provider descriptions encode custom emoji as bracketed Telegram IDs.
+function renderProductDescription(description) {
+  return escapeHtml(String(description || "Digital License"))
+    .replace(/\[(\d{15,22})\]/g, '<tg-emoji emoji-id="$1">▫️</tg-emoji>');
+}
+
 function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -1207,7 +1213,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
       const text = `📦 <b>${productDisplayName(prod)}</b>\n\n• Selling Price: <b>$${prod.price_usd.toFixed(2)} USD (≈ ৳${prod.price_bdt} BDT)</b>\n` +
         (prod.is_external ? `• Provider Cost: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>\n• Origin: <b>External Bot API (Live Synced)</b>\n` : `• Origin: <b>Manual Store Stock</b>\n`) +
-        `• Live Stock: <b>${liveStock} items</b>\n\n📝 <b>Description:</b>\n${prod.description}`;
+        `• Live Stock: <b>${liveStock} items</b>\n\n📝 <b>Description:</b>\n${renderProductDescription(prod.description)}`;
 
       const buttons = [
         [{ text: "💰 Set Custom Price", callback_data: `adm_setprice_${prod.id}` }],
@@ -1884,7 +1890,7 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null) 
     const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
     const priceBdt = Math.round(prod.price_usd * rate);
 
-    const safeDesc = escapeHtml(prod.description || "Digital License");
+    const safeDesc = renderProductDescription(prod.description);
     const details = `💌 <b>${escapeHtml(productDisplayName(prod))}</b>\n\n` +
       `👛 Price: <b>$${Number(prod.price_usd).toFixed(2)} / item</b> (≈ ৳${priceBdt} BDT)\n` +
       `📦 Available Stock: <b>${prod.is_external && !prod.stock_verified ? "Unavailable — please refresh" : stockCount}</b>\n\n` +

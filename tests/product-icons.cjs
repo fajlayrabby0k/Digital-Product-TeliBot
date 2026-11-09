@@ -25,12 +25,18 @@ const context = vm.createContext({ console, Intl, setTimeout, clearTimeout, capt
   messages.push({method, ...payload}); return {ok:true};
 }});
 const source = fs.readFileSync(path.join(__dirname, '../_worker.js'), 'utf8').replace('export default {', 'const worker = {');
-vm.runInContext(source + '\nisDbInitialized = true; callTg = capture; globalThis.api = {productDisplayName,validProductIcon,saveProductIcon,handleProductIconText,handleUpdate};', context);
+vm.runInContext(source + '\nisDbInitialized = true; callTg = capture; globalThis.api = {renderProductDescription,productDisplayName,validProductIcon,saveProductIcon,handleProductIconText,handleUpdate};', context);
 const {api} = context;
 const env = {DB, ADMIN_ID:'1'};
 const callback = (data, id=1) => api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin'},message:{chat:{id},message_id:10}}},env);
 (async()=>{
   assert.equal(api.productDisplayName(product), '🛡️ Provider VPN');
+  assert.equal(api.renderProductDescription('[5282843764451195532] Lovable <Pro> & More'),
+    '<tg-emoji emoji-id="5282843764451195532">▫️</tg-emoji> Lovable &lt;Pro&gt; &amp; More');
+  assert.equal(api.renderProductDescription('[123] days [support]'), '[123] days [support]');
+  assert.equal(api.renderProductDescription('[5282843764451195532] One\n[523442290708985472] Two'),
+    '<tg-emoji emoji-id="5282843764451195532">▫️</tg-emoji> One\n<tg-emoji emoji-id="523442290708985472">▫️</tg-emoji> Two');
+  assert.equal(api.renderProductDescription(null), 'Digital License');
   for (const icon of ['🎬','🛡️','👨‍💻','🇧🇩','1️⃣']) assert.equal(api.validProductIcon(icon),true);
   for (const icon of ['hello','🎬🤖','<b>','https://test.test/a.png']) assert.equal(api.validProductIcon(icon),false);
   await callback('adm_icon_5');
