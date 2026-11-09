@@ -137,6 +137,7 @@ async function ensureDbReady(db) {
       "ALTER TABLE products ADD COLUMN custom_price_usd REAL DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN api_stock INTEGER DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN custom_icon TEXT DEFAULT NULL;",
+      "ALTER TABLE products ADD COLUMN provider_emoji_id TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN quantity INTEGER DEFAULT 1;",
       "ALTER TABLE orders ADD COLUMN amount_usd REAL DEFAULT 0;",
       "ALTER TABLE orders ADD COLUMN amount_bdt REAL DEFAULT 0;"
@@ -1470,6 +1471,18 @@ function providerProductName(item) {
   return `${icon.trim()} ${name}`;
 }
 
+// Telegram custom emoji IDs must remain strings to avoid integer precision loss.
+function providerEmojiId(item) {
+  const id = item.icon_custom_emoji_id ?? item.custom_emoji_id;
+  return typeof id === "string" && /^\d+$/.test(id) ? id : null;
+}
+
+function productButtonIcon(product) {
+  if (product.custom_icon !== null && product.custom_icon !== undefined) return {};
+  const id = providerEmojiId({ icon_custom_emoji_id: product.provider_emoji_id });
+  return id ? { icon_custom_emoji_id: id } : {};
+}
+
 // NULL follows the provider; an empty string explicitly hides its leading icon.
 function productDisplayName(product) {
   const name = String(product.name || "Product");
@@ -1579,6 +1592,8 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
             name: p.name,
             emoji: p.emoji,
             icon: p.icon,
+            icon_custom_emoji_id: p.icon_custom_emoji_id,
+            custom_emoji_id: p.custom_emoji_id,
             desc: p.description ? (p.description + (p.how_to_use ? `\n\n📖 Instructions:\n${p.how_to_use}` : "")) : (p.how_to_use || "Digital License"),
             rate: p.price,
             stock: providerStock(p)
@@ -1617,6 +1632,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       if (targetExternalId !== null && extId !== targetExternalId) continue;
 
       const name = providerProductName(item);
+      const emojiId = providerEmojiId(item);
       const desc = item.desc || item.description || `Automated digital product delivered via API. (ID: ${extId})`;
       const baseCostPrice = parseFloat(item.rate || item.price || item.cost || 1.0);
       const apiStock = providerStock(item);
@@ -1634,13 +1650,14 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
         prevStock = existing.api_stock || 0;
         if (existing.name !== name || existing.description !== desc ||
             Number(existing.cost_price_usd) !== baseCostPrice || Number(existing.price_usd) !== finalPrice ||
-            Number(existing.price_bdt) !== priceBdt || Number(existing.api_stock) !== apiStock || existing.is_active !== 1) {
-          await env.DB.prepare("UPDATE products SET name = ?, description = ?, cost_price_usd = ?, price_usd = ?, price_bdt = ?, api_stock = ?, is_active = 1 WHERE id = ?")
-          .bind(name, desc, baseCostPrice, finalPrice, priceBdt, apiStock, existing.id).run();
+            Number(existing.price_bdt) !== priceBdt || Number(existing.api_stock) !== apiStock || existing.is_active !== 1 ||
+            (existing.provider_emoji_id ?? null) !== emojiId) {
+          await env.DB.prepare("UPDATE products SET name = ?, description = ?, cost_price_usd = ?, price_usd = ?, price_bdt = ?, api_stock = ?, provider_emoji_id = ?, is_active = 1 WHERE id = ?")
+          .bind(name, desc, baseCostPrice, finalPrice, priceBdt, apiStock, emojiId, existing.id).run();
         }
       } else {
-        const ins = await env.DB.prepare("INSERT INTO products (name, description, price_usd, price_bdt, cost_price_usd, custom_price_usd, api_stock, is_active, is_external, external_id) VALUES (?, ?, ?, ?, ?, 0, ?, 1, 1, ?)")
-          .bind(name, desc, finalPrice, priceBdt, baseCostPrice, apiStock, extId).run();
+        const ins = await env.DB.prepare("INSERT INTO products (name, description, price_usd, price_bdt, cost_price_usd, custom_price_usd, api_stock, is_active, is_external, external_id, provider_emoji_id) VALUES (?, ?, ?, ?, ?, 0, ?, 1, 1, ?, ?)")
+          .bind(name, desc, finalPrice, priceBdt, baseCostPrice, apiStock, extId, emojiId).run();
         targetId = ins.meta ? ins.meta.last_row_id : null;
       }
 
@@ -1822,6 +1839,7 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
         const price = Number(prod.price_usd).toFixed(2).replace(/\.00$/, "");
         keyboard.push([{
           text: `${name} - $${price} ${stockLabel}`,
+          ...productButtonIcon(prod),
           ...(verified ? { style: stock > 0 ? "success" : "danger" } : {}),
           callback_data: `prod_${prod.id}`
         }]);

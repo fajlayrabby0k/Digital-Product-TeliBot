@@ -6,9 +6,9 @@ let catalog, fail = false;
 let catalogReads = 0, productLookups = 0, productWrites = 0;
 const products = [{id:1,external_id:'a',api_stock:10,custom_price_usd:0,is_external:1},{id:2,external_id:'removed',api_stock:9,is_external:1}];
 const settings = {external_api_url:'https://provider.example',external_api_key:'test',external_profit_margin:'20',usd_to_bdt_rate:'125'};
-const DB = {prepare(sql){let args;return {bind(...a){args=a;return this},async first(){if(sql.includes("FROM products")) productLookups++;if(sql.includes('FROM settings'))return {value:settings[args[0]]};if(sql.includes('WHERE external_id'))return products.find(p=>p.external_id===args[0]);if(sql.includes('FROM products WHERE id'))return {...products.find(p=>p.id===args[0])};},async all(){if(sql.includes("FROM products")) catalogReads++;if(sql.includes('FROM preorders'))return {results:[]};return {results:products.map(p=>({...p}))}},async run(){if(sql.startsWith("UPDATE products")) productWrites++;if(sql.startsWith('UPDATE products SET name')){const p=products.find(p=>p.id===args[6]);Object.assign(p,{description:args[1],cost_price_usd:args[2],is_active:1,name:args[0],api_stock:args[5],price_usd:args[3],price_bdt:args[4]});}else if(sql.startsWith('UPDATE products SET api_stock = 0'))products.find(p=>p.id===args[0]).api_stock=0;return {success:true}}}}};
+const DB = {prepare(sql){let args;return {bind(...a){args=a;return this},async first(){if(sql.includes("FROM products")) productLookups++;if(sql.includes('FROM settings'))return {value:settings[args[0]]};if(sql.includes('WHERE external_id'))return products.find(p=>p.external_id===args[0]);if(sql.includes('FROM products WHERE id'))return {...products.find(p=>p.id===args[0])};},async all(){if(sql.includes("FROM products")) catalogReads++;if(sql.includes('FROM preorders'))return {results:[]};return {results:products.map(p=>({...p}))}},async run(){if(sql.startsWith("UPDATE products")) productWrites++;if(sql.startsWith('UPDATE products SET name')){const p=products.find(p=>p.id===args[7]);Object.assign(p,{provider_emoji_id:args[6],description:args[1],cost_price_usd:args[2],is_active:1,name:args[0],api_stock:args[5],price_usd:args[3],price_bdt:args[4]});}else if(sql.startsWith('UPDATE products SET api_stock = 0'))products.find(p=>p.id===args[0]).api_stock=0;return {success:true}}}}};
 const context = vm.createContext({console,URL,Response,Request,AbortController,setTimeout,clearTimeout,fetch:async()=>{if(fail)throw Error('offline');return Response.json({products:catalog})}});
-vm.runInContext(source+'\nglobalThis.api={providerProductName,providerStock,syncExternalProducts,fetchLiveProductStock,checkExternalStock,checkForceJoin};',context);
+vm.runInContext(source+'\nglobalThis.api={providerEmojiId,productButtonIcon,providerProductName,providerStock,syncExternalProducts,fetchLiveProductStock,checkExternalStock,checkForceJoin};',context);
 (async()=>{
 const {api}=context;
 for (const [item, expected] of [
@@ -20,12 +20,19 @@ for (const [item, expected] of [
 ]) assert.equal(api.providerProductName(item), expected);
 
 for(const [input,expected] of [[{stock:0,available:true},0],[{stock:7},7],[{stock:0,remains:8},0],[{remains:'4'},4],[{available:true},0],[{stock:9,available:false},0],[{stock:-1},0]])assert.equal(api.providerStock(input),expected);
-catalog=[{id:'a',name:'A',price:2,stock:3,available:true}];
+catalog=[{id:'a',name:'A',icon_custom_emoji_id:'5368324170671202286',price:2,stock:3,available:true}];
 assert.equal((await api.syncExternalProducts({DB})).success,true);
+assert.equal(products[0].provider_emoji_id,'5368324170671202286');
+assert.equal(api.productButtonIcon(products[0]).icon_custom_emoji_id,'5368324170671202286');
+assert.equal(api.providerEmojiId({custom_emoji_id:'5368324170671202286'}),'5368324170671202286');
+assert.equal(api.providerEmojiId({icon_custom_emoji_id:5368324170671202286}),null);
+assert.equal(api.providerEmojiId({icon_custom_emoji_id:'https://image.test/logo.png'}),null);
+assert.equal(api.productButtonIcon({...products[0],custom_icon:'🎬'}).icon_custom_emoji_id,undefined);
+assert.equal(api.productButtonIcon({...products[0],custom_icon:''}).icon_custom_emoji_id,undefined);
 assert.equal(products[0].name,'A');assert.equal(products[0].api_stock,3);assert.equal(products[1].api_stock,0);
 products[0].custom_icon='💎';
 catalog=[{id:'a',name:'Original',emoji:'🎬',price:2,stock:0,available:true}];
-let fresh=await api.fetchLiveProductStock({DB},products[0]);assert.equal(fresh.custom_icon,'💎');assert.equal(fresh.name,'🎬 Original');assert.equal(fresh.api_stock,0);assert.equal(fresh.stock_verified,true);
+let fresh=await api.fetchLiveProductStock({DB},products[0]);assert.equal(fresh.provider_emoji_id,null);assert.equal(fresh.custom_icon,'💎');assert.equal(fresh.name,'🎬 Original');assert.equal(fresh.api_stock,0);assert.equal(fresh.stock_verified,true);
 assert.equal(await api.checkExternalStock({DB},1,fresh,1),false);
 catalog=[];products[0].api_stock=12;assert.equal((await api.syncExternalProducts({DB})).success,true);assert.equal(products[0].api_stock,0);
 fail=true;products[0].api_stock=8;fresh=await api.fetchLiveProductStock({DB},products[0]);assert.equal(fresh.stock_verified,false);assert.equal(products[0].api_stock,8);assert.equal(await api.checkExternalStock({DB},1,fresh,1),false);
