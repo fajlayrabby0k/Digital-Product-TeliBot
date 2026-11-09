@@ -48,6 +48,7 @@ const callback = (data, id=1) => api.handleUpdate({callback_query:{id:'cb',data,
       const expectedName=name==='❤️ Lovable Lite' ? name : originalName;
       for (const [menu, destination] of [['adm_manage_products','adm_prod_details_5'],['adm_price_menu','adm_setprice_5'],['adm_stock_menu','adm_addstock_5']]) {
         await callback(menu);
+        if (menu === "adm_manage_products") assert(messages.at(-1).text.includes("Available Products"));
         const button=messages.at(-1).reply_markup.inline_keyboard[0][0];
         assert.equal(button.text,`${expectedName} - $5 (${stock})`);
         assert.equal(button.style,stock ? 'success' : 'danger');

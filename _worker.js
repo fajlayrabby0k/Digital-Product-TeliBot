@@ -1196,10 +1196,10 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
 
     if (data === "adm_manage_products") {
-      const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
+      const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1 ORDER BY p.id ASC").all();
       const buttons = prods.map(p => [productListButton(p, `adm_prod_details_${p.id}`)]);
-      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
-      await editMsg(env, chatId, messageId, `📋 <b>All Store Products:</b>\nClick any product to view details or edit:`, buttons);
+      buttons.push([{ text: "🔄 Refresh", callback_data: "adm_manage_products" }, { text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
+      await editMsg(env, chatId, messageId, `🛍️ <b>Available Products</b>\n\n<i>Click any product below to view details or edit:</i>`, buttons);
       return;
     }
 
