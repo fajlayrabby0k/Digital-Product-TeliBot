@@ -113,10 +113,29 @@ export default {
 // ====================================================================
 // Database Setup & Migrations
 // ====================================================================
+// Bump this version whenever schema/default/index migrations change.
+const DB_SCHEMA_VERSION = "2026-11-speed-1";
 let isDbInitialized = false;
-async function ensureDbReady(db) {
-  if (isDbInitialized || !db) return;
+let dbInitializationPromise = null;
+async function ensureDbReady(db, force = false) {
+  if (!db || (isDbInitialized && !force)) return;
+  if (dbInitializationPromise) {
+    await dbInitializationPromise;
+    if (force) return await ensureDbReady(db, true);
+    return;
+  }
+  dbInitializationPromise = initializeDatabase(db, force).finally(() => { dbInitializationPromise = null; });
+  return await dbInitializationPromise;
+}
+
+async function initializeDatabase(db, force) {
   try {
+    if (!force) {
+      try {
+        const saved = await db.prepare("SELECT value FROM settings WHERE key = '__schema_version'").first();
+        if (saved?.value === DB_SCHEMA_VERSION) { isDbInitialized = true; return; }
+      } catch (_) { /* First installation has no settings table yet. */ }
+    }
     const schema = [
       `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE NOT NULL, username TEXT, first_name TEXT, balance_usd REAL DEFAULT 0, balance_bdt REAL DEFAULT 0, referred_by INTEGER DEFAULT 0, total_referrals INTEGER DEFAULT 0, total_spent_usd REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, price_usd REAL NOT NULL, price_bdt REAL NOT NULL, is_active INTEGER DEFAULT 1, is_external INTEGER DEFAULT 0, external_id TEXT DEFAULT '', cost_price_usd REAL DEFAULT 0, custom_price_usd REAL DEFAULT 0, api_stock INTEGER DEFAULT 0);`,
@@ -130,7 +149,8 @@ async function ensureDbReady(db) {
       `CREATE TABLE IF NOT EXISTS bep20_payment_claims (tx_hash TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_wei TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`,
       `CREATE TABLE IF NOT EXISTS binance_payment_claims (transaction_id TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_usdt TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`
     ];
-    for (const q of schema) await db.prepare(q).run();
+    if (typeof db.batch === "function") await db.batch(schema.map(q => db.prepare(q)));
+    else for (const q of schema) await db.prepare(q).run();
 
     const alters = [
       "ALTER TABLE users ADD COLUMN balance_usd REAL DEFAULT 0;",
@@ -149,7 +169,32 @@ async function ensureDbReady(db) {
       "ALTER TABLE orders ADD COLUMN amount_usd REAL DEFAULT 0;",
       "ALTER TABLE orders ADD COLUMN amount_bdt REAL DEFAULT 0;"
     ];
-    for (const a of alters) { try { await db.prepare(a).run(); } catch (_) {} }
+    const tables = [...new Set(alters.map(sql => sql.match(/ALTER TABLE (\w+)/)[1]))];
+    const columns = new Map(await Promise.all(tables.map(async table => {
+      const {results} = await db.prepare(`PRAGMA table_info(${table})`).all();
+      return [table, new Set(results.map(column => column.name))];
+    })));
+    const missing = alters.filter(sql => {
+      const [, table, column] = sql.match(/ALTER TABLE (\w+) ADD COLUMN (\w+)/);
+      return !columns.get(table).has(column);
+    });
+    if (missing.length) {
+      if (typeof db.batch === "function") await db.batch(missing.map(sql => db.prepare(sql)));
+      else for (const sql of missing) await db.prepare(sql).run();
+    }
+    const indexes = [
+      "CREATE INDEX IF NOT EXISTS inventory_available ON inventory(product_id, is_sold, id)",
+      "CREATE INDEX IF NOT EXISTS inventory_order ON inventory(order_id, is_sold)",
+      "CREATE INDEX IF NOT EXISTS orders_user_history ON orders(user_id, id DESC)",
+      "CREATE INDEX IF NOT EXISTS orders_status ON orders(status)",
+      "CREATE INDEX IF NOT EXISTS products_external ON products(external_id, is_external)",
+      "CREATE INDEX IF NOT EXISTS preorders_product_status ON preorders(product_id, status)",
+      "CREATE INDEX IF NOT EXISTS preorders_user_history ON preorders(user_id, id DESC)",
+      "CREATE INDEX IF NOT EXISTS orders_payment_hash ON orders(LOWER(trx_id)) WHERE status = 'completed'",
+      "CREATE INDEX IF NOT EXISTS deposits_payment_hash ON deposits(LOWER(trx_id)) WHERE status = 'completed'"
+    ];
+    if (typeof db.batch === "function") await db.batch(indexes.map(sql => db.prepare(sql)));
+    else for (const sql of indexes) await db.prepare(sql).run();
 
     const defaults = [
       ['usd_to_bdt_rate', '125'],
@@ -171,7 +216,9 @@ async function ensureDbReady(db) {
       ['force_group_username', ''],
       ['last_external_sync_time', '0']
     ];
-    for (const [k, v] of defaults) await db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").bind(k, v).run();
+    const settings = defaults.map(([k,v]) => db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)").bind(k,v));
+    if (typeof db.batch === "function") await db.batch(settings);
+    else for (const statement of settings) await statement.run();
 
     const pc = await db.prepare("SELECT COUNT(*) as c FROM products").first();
     if (!pc || pc.c === 0) {
@@ -184,6 +231,7 @@ async function ensureDbReady(db) {
         (2, 'https://lovable.dev/redeem/LOV-300-KEY-002'),
         (3, 'User: nord_user@mail.com | Pass: Nord#2026');`).run();
     }
+    await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('__schema_version', ?)").bind(DB_SCHEMA_VERSION).run();
     isDbInitialized = true;
   } catch (err) {
     console.error("ensureDbReady error:", err);
@@ -192,7 +240,7 @@ async function ensureDbReady(db) {
 
 async function setupDatabase(db) {
   isDbInitialized = false;
-  await ensureDbReady(db);
+  await ensureDbReady(db, true);
 }
 
 // Safety & Utility Helpers
@@ -222,9 +270,11 @@ function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
 // ====================================================================
 async function callTg(env, method, payload) {
   if (!env.BOT_TOKEN) return { ok: false, error: "BOT_TOKEN missing" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), method === "answerCallbackQuery" ? 2500 : 8000);
   try {
     const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal
     });
     const data = await res.json();
     if (!data.ok) {
@@ -232,9 +282,9 @@ async function callTg(env, method, payload) {
     }
     return data;
   } catch (e) {
-    console.error(`Telegram API network error in ${method}:`, e.message);
-    return { ok: false, error: e.message };
-  }
+    console.error(`Telegram API network error in ${method}:`, e.name);
+    return { ok: false, error: "Telegram request unavailable" };
+  } finally { clearTimeout(timer); }
 }
 async function sendMsg(env, chatId, text, keyboard = null) {
   const p = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
@@ -247,7 +297,7 @@ async function editMsg(env, chatId, messageId, text, keyboard = null) {
   const res = await callTg(env, "editMessageText", p);
   if (!res || !res.ok) {
     const desc = (res && res.description) || "";
-    if (desc.includes("message is not modified")) return res;
+    if (desc.includes("message is not modified")) return { ...res, ok: true };
     return await sendMsg(env, chatId, text, keyboard);
   }
   return res;
@@ -258,10 +308,16 @@ async function ansCb(env, id, text = null, showAlert = false) {
   return await callTg(env, "answerCallbackQuery", p);
 }
 async function getSetting(env, key, defVal) {
+  const cache = env.__requestSettings;
   try {
-    const r = await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first();
-    return (r && r.value !== undefined && r.value !== null) ? r.value : defVal;
-  } catch (_) { return defVal; }
+    let pending = cache?.get(key);
+    if (!pending) {
+      pending = env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first();
+      cache?.set(key, pending);
+    }
+    const row = await pending;
+    return row?.value ?? defVal;
+  } catch (_) { cache?.delete(key); return defVal; }
 }
 async function clearAdminState(env, id) {
   await env.DB.prepare("DELETE FROM admin_states WHERE user_id = ?").bind(id).run();
@@ -764,6 +820,8 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
 // Telegram Update Processor
 // ====================================================================
 async function handleUpdate(update, env, originUrl = "", ctx = null) {
+  const actor = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
+  if (String(actor) !== String(env.ADMIN_ID)) env = { ...env, __requestSettings: new Map() };
   await ensureDbReady(env.DB);
 
   // 1. Text Messages Handler
@@ -776,7 +834,11 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     const firstName = from.first_name || "Customer";
 
     // User Registration / Loading & Referral Tracking
-    let user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
+    const [storedUser, userState] = await Promise.all([
+      env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first(),
+      env.DB.prepare("SELECT * FROM user_states WHERE user_id = ?").bind(chatId).first()
+    ]);
+    let user = storedUser;
     if (!user) {
       let refId = 0;
       if (text.startsWith("/start ref_")) {
@@ -817,7 +879,6 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
 
     // Customer Custom Quantity State
-    const userState = await env.DB.prepare("SELECT * FROM user_states WHERE user_id = ?").bind(chatId).first();
     if (userState && userState.state === "awaiting_custom_qty") {
       const prodId = userState.data;
       const parsedQty = parseInt(text.replace(/[^0-9]/g, "")) || 1;
@@ -828,7 +889,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Mandatory Force Join Gate
     if (String(chatId) !== String(env.ADMIN_ID)) {
-      const forceCheck = await checkForceJoin(env, chatId);
+      const forceCheck = await checkForceJoin(env, chatId, Boolean(msg.reply_to_message || /^awaiting_(?:binance|bep20)_/.test(userState?.state || "")));
       if (!forceCheck.passed) { await sendForceJoinScreen(env, chatId, forceCheck); return; }
     }
 
@@ -993,7 +1054,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Force Join Check Button
     if (data === "check_force_join") {
-      const forceCheck = await checkForceJoin(env, chatId);
+      const forceCheck = await checkForceJoin(env, chatId, true);
       if (forceCheck.passed) {
         await ansCb(env, cb.id, "✅ Membership verified! Welcome to the store.", true);
         await sendHomeDashboard(env, chatId, user, firstName, messageId);
@@ -1005,7 +1066,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Force Join Guard
     if (String(chatId) !== String(env.ADMIN_ID) && !data.startsWith("adm_") && !data.startsWith("admin_")) {
-      const forceCheck = await checkForceJoin(env, chatId);
+      const forceCheck = await checkForceJoin(env, chatId, /^(?:wallet_pay_check_|direct_pay_|pay_|dep_)/.test(data));
       if (!forceCheck.passed) { await sendForceJoinScreen(env, chatId, forceCheck, messageId); return; }
     }
 
@@ -1862,11 +1923,17 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
     if (!key) return { success: false, message: "Please configure your External API Key in Admin Panel." };
 
     const items = await readProviderCatalog(env.DB, baseUrl, key, forceFresh);
+    const snapshot = providerCatalogCache.get(env.DB);
+    if (!forceFresh && targetExternalId === null && snapshot?.items === items && snapshot.appliedRate === configuredRate && snapshot.appliedMargin === configuredMargin) {
+      return { success: true, message: "Recent stock snapshot reused." };
+    }
 
     const rate = parseFloat(configuredRate);
     const margin = parseFloat(configuredMargin);
     // One catalog read replaces a database round trip for every provider item.
-    const { results: externalProducts } = await env.DB.prepare("SELECT * FROM products WHERE is_external = 1").all();
+    const { results: externalProducts } = targetExternalId === null
+      ? await env.DB.prepare("SELECT * FROM products WHERE is_external = 1").all()
+      : await env.DB.prepare("SELECT * FROM products WHERE is_external = 1 AND external_id = ?").bind(targetExternalId).all();
     const existingByExternalId = new Map(externalProducts.map(p => [String(p.external_id), p]));
     const seenIds = new Set();
     let importedCount = 0;
@@ -1923,6 +1990,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
 
     if (targetExternalId === null) {
       await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
+      if (snapshot?.items === items) { snapshot.appliedRate = configuredRate; snapshot.appliedMargin = configuredMargin; }
     }
     return { success: true, message: `Successfully connected! Imported & updated <b>${importedCount} products</b> with live stock and pricing.` };
   } catch (err) {
@@ -1990,13 +2058,18 @@ async function notifyPreorders(env, productId, productName, stockCount) {
   } catch (e) { console.error("notifyPreorders Error:", e); }
 }
 
-async function checkForceJoin(env, chatId) {
+const membershipCache = new WeakMap();
+async function checkForceJoin(env, chatId, forceFresh = false) {
   if (String(chatId) === String(env.ADMIN_ID)) return { passed: true };
   const [channel, group] = await Promise.all([
     getSetting(env, "force_channel_username", ""),
     getSetting(env, "force_group_username", "")
   ]);
   if (!channel && !group) return { passed: true };
+  let cache = membershipCache.get(env.DB);
+  if (!cache) { cache = new Map(); membershipCache.set(env.DB,cache); }
+  const cacheKey = JSON.stringify([String(chatId),channel,group]);
+  if (!forceFresh && (cache.get(cacheKey) || 0) > Date.now()) return { passed: true };
 
   const validStatuses = ["creator", "administrator", "member", "restricted"];
   const isMissing = async target => {
@@ -2009,7 +2082,9 @@ async function checkForceJoin(env, chatId) {
   };
   const [missingChannel, missingGroup] = await Promise.all([isMissing(channel), isMissing(group)]);
 
-  if (missingChannel || missingGroup) return { passed: false, channel, group, missingChannel, missingGroup };
+  if (missingChannel || missingGroup) { cache.delete(cacheKey); return { passed: false, channel, group, missingChannel, missingGroup }; }
+  if (cache.size >= 5000) cache.clear();
+  cache.set(cacheKey,Date.now()+15000);
   return { passed: true };
 }
 
@@ -2247,17 +2322,18 @@ async function sendDeposit(env, chatId, editMessageId = null) {
 }
 
 async function sendAdminDashboard(env, chatId, editMessageId = null) {
-  const totalUsers = await env.DB.prepare("SELECT COUNT(*) as count FROM users").first();
-  const totalOrders = await env.DB.prepare("SELECT COUNT(*) as count FROM orders").first();
-  const completed = await env.DB.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'completed'").first();
-  const stock = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE is_sold = 0").first();
-  const pendingPo = await env.DB.prepare("SELECT COUNT(*) as count FROM preorders WHERE status = 'pending'").first();
-  const apiProds = await env.DB.prepare("SELECT COUNT(*) as count FROM products WHERE is_external = 1 AND is_active = 1").first();
-
-  const rate = await getSetting(env, "usd_to_bdt_rate", "125");
-  const commPct = await getSetting(env, "referral_commission_percent", "5");
-  const forceChan = await getSetting(env, "force_channel_username", "");
-  const forceGrp = await getSetting(env, "force_group_username", "");
+  const [totalUsers, totalOrders, completed, stock, pendingPo, apiProds, rate, commPct, forceChan, forceGrp] = await Promise.all([
+    env.DB.prepare("SELECT COUNT(*) as count FROM users").first(),
+    env.DB.prepare("SELECT COUNT(*) as count FROM orders").first(),
+    env.DB.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'completed'").first(),
+    env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE is_sold = 0").first(),
+    env.DB.prepare("SELECT COUNT(*) as count FROM preorders WHERE status = 'pending'").first(),
+    env.DB.prepare("SELECT COUNT(*) as count FROM products WHERE is_external = 1 AND is_active = 1").first(),
+    getSetting(env, "usd_to_bdt_rate", "125"),
+    getSetting(env, "referral_commission_percent", "5"),
+    getSetting(env, "force_channel_username", ""),
+    getSetting(env, "force_group_username", "")
+  ]);
   const forceStatus = (forceChan || forceGrp) ? "Active ✅" : "Off ❌";
 
   const report = `👑 <b>Store Administration Control Center</b>\n\n` +
