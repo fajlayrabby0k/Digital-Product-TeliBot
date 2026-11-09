@@ -7,8 +7,14 @@ The Worker uses the account-signed `GET https://api.binance.com/sapi/v1/pay/tran
 1. Add `BINANCE_API_KEY` and `BINANCE_API_SECRET` as **Secrets** on the deployed Worker. They must be an HMAC API key for the personal account receiving payments. The account/key must be allowed to read Pay history. Trading and withdrawal access are not needed. Keep secrets out of chat, Git and logs.
 2. Deploy the latest `_worker.js` with the existing D1 `DB` binding. Schema initialization adds `binance_payment_claims` without deleting existing data. The first webhook initializes the schema; the existing `/api/setup` route also initializes it.
 3. In `/admin` → Payment Settings, set the correct **Binance Pay ID** and turn **Binance Auto-Verify ON**. The Pay ID is the recipient shown to customers; it is not an API key.
-4. Create a new order in the bot, then send the stated amount in **USDT via Binance Pay**. Reply to that order's payment message with the **Pay Transaction ID** on the Binance receipt, not the bot's order number, blockchain hash or a Spot trade order ID.
+4. Create a new order in the bot, then send the stated amount in **USDT via Binance Pay**. Tap **Enter Order ID**, then send the **Pay Transaction ID** on the Binance receipt as your next chat message (Reply submissions remain supported), not the bot's order number, blockchain hash or a Spot trade order ID.
 5. Check one real payment after deployment. No live Binance access was validated in the development environment because those Secrets are only configured on Cloudflare.
+
+## Deposit screens
+
+Select Binance Pay and type a positive amount with at most two decimal places. Binance wallet deposits are capped at **10 USDT**. Larger deposits show a BEP20 alternative without creating a Binance invoice. The instructions include **Copy Pay ID**, **Enter Order ID**, and **Back** buttons. Cancel or navigate away to stop receipt entry. This deposit cap does not limit direct product order totals.
+
+Submit the receipt ID within **five minutes of the payment timestamp**. Older payments require admin reconciliation; do not send money again. This limit is checked by the verifier, including legacy Reply submissions.
 
 ## Verification and delivery
 

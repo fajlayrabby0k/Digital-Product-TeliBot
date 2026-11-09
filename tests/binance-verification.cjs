@@ -48,6 +48,14 @@ const verify=(settings=env,inv=invoice,expected=5)=>context.api.verifyBinancePay
  const results=await Promise.all([verify(),verify()]);assert.equal(results.filter(r=>r.success).length,1);assert.equal(claims.length,1);
  claims=[];records=[{...incoming,amount:'0.50000000'}];
  assert.equal((await verify(env,{...invoice,type:'deposit'},0)).paidAmount,0.5);
+ claims=[];records=[{...incoming,amount:'11.00'}];
+ assert.equal((await verify(env,{...invoice,type:'deposit'},5)).reason,'amount_high');
+ assert.equal(claims.length,0);
+ const originalCreated=invoice.created_at;
+ invoice.created_at=new Date(now-10*60000).toISOString();
+ records=[{...incoming,transactionTime:now-6*60000}];
+ assert.equal((await verify()).reason,'payment_expired');assert.equal(claims.length,0);
+ invoice.created_at=originalCreated;
  // A successful payment must not be described as delivered if the provider fails.
  const messages=[],updates=[];
  context.capture=async(_env,_chat,text)=>{messages.push(text);return {ok:true};};
