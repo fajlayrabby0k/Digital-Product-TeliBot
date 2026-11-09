@@ -779,7 +779,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     const messageId = cb.message.message_id;
 
     // Immediately acknowledge callback query to clear button loading spinner
-    ansCb(env, cb.id).catch(() => {});
+    const acknowledgement = ansCb(env, cb.id).catch(() => {});
+    if (ctx) ctx.waitUntil(acknowledgement);
+    else await acknowledgement;
 
     let user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
     const firstName = cb.from.first_name || "Customer";
@@ -1452,7 +1454,7 @@ function providerStock(item) {
 // Use the same provider formats and reconciliation for detail and checkout.
 async function fetchLiveProductStock(env, prod) {
   if (!prod || prod.is_external !== 1 || !prod.external_id) return prod;
-  const result = await syncExternalProducts(env);
+  const result = await syncExternalProducts(env, null, null, false, String(prod.external_id));
   if (!result.success) return { ...prod, stock_verified: false };
   const fresh = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prod.id).first();
   return { ...(fresh || prod), stock_verified: Boolean(fresh) };
@@ -1472,11 +1474,17 @@ async function checkExternalStock(env, chatId, prod, quantity) {
 }
 
 // Full live sync for all external products
-async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual = false) {
+async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual = false, targetExternalId = null) {
   try {
-    let baseUrl = (apiUrl || await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io")).trim().replace(/\/+$/, "");
+    const [configuredUrl, configuredKey, configuredRate, configuredMargin] = await Promise.all([
+      apiUrl ?? getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io"),
+      apiKey ?? getSetting(env, "external_api_key", ""),
+      getSetting(env, "usd_to_bdt_rate", "125"),
+      getSetting(env, "external_profit_margin", "20")
+    ]);
+    let baseUrl = configuredUrl.trim().replace(/\/+$/, "");
     if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
-    const key = apiKey || await getSetting(env, "external_api_key", "");
+    const key = configuredKey;
     if (!key) return { success: false, message: "Please configure your External API Key in Admin Panel." };
 
     let items = null;
@@ -1518,15 +1526,18 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
 
     if (!Array.isArray(items)) return { success: false, message: `Could not fetch products. Check API key and Base URL (${baseUrl}).` };
 
-    const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
-    const margin = parseFloat(await getSetting(env, "external_profit_margin", "20"));
-
+    const rate = parseFloat(configuredRate);
+    const margin = parseFloat(configuredMargin);
+    // One catalog read replaces a database round trip for every provider item.
+    const { results: externalProducts } = await env.DB.prepare("SELECT * FROM products WHERE is_external = 1").all();
+    const existingByExternalId = new Map(externalProducts.map(p => [String(p.external_id), p]));
     const seenIds = new Set();
     let importedCount = 0;
     for (const item of items) {
       const extId = String(item.id ?? item.service ?? item.product_id ?? "");
       if (!extId) continue;
       seenIds.add(extId);
+      if (targetExternalId !== null && extId !== targetExternalId) continue;
 
       const rawName = item.name || item.title || item.product_name || "External Product";
       const name = smartProductIcon(rawName);
@@ -1534,7 +1545,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       const baseCostPrice = parseFloat(item.rate || item.price || item.cost || 1.0);
       const apiStock = providerStock(item);
 
-      const existing = await env.DB.prepare("SELECT id, api_stock, custom_price_usd FROM products WHERE external_id = ?").bind(extId).first();
+      const existing = existingByExternalId.get(extId);
       let finalPrice = (existing && existing.custom_price_usd && existing.custom_price_usd > 0)
         ? existing.custom_price_usd
         : Number((baseCostPrice * (1 + margin / 100)).toFixed(2));
@@ -1545,8 +1556,12 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       if (existing) {
         targetId = existing.id;
         prevStock = existing.api_stock || 0;
-        await env.DB.prepare("UPDATE products SET name = ?, description = ?, cost_price_usd = ?, price_usd = ?, price_bdt = ?, api_stock = ?, is_active = 1 WHERE id = ?")
+        if (existing.name !== name || existing.description !== desc ||
+            Number(existing.cost_price_usd) !== baseCostPrice || Number(existing.price_usd) !== finalPrice ||
+            Number(existing.price_bdt) !== priceBdt || Number(existing.api_stock) !== apiStock || existing.is_active !== 1) {
+          await env.DB.prepare("UPDATE products SET name = ?, description = ?, cost_price_usd = ?, price_usd = ?, price_bdt = ?, api_stock = ?, is_active = 1 WHERE id = ?")
           .bind(name, desc, baseCostPrice, finalPrice, priceBdt, apiStock, existing.id).run();
+        }
       } else {
         const ins = await env.DB.prepare("INSERT INTO products (name, description, price_usd, price_bdt, cost_price_usd, custom_price_usd, api_stock, is_active, is_external, external_id) VALUES (?, ?, ?, ?, ?, 0, ?, 1, 1, ?)")
           .bind(name, desc, finalPrice, priceBdt, baseCostPrice, apiStock, extId).run();
@@ -1561,14 +1576,16 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
     }
 
     // A successful complete catalog is authoritative, including an empty catalog.
-    const { results: externalProducts } = await env.DB.prepare("SELECT id, external_id FROM products WHERE is_external = 1").all();
     for (const product of externalProducts) {
-      if (!seenIds.has(String(product.external_id))) {
+      if ((targetExternalId === null || String(product.external_id) === targetExternalId) &&
+          !seenIds.has(String(product.external_id)) && Number(product.api_stock) !== 0) {
         await env.DB.prepare("UPDATE products SET api_stock = 0 WHERE id = ?").bind(product.id).run();
       }
     }
 
-    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
+    if (targetExternalId === null) {
+      await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
+    }
     return { success: true, message: `Successfully connected! Imported & updated <b>${importedCount} products</b> with live stock and pricing.` };
   } catch (err) {
     return { success: false, message: `Error connecting to API: ${err.message}` };
@@ -1632,28 +1649,22 @@ async function notifyPreorders(env, productId, productName, stockCount) {
 
 async function checkForceJoin(env, chatId) {
   if (String(chatId) === String(env.ADMIN_ID)) return { passed: true };
-  const channel = await getSetting(env, "force_channel_username", "");
-  const group = await getSetting(env, "force_group_username", "");
+  const [channel, group] = await Promise.all([
+    getSetting(env, "force_channel_username", ""),
+    getSetting(env, "force_group_username", "")
+  ]);
   if (!channel && !group) return { passed: true };
 
   const validStatuses = ["creator", "administrator", "member", "restricted"];
-  let missingChannel = false, missingGroup = false;
-
-  if (channel) {
-    const t = channel.startsWith("-") || channel.startsWith("@") ? channel : `@${channel}`;
+  const isMissing = async target => {
+    if (!target) return false;
+    const chat = target.startsWith("-") || target.startsWith("@") ? target : `@${target}`;
     try {
-      const resp = await callTg(env, "getChatMember", { chat_id: t, user_id: chatId });
-      if (!resp.ok || !resp.result || !validStatuses.includes(resp.result.status)) missingChannel = true;
-    } catch (_) { missingChannel = true; }
-  }
-
-  if (group) {
-    const t = group.startsWith("-") || group.startsWith("@") ? group : `@${group}`;
-    try {
-      const resp = await callTg(env, "getChatMember", { chat_id: t, user_id: chatId });
-      if (!resp.ok || !resp.result || !validStatuses.includes(resp.result.status)) missingGroup = true;
-    } catch (_) { missingGroup = true; }
-  }
+      const response = await callTg(env, "getChatMember", { chat_id: chat, user_id: chatId });
+      return !response.ok || !response.result || !validStatuses.includes(response.result.status);
+    } catch (_) { return true; }
+  };
+  const [missingChannel, missingGroup] = await Promise.all([isMissing(channel), isMissing(group)]);
 
   if (missingChannel || missingGroup) return { passed: false, channel, group, missingChannel, missingGroup };
   return { passed: true };
