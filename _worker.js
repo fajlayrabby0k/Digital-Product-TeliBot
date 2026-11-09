@@ -136,6 +136,7 @@ async function ensureDbReady(db) {
       "ALTER TABLE products ADD COLUMN cost_price_usd REAL DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN custom_price_usd REAL DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN api_stock INTEGER DEFAULT 0;",
+      "ALTER TABLE products ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN quantity INTEGER DEFAULT 1;",
       "ALTER TABLE orders ADD COLUMN amount_usd REAL DEFAULT 0;",
       "ALTER TABLE orders ADD COLUMN amount_bdt REAL DEFAULT 0;"
@@ -487,7 +488,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     const creds = apiResult.success ? apiResult.credentials : "Order registered with external provider. Details arriving shortly.";
     if (apiResult.success) await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(qty, prod.id).run();
 
-    await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${prod.name}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${creds}</code></blockquote>`, [
+    await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${creds}</code></blockquote>`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
@@ -514,7 +515,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     itemStrings.push(it.item_data);
   }
 
-  await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${prod.name}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${itemStrings.join("\n\n")}</code></blockquote>`, [
+  await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${itemStrings.join("\n\n")}</code></blockquote>`, [
     [{ text: "📦 View Orders", callback_data: "my_orders" }],
     [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
   ]);
@@ -607,6 +608,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (String(chatId) === String(env.ADMIN_ID)) {
       const adminState = await env.DB.prepare("SELECT * FROM admin_states WHERE user_id = ?").bind(chatId).first();
       if (adminState && adminState.state) {
+        if (await handleProductIconText(env, chatId, text, adminState)) return;
         const handled = await handleAdminTextState(env, chatId, text, adminState);
         if (handled) return;
       }
@@ -830,12 +832,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       if (prod) {
         const existingPo = await env.DB.prepare("SELECT id FROM preorders WHERE user_id = ? AND product_id = ? AND status = 'pending'").bind(chatId, prodId).first();
         if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, status) VALUES (?, ?, ?, 'pending')").bind(chatId, username, prodId).run();
-        await editMsg(env, chatId, messageId, `⏳ <b>Pre-Order Confirmed!</b>\n\nProduct: <b>${prod.name}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your pre-order is registered! As soon as new stock is added or synced via API, you will receive an instant notification with a direct purchase link. ❤️`, [
+        await editMsg(env, chatId, messageId, `⏳ <b>Pre-Order Confirmed!</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your pre-order is registered! As soon as new stock is added or synced via API, you will receive an instant notification with a direct purchase link. ❤️`, [
           [{ text: "🛒 Continue Shopping", callback_data: "shop" }],
           [{ text: "🏠 Main Menu", callback_data: "home" }]
         ]);
-        await sendMsg(env, env.ADMIN_ID, `🚨 <b>New Pre-Order Placed!</b>\n\nCustomer: ${username} (ID: <code>${chatId}</code>)\nProduct: <b>${prod.name}</b>\nPrice: $${prod.price_usd} USD\n\n⚠️ Please restock this product using Admin Panel or Provider API!`, [
-          [{ text: `➕ Add Stock for ${prod.name}`, callback_data: `adm_addstock_${prod.id}` }]
+        await sendMsg(env, env.ADMIN_ID, `🚨 <b>New Pre-Order Placed!</b>\n\nCustomer: ${username} (ID: <code>${chatId}</code>)\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: $${prod.price_usd} USD\n\n⚠️ Please restock this product using Admin Panel or Provider API!`, [
+          [{ text: `➕ Add Stock for ${productDisplayName(prod)}`, callback_data: `adm_addstock_${prod.id}` }]
         ]);
       }
       return;
@@ -888,7 +890,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         const diffBdt = Math.round(diff * rate);
         await editMsg(env, chatId, messageId,
           `⚠️ <b>Insufficient Wallet Balance!</b>\n\n` +
-          `Product: <b>${prod.name}</b> (${qty} items)\n` +
+          `Product: <b>${productDisplayName(prod)}</b> (${qty} items)\n` +
           `• Total Required: <b>$${totalPrice.toFixed(2)} USD</b>\n` +
           `• Current Wallet Balance: <b>$${userBal.toFixed(2)} USD</b>\n` +
           `• Shortage: <b>$${diff.toFixed(2)} USD (≈ ৳${diffBdt} BDT)</b>\n\n` +
@@ -922,7 +924,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
       await editMsg(env, chatId, messageId,
         `💳 <b>Select Payment Method:</b>\n\n` +
-        `Product: <b>${prod.name}</b>\n` +
+        `Product: <b>${productDisplayName(prod)}</b>\n` +
         `Quantity: <b>${qty} item(s)</b>\n` +
         `Total Payable: <b>$${totalUsd.toFixed(2)} USD (≈ ৳${totalBdt} BDT)</b>\n\n` +
         `Choose your preferred payment method below:`,
@@ -984,7 +986,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
       const checkoutText = `💳 <b>Payment Instructions — ${mTitle}</b>\n\n` +
         `Order ID: <b>#${orderId}</b>\n` +
-        `Product: <b>${prod.name}</b> (${qty} item(s))\n` +
+        `Product: <b>${productDisplayName(prod)}</b> (${qty} item(s))\n` +
         `Total Payable: <b>$${totalUsd.toFixed(2)} USD (≈ ৳${totalBdt} BDT)</b>\n\n` +
         `${customInstructions}`;
 
@@ -1042,7 +1044,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     if (data === "adm_stock_menu") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `${(p.stock_qty || 0) > 0 ? "🟢" : "🔴"} ${p.name} (${p.stock_qty || 0})`, callback_data: `adm_addstock_${p.id}` }]);
+      const buttons = prods.map(p => [{ text: `${(p.stock_qty || 0) > 0 ? "🟢" : "🔴"} ${productDisplayName(p)} (${p.stock_qty || 0})`, callback_data: `adm_addstock_${p.id}` }]);
       buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `📦 <b>Select Product to Add Stock:</b>\nClick any product below:`, buttons);
       return;
@@ -1060,7 +1062,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     if (data === "adm_price_menu") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `${p.name} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_setprice_${p.id}` }]);
+      const buttons = prods.map(p => [{ text: `${productDisplayName(p)} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_setprice_${p.id}` }]);
       buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `💰 <b>Select Product to Set Custom Price or Profit Margin:</b>\n\nClick any product below:`, buttons);
       return;
@@ -1109,7 +1111,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await clearAdminState(env, chatId);
 
       const profitUsd = (newUsd - baseCost).toFixed(2);
-      await editMsg(env, chatId, messageId, `✅ <b>Custom Price Updated!</b>\n\nProduct: <b>${prod.name}</b>\n• Profit Markup: <b>+${marginPct}%</b>\n• Base Cost: <b>$${baseCost.toFixed(2)} USD</b>\n• New Price: <b>$${newUsd.toFixed(2)} USD</b> (≈ ৳${newBdt} BDT)\n• Net Profit: <b>+$${profitUsd} USD</b> per sale! 🚀`, [
+      await editMsg(env, chatId, messageId, `✅ <b>Custom Price Updated!</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\n• Profit Markup: <b>+${marginPct}%</b>\n• Base Cost: <b>$${baseCost.toFixed(2)} USD</b>\n• New Price: <b>$${newUsd.toFixed(2)} USD</b> (≈ ৳${newBdt} BDT)\n• Net Profit: <b>+$${profitUsd} USD</b> per sale! 🚀`, [
         [{ text: "💰 Set Another Price", callback_data: "adm_price_menu" }],
         [{ text: "👑 Admin Panel", callback_data: "admin_panel" }]
       ]);
@@ -1153,9 +1155,42 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       return;
     }
 
+    if (data.startsWith("adm_icon_") || data.startsWith("adm_iconpick_") || data.startsWith("adm_iconcustom_")) {
+      if (String(chatId) !== String(env.ADMIN_ID)) return;
+      if (data.startsWith("adm_iconpick_")) {
+        const [productId, choice] = data.slice("adm_iconpick_".length).split("_");
+        const icon = choice === "DEFAULT" ? null : choice === "NONE" ? "" : choice;
+        if (icon !== null && icon !== "" && !validProductIcon(icon)) return;
+        await saveProductIcon(env, chatId, productId, icon);
+        return;
+      }
+      const custom = data.startsWith("adm_iconcustom_");
+      const productId = data.slice(custom ? "adm_iconcustom_".length : "adm_icon_".length);
+      const product = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(productId).first();
+      if (!product) return;
+      if (custom) {
+        await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_product_icon', ?)").bind(chatId, productId).run();
+        await editMsg(env, chatId, messageId, "Send one emoji for this product (e.g. 🎬). Send /cancel to cancel.", [
+          [{ text: "❌ Cancel", callback_data: `adm_icon_${productId}` }]
+        ]);
+        return;
+      }
+      await clearAdminState(env, chatId);
+      const icons = ["🎬", "🤖", "🛡️", "🎵", "🎓", "💎", "🎨", "🔑"];
+      const keyboard = [];
+      for (let i = 0; i < icons.length; i += 4) {
+        keyboard.push(icons.slice(i, i + 4).map(icon => ({ text: icon, callback_data: `adm_iconpick_${productId}_${icon}` })));
+      }
+      keyboard.push([{ text: "✏️ Send Custom Emoji", callback_data: `adm_iconcustom_${productId}` }]);
+      keyboard.push([{ text: "Remove Icon", callback_data: `adm_iconpick_${productId}_NONE` }, { text: "Use Original Icon", callback_data: `adm_iconpick_${productId}_DEFAULT` }]);
+      keyboard.push([{ text: "🔙 Back", callback_data: `adm_prod_details_${productId}` }]);
+      await editMsg(env, chatId, messageId, `Choose an icon for <b>${escapeHtml(productDisplayName(product))}</b>:`, keyboard);
+      return;
+    }
+
     if (data === "adm_manage_products") {
       const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [{ text: `${(p.stock_qty || 0) > 0 ? "🟢" : "🔴"} ${p.name} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_prod_details_${p.id}` }]);
+      const buttons = prods.map(p => [{ text: `${(p.stock_qty || 0) > 0 ? "🟢" : "🔴"} ${productDisplayName(p)} (${p.stock_qty || 0}) — $${p.price_usd.toFixed(2)}`, callback_data: `adm_prod_details_${p.id}` }]);
       buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
       await editMsg(env, chatId, messageId, `📋 <b>All Store Products:</b>\nClick any product to view details or edit:`, buttons);
       return;
@@ -1169,12 +1204,13 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const stock = await env.DB.prepare("SELECT COUNT(*) as count FROM inventory WHERE product_id = ? AND is_sold = 0").bind(prodId).first();
       const liveStock = prod.is_external ? (prod.api_stock || 0) : (stock ? stock.count : 0);
 
-      const text = `📦 <b>${prod.name}</b>\n\n• Selling Price: <b>$${prod.price_usd.toFixed(2)} USD (≈ ৳${prod.price_bdt} BDT)</b>\n` +
+      const text = `📦 <b>${productDisplayName(prod)}</b>\n\n• Selling Price: <b>$${prod.price_usd.toFixed(2)} USD (≈ ৳${prod.price_bdt} BDT)</b>\n` +
         (prod.is_external ? `• Provider Cost: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>\n• Origin: <b>External Bot API (Live Synced)</b>\n` : `• Origin: <b>Manual Store Stock</b>\n`) +
         `• Live Stock: <b>${liveStock} items</b>\n\n📝 <b>Description:</b>\n${prod.description}`;
 
       const buttons = [
         [{ text: "💰 Set Custom Price", callback_data: `adm_setprice_${prod.id}` }],
+        [{ text: "🎨 Set Product Icon", callback_data: `adm_icon_${prod.id}` }],
         prod.is_external ? [] : [{ text: "➕ Add Stock", callback_data: `adm_addstock_${prod.id}` }],
         [{ text: "🗑️ Delete Product", callback_data: `adm_del_prod_${prod.id}` }],
         [{ text: "🔙 Back", callback_data: "adm_manage_products" }]
@@ -1432,6 +1468,53 @@ function providerProductName(item) {
   if (typeof icon !== "string" || !/\p{Extended_Pictographic}/u.test(icon) ||
       /https?:\/\//i.test(icon) || /\p{Extended_Pictographic}/u.test(name)) return name;
   return `${icon.trim()} ${name}`;
+}
+
+// NULL follows the provider; an empty string explicitly hides its leading icon.
+function productDisplayName(product) {
+  const name = String(product.name || "Product");
+  if (product.custom_icon === null || product.custom_icon === undefined) return name;
+  const segments = [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(name)];
+  while (segments.length && (/^\s+$/u.test(segments[0].segment) ||
+    /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(segments[0].segment))) segments.shift();
+  const plainName = segments.map(part => part.segment).join("").trim() || "Product";
+  return product.custom_icon ? `${product.custom_icon} ${plainName}` : plainName;
+}
+
+function validProductIcon(text) {
+  return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)].length === 1 &&
+    /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20e3]/u.test(text);
+}
+
+async function saveProductIcon(env, chatId, productId, icon) {
+  if (String(chatId) !== String(env.ADMIN_ID)) return false;
+  const product = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(productId).first();
+  if (!product) {
+    await sendMsg(env, chatId, "⚠️ Product not found.");
+    return false;
+  }
+  await env.DB.prepare("UPDATE products SET custom_icon = ? WHERE id = ?").bind(icon, productId).run();
+  await clearAdminState(env, chatId);
+  await sendMsg(env, chatId, `✅ Icon updated: <b>${escapeHtml(productDisplayName({ ...product, custom_icon: icon }))}</b>`, [
+    [{ text: "🔙 Back to Product", callback_data: `adm_prod_details_${productId}` }]
+  ]);
+  return true;
+}
+
+async function handleProductIconText(env, chatId, text, state) {
+  if (String(chatId) !== String(env.ADMIN_ID) || state.state !== "awaiting_product_icon") return false;
+  if (text === "/cancel") {
+    await clearAdminState(env, chatId);
+    await sendMsg(env, chatId, "Icon change cancelled.");
+    return true;
+  }
+  const icon = text.trim();
+  if (!validProductIcon(icon)) {
+    await sendMsg(env, chatId, "Please send one emoji, e.g. 🎬 or 🛡️. Send /cancel to cancel.");
+    return true;
+  }
+  await saveProductIcon(env, chatId, state.data, icon);
+  return true;
 }
 
 // Never invent stock when a provider omits its quantity.
@@ -1735,7 +1818,7 @@ async function sendProductsDirectly(env, chatId, editMessageId = null) {
         const stock = prod.stock_qty || 0;
         const verified = !(prod.is_external && !stockSync.success);
         const stockLabel = verified ? `(${stock})` : "(?)";
-        const name = prod.is_external ? prod.name : prod.name.replace(/[🔴🟢]/gu, "").trim();
+        const name = productDisplayName(prod);
         const price = Number(prod.price_usd).toFixed(2).replace(/\.00$/, "");
         keyboard.push([{
           text: `${name} - $${price} ${stockLabel}`,
@@ -1784,7 +1867,7 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null) 
     const priceBdt = Math.round(prod.price_usd * rate);
 
     const safeDesc = escapeHtml(prod.description || "Digital License");
-    const details = `💌 <b>${escapeHtml(prod.name)}</b>\n\n` +
+    const details = `💌 <b>${escapeHtml(productDisplayName(prod))}</b>\n\n` +
       `👛 Price: <b>$${Number(prod.price_usd).toFixed(2)} / item</b> (≈ ৳${priceBdt} BDT)\n` +
       `📦 Available Stock: <b>${prod.is_external && !prod.stock_verified ? "Unavailable — please refresh" : stockCount}</b>\n\n` +
       `📦 <b>Product Details:</b>\n<blockquote>${safeDesc}</blockquote>\n\n` +
@@ -1834,7 +1917,7 @@ async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId
     const diff = Number((totalPrice - userBal).toFixed(2));
     const hasEnoughBal = diff <= 0;
 
-    const previewText = `💌 <b>${escapeHtml(prod.name)}</b>\n\n` +
+    const previewText = `💌 <b>${escapeHtml(productDisplayName(prod))}</b>\n\n` +
       `📦 <b>Order Preview</b>\n\n` +
       `Quantity: <b>${qty} item(s)</b>\n` +
       `👛 Unit Price: <b>$${unitPrice.toFixed(2)}</b>\n` +

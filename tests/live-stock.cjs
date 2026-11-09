@@ -23,8 +23,9 @@ for(const [input,expected] of [[{stock:0,available:true},0],[{stock:7},7],[{stoc
 catalog=[{id:'a',name:'A',price:2,stock:3,available:true}];
 assert.equal((await api.syncExternalProducts({DB})).success,true);
 assert.equal(products[0].name,'A');assert.equal(products[0].api_stock,3);assert.equal(products[1].api_stock,0);
+products[0].custom_icon='💎';
 catalog=[{id:'a',name:'Original',emoji:'🎬',price:2,stock:0,available:true}];
-let fresh=await api.fetchLiveProductStock({DB},products[0]);assert.equal(fresh.name,'🎬 Original');assert.equal(fresh.api_stock,0);assert.equal(fresh.stock_verified,true);
+let fresh=await api.fetchLiveProductStock({DB},products[0]);assert.equal(fresh.custom_icon,'💎');assert.equal(fresh.name,'🎬 Original');assert.equal(fresh.api_stock,0);assert.equal(fresh.stock_verified,true);
 assert.equal(await api.checkExternalStock({DB},1,fresh,1),false);
 catalog=[];products[0].api_stock=12;assert.equal((await api.syncExternalProducts({DB})).success,true);assert.equal(products[0].api_stock,0);
 fail=true;products[0].api_stock=8;fresh=await api.fetchLiveProductStock({DB},products[0]);assert.equal(fresh.stock_verified,false);assert.equal(products[0].api_stock,8);assert.equal(await api.checkExternalStock({DB},1,fresh,1),false);
