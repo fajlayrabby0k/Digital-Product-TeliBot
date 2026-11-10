@@ -33,6 +33,12 @@ export default {
             { command: "support", description: "24/7 Customer Helpdesk" }
           ]
         });
+        if (url.searchParams.get('repair_webhook') === '1') {
+          const productionOrigin=new URL(env.BOT_PUBLIC_URL || 'https://digital-product-telibot.pages.dev').origin;
+          if (url.origin!==productionOrigin) return new Response(JSON.stringify({success:false,error:'Use the production bot URL for webhook recovery.'}),{status:400,headers:{'Content-Type':'application/json'}});
+          const repaired=await repairTelegramWebhook(env,`${productionOrigin}/api/webhook`);
+          return new Response(JSON.stringify({success:repaired,webhook_repaired:repaired,message:repaired?'Webhook repaired. Send /start in Telegram.':'Webhook repair failed. Check BOT_TOKEN and Telegram API access.'}),{status:repaired?200:502,headers:{'Content-Type':'application/json','Cache-Control':'no-store'}});
+        }
         return new Response(JSON.stringify({ success: true, message: "Store configured and database migrated successfully!" }), {
           status: 200, headers: { "Content-Type": "application/json" }
         });
@@ -88,7 +94,12 @@ export default {
     // 4. Telegram Webhook Handler
     if (request.method === "POST" && (url.pathname === "/api/webhook" || url.pathname === "/")) {
       try {
-        if (!await authenticateTelegramWebhook(request,env)) return new Response("Webhook authentication required", {status:403});
+        if (!await authenticateTelegramWebhook(request,env)) {
+          const repair=repairTelegramWebhook(env).catch(()=>{console.error('Telegram webhook repair failed; retry pending.');});
+          if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(repair);
+          else await repair;
+          return new Response("Webhook configuration pending; please retry", {status:503,headers:{'Retry-After':'1'}});
+        }
         const update = await request.json();
         if (ctx && typeof ctx.waitUntil === "function") {
           ctx.waitUntil(handleUpdate(update, env, url.origin, ctx).catch(error => console.error("Webhook processing error:", error)));
@@ -98,7 +109,7 @@ export default {
         return new Response("OK", { status: 200 });
       } catch (e) {
         console.error("Webhook error:", e);
-        return new Response("ERROR", { status: 200 });
+        return new Response("ERROR", { status: 500 });
       }
     }
 
@@ -278,24 +289,33 @@ async function telegramWebhookSecret(botToken) {
 }
 
 async function authenticateTelegramWebhook(request,env) {
-  // Local development without a bot token cannot send Telegram messages.
   if (!env.BOT_TOKEN) return true;
   const expected=env.TELEGRAM_WEBHOOK_SECRET || await telegramWebhookSecret(env.BOT_TOKEN);
-  if (request.headers.get('X-Telegram-Bot-Api-Secret-Token')===expected) return true;
-  if (env.TELEGRAM_WEBHOOK_SECRET) return false;
+  return request.headers.get('X-Telegram-Bot-Api-Secret-Token')===expected;
+}
+
+async function repairTelegramWebhook(env, recoveryUrl = null) {
+  if (!env.BOT_TOKEN) return false;
   const previous=webhookBootstrapCache.get(env.DB);
-  if (previous?.token===env.BOT_TOKEN && previous.until>Date.now()) return false;
-  webhookBootstrapCache.set(env.DB,{token:env.BOT_TOKEN,until:Date.now()+60000});
-  // Upgrade an existing webhook without changing its URL or dropping pending updates.
-  // Never process the unauthenticated update used to trigger this configuration.
-  const info=await callTg(env,'getWebhookInfo',{});
-  if (!info.ok || !info.result?.url) return false;
+  if (!recoveryUrl && previous?.token===env.BOT_TOKEN && previous.until>Date.now()) return false;
+  const reservation={token:env.BOT_TOKEN,until:Date.now()+10000};
+  webhookBootstrapCache.set(env.DB,reservation);
+  let repaired=false;
   try {
-    const saved=new URL(info.result.url), incoming=new URL(request.url);
-    if (saved.origin!==incoming.origin || saved.pathname!==incoming.pathname) return false;
-  } catch (_) {return false;}
-  await callTg(env,'setWebhook',{url:info.result.url,secret_token:expected,drop_pending_updates:false,max_connections:info.result.max_connections||40});
-  return false;
+    const expected=env.TELEGRAM_WEBHOOK_SECRET || await telegramWebhookSecret(env.BOT_TOKEN);
+    const info=await callTg(env,'getWebhookInfo',{});
+    const target=recoveryUrl || (info.ok && info.result?.url);
+    if (!target) return false;
+    // Automatic repair keeps Telegram's registered URL. Explicit recovery is pinned
+    // by /api/setup to the configured production bot origin, never a caller-supplied URL.
+    const saved=new URL(target);
+    if (saved.protocol!=='https:') return false;
+    const response=await callTg(env,'setWebhook',{url:target,secret_token:expected,drop_pending_updates:false,max_connections:info.result?.max_connections||40});
+    repaired=response.ok===true;
+    return repaired;
+  } finally {
+    reservation.until=Date.now()+(repaired?60000:3000);
+  }
 }
 
 async function callTg(env, method, payload) {

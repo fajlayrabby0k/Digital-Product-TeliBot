@@ -24,9 +24,13 @@ A unique REDEEM deposit index also prevents a second audit/credit transaction fo
 
 Production webhook requests are checked against Telegram's `X-Telegram-Bot-Api-Secret-Token` header before any update is processed. If `TELEGRAM_WEBHOOK_SECRET` is already configured, its matching Telegram webhook setting must be retained.
 
-Otherwise the bot derives a stable secret from the existing `BOT_TOKEN`. On the first missing/invalid-header request it reads `getWebhookInfo` and registers that secret using `setWebhook` only when the saved URL's origin/path matches the incoming deployment. It preserves the registered URL and pending updates. The unauthenticated triggering request is rejected; Telegram retries with the configured secret, or send `/start` again after the update. Unknown request hosts cannot redirect the webhook. A brief per-runtime throttle avoids repeatedly reconfiguring invalid requests.
+Otherwise the bot derives a stable secret from the existing `BOT_TOKEN`. A missing/mismatched header receives HTTP 503 with Retry-After rather than a permanent rejection. The existing URL is read using `getWebhookInfo` and its secret is repaired in `ctx.waitUntil`, so registration does not block the incoming delivery connection. No unauthenticated update is processed. A successful repair is throttled for a minute; failed repairs can retry after three seconds. Configured explicit secrets can also be repaired without bypassing authentication.
 
-This requires no additional secret for a normal existing Telegram deployment. If the registered webhook points to another production host/path, correct the webhook configuration rather than bypassing authentication. A local instance without `BOT_TOKEN` remains usable for development and cannot send Telegram messages.
+Automatic repair always keeps the URL returned by Telegram, including a custom domain/path/query string. It never replaces it with the incoming request URL. Pending updates are retained. Telegram's authenticated retry then processes `/start` and other updates normally.
+
+For an empty/stale registered webhook, after deploying open `https://digital-product-telibot.pages.dev/api/setup?repair_webhook=1`. It initializes the database, registers the production `/api/webhook` URL with the expected secret and returns `webhook_repaired: true` only on successful Telegram registration. The origin is pinned to this production domain; `BOT_PUBLIC_URL` can configure a different trusted production origin. Incoming request hosts cannot choose an arbitrary destination. Failed registration returns HTTP 502 with a safe message, never credentials.
+
+No new secret is required for a normal existing Telegram deployment. A local instance without `BOT_TOKEN` remains usable for development and cannot send Telegram messages. Live registration must still be checked on the production account.
 
 ## Deployment and verification
 
