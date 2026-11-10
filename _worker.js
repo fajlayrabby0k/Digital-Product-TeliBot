@@ -2552,9 +2552,11 @@ async function sendDeposit(env, chatId, editMessageId = null) {
     `Select a payment method below to get deposit instructions:`;
 
   const buttons = [
-    [{ text: "🟢 bKash", callback_data: "dep_method_bkash" }, { text: "🟠 Nagad", callback_data: "dep_method_nagad" }],
+    [{ text: "🟡 Binance Pay (Auto)", callback_data: "dep_method_binance" }],
+    [{ text: "🔵 BEP20 USDT (Auto)", callback_data: "dep_method_bep20" }],
+    [{ text: "🟢 bKash", callback_data: "dep_method_bkash" }],
+    [{ text: "🟠 Nagad", callback_data: "dep_method_nagad" }],
     [{ text: "🟣 Rocket", callback_data: "dep_method_rocket" }],
-    [{ text: "🟡 Binance Pay (Auto)", callback_data: "dep_method_binance" }, { text: "🔵 BEP20 USDT (Auto)", callback_data: "dep_method_bep20" }],
     [{ text: "🎁 Redeem Code", callback_data: "redeem_open" }],
     [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
