@@ -330,6 +330,11 @@ async function callTg(env, method, payload) {
     const data = await res.json();
     if (!data.ok) {
       console.error(`Telegram API error in ${method}:`, JSON.stringify(data));
+      const rows=payload.reply_markup?.inline_keyboard;
+      if(data.error_code===400 && /emoji|icon_custom/i.test(data.description||'') && rows?.some(row=>row.some(button=>button.icon_custom_emoji_id))){
+        const keyboard=rows.map(row=>row.map(button=>{const {icon_custom_emoji_id,...plain}=button;return plain;}));
+        return await callTg(env,method,{...payload,reply_markup:{...payload.reply_markup,inline_keyboard:keyboard}});
+      }
     }
     return data;
   } catch (e) {
@@ -673,6 +678,51 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   await processReferralCommission(env, chatId, totalUsd, prod.name);
 }
 
+const PAYMENT_ICON_METHODS = ['binance','bep20','bkash','nagad','rocket','redeem'];
+const PAYMENT_ICON_LABELS = {binance:'Binance Pay',bep20:'BEP20 USDT',bkash:'bKash',nagad:'Nagad',rocket:'Rocket',redeem:'Redeem Code'};
+
+async function loadPaymentIcons(env,methods=PAYMENT_ICON_METHODS) {
+  const keys=methods.map(method=>`payment_icon_${method}`);
+  const {results}=await env.DB.prepare(`SELECT key, value FROM settings WHERE key IN (${keys.map(()=>'?').join(',')})`).bind(...keys).all();
+  const values=new Map(results.map(row=>[row.key,row.value]));
+  const ids=new Map(methods.map(method=>[method,values.get(`payment_icon_${method}`)]));
+  return (method,label,callbackData)=>{
+    const id=ids.get(method);
+    return {text:label,callback_data:callbackData,...(typeof id==='string'&&/^\d{15,22}$/.test(id)?{icon_custom_emoji_id:id}:{})};
+  };
+}
+
+async function showPaymentIcons(env,chatId,messageId=null) {
+  const button=await loadPaymentIcons(env);
+  const keyboard=PAYMENT_ICON_METHODS.map(method=>[button(method,PAYMENT_ICON_LABELS[method],`adm_payicon_${method}`)]);
+  keyboard.push([{text:'Back to Payment Settings',callback_data:'adm_payment_settings'}]);
+  const text='<b>Payment Custom Emojis</b>\n\nChoose a method to set its Telegram Custom Emoji ID. No default emoji is added.';
+  return messageId?await editMsg(env,chatId,messageId,text,keyboard):await sendMsg(env,chatId,text,keyboard);
+}
+
+async function handlePaymentIconText(env,chatId,text,state,message) {
+  if(String(chatId)!==String(env.ADMIN_ID)||state.state!=='awaiting_payment_icon')return false;
+  const method=state.data;
+  if(!PAYMENT_ICON_METHODS.includes(method)){await clearAdminState(env,chatId);return true;}
+  const custom=message.entities?.find(entity=>entity.type==='custom_emoji');
+  const id=text.trim()==='/remove'?'':custom?.custom_emoji_id||text.trim();
+  if(id!==''&&!/^\d{15,22}$/.test(id)){
+    await sendMsg(env,chatId,'Send a Telegram custom emoji or its numeric Custom Emoji ID. Photos and ordinary emoji cannot be used here. Send /remove to clear the icon, or /cancel.');
+    return true;
+  }
+  if(id!==''){
+    const checked=await callTg(env,'getCustomEmojiStickers',{custom_emoji_ids:[id]});
+    if(!checked.ok||!Array.isArray(checked.result)||!checked.result.some(sticker=>sticker.custom_emoji_id===id)){
+      await sendMsg(env,chatId,'Telegram could not validate this Custom Emoji ID. Send the actual custom emoji or a valid ID, or use /remove.');return true;
+    }
+  }
+  await env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').bind(`payment_icon_${method}`,id).run();
+  await clearAdminState(env,chatId);
+  await sendMsg(env,chatId,id?'Custom emoji saved.':'Custom emoji removed.');
+  await showPaymentIcons(env,chatId);
+  return true;
+}
+
 function redeemAmountCents(text) {
   const value=String(text).trim().replace(/^\$/, '');
   if (!/^\d+(?:\.\d{1,2})?$/.test(value)) return null;
@@ -803,7 +853,8 @@ async function startBinanceDeposit(env, chatId, username, amount = 0, messageId 
   await clearBinanceInput(env, chatId);
   if (!Number.isFinite(amount) || amount < 0 || amount > BINANCE_DEPOSIT_MAX) {
     const text = "❌ <b>Sorry!</b>\n\nBinance Pay supports deposits up to <b>$10.00</b> only.\nFor deposits above $10.00, please use <b>USDT (BEP20)</b>.";
-    const buttons = [[{ text: "🔄 Use USDT BEP20", callback_data: `dep_setmeth_bep20_${Number.isFinite(amount) && amount > 0 ? amount.toFixed(2) : "0"}` }], [{ text: "⏪ Back", callback_data: "deposit" }]];
+    const paymentButton=await loadPaymentIcons(env,['bep20']);
+    const buttons = [[paymentButton('bep20','Use USDT BEP20',`dep_setmeth_bep20_${Number.isFinite(amount) && amount > 0 ? amount.toFixed(2) : "0"}`)], [{ text: "⏪ Back", callback_data: "deposit" }]];
     return messageId ? await editMsg(env, chatId, messageId, text, buttons) : await sendMsg(env, chatId, text, buttons);
   }
   if (amount === 0) {
@@ -1059,6 +1110,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
+        if (await handlePaymentIconText(env,chatId,text,adminState,msg)) return;
         if (await handleRedeemAdminText(env,chatId,text,adminState)) return;
         if (await handleProductIconText(env, chatId, text, adminState)) return;
         if (await handleBinanceSettingText(env, chatId, text, adminState)) return;
@@ -1389,6 +1441,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     // DIRECT PAYMENT SELECTION MENU
     // ----------------------------------------------------------------
     if (data.startsWith("direct_pay_")) {
+      const paymentButton=await loadPaymentIcons(env);
       const parts = data.replace("direct_pay_", "").split("_");
       const prodId = parts[0];
       const qty = parseInt(parts[1]) || 1;
@@ -1409,9 +1462,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         `Total Payable: <b>$${totalUsd.toFixed(2)} USD (≈ ৳${totalBdt} BDT)</b>\n\n` +
         `Choose your preferred payment method below:`,
         [
-          [{ text: "🟢 bKash", callback_data: `pay_bkash_${prod.id}_${qty}` }, { text: "🟠 Nagad", callback_data: `pay_nagad_${prod.id}_${qty}` }],
-          [{ text: "🟣 Rocket", callback_data: `pay_rocket_${prod.id}_${qty}` }],
-          [{ text: "Binance Pay (Auto Verify)", callback_data: `pay_binance_${prod.id}_${qty}` }, { text: "🔵 BEP20 USDT (Auto Verify)", callback_data: `pay_bep20_${prod.id}_${qty}` }],
+          [paymentButton("bkash","bKash",`pay_bkash_${prod.id}_${qty}`), paymentButton("nagad","Nagad",`pay_nagad_${prod.id}_${qty}`)],
+          [paymentButton("rocket","Rocket",`pay_rocket_${prod.id}_${qty}`)],
+          [paymentButton("binance","Binance Pay (Auto Verify)",`pay_binance_${prod.id}_${qty}`), paymentButton("bep20","BEP20 USDT (Auto Verify)",`pay_bep20_${prod.id}_${qty}`)],
           [{ text: `👛 Wallet Pay (Bal: $${userBal.toFixed(2)})`, callback_data: `wallet_pay_check_${prod.id}_${qty}` }],
           [{ text: "◀️ Back to Quantity", callback_data: `buynow_${prod.id}_${qty}` }]
         ]
@@ -1484,6 +1537,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const needed = isNeeded ? parseFloat(data.replace("dep_needed_", "")) || 5.00 : 0;
 
       if (isNeeded) {
+        const paymentButton=await loadPaymentIcons(env);
         // Show deposit method selection with pre-filled needed amount
         const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
         const bdtNeeded = Math.round(needed * rate);
@@ -1492,9 +1546,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
           `• Required Amount: <b>$${needed.toFixed(2)} USD (≈ ৳${bdtNeeded} BDT)</b>\n\n` +
           `Select your payment method below to get deposit instructions:`,
           [
-            [{ text: "🟢 bKash", callback_data: `dep_setmeth_bkash_${needed.toFixed(2)}` }, { text: "🟠 Nagad", callback_data: `dep_setmeth_nagad_${needed.toFixed(2)}` }],
-            [{ text: "🟣 Rocket", callback_data: `dep_setmeth_rocket_${needed.toFixed(2)}` }],
-            [{ text: "Binance Pay (Auto)", callback_data: `dep_setmeth_binance_${needed.toFixed(2)}` }, { text: "🔵 BEP20 USDT (Auto)", callback_data: `dep_setmeth_bep20_${needed.toFixed(2)}` }],
+            [paymentButton("bkash","bKash",`dep_setmeth_bkash_${needed.toFixed(2)}`), paymentButton("nagad","Nagad",`dep_setmeth_nagad_${needed.toFixed(2)}`)],
+            [paymentButton("rocket","Rocket",`dep_setmeth_rocket_${needed.toFixed(2)}`)],
+            [paymentButton("binance","Binance Pay (Auto)",`dep_setmeth_binance_${needed.toFixed(2)}`), paymentButton("bep20","BEP20 USDT (Auto)",`dep_setmeth_bep20_${needed.toFixed(2)}`)],
             [{ text: "◀️ Cancel", callback_data: "home" }]
           ]
         );
@@ -1520,6 +1574,19 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (data === "admin_panel") {
       if (String(chatId) === String(env.ADMIN_ID)) { await clearAdminState(env, chatId); await sendAdminDashboard(env, chatId, messageId); }
       return;
+    }
+
+    if(data==='adm_payment_icons'){
+      if(String(chatId)!==String(env.ADMIN_ID))return;
+      await clearAdminState(env,chatId);
+      await showPaymentIcons(env,chatId,messageId);return;
+    }
+    if(data.startsWith('adm_payicon_')){
+      if(String(chatId)!==String(env.ADMIN_ID))return;
+      const method=data.slice('adm_payicon_'.length);
+      if(!PAYMENT_ICON_METHODS.includes(method))return;
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_payment_icon', ?)").bind(chatId,method).run();
+      await editMsg(env,chatId,messageId,`<b>${PAYMENT_ICON_LABELS[method]} Custom Emoji</b>\n\nSend a Telegram custom emoji or its numeric Custom Emoji ID.\nSend /remove to remove it.`,[[{text:'Cancel',callback_data:'adm_payment_icons'}]]);return;
     }
 
     const maintenanceAction=data.match(/^adm_maintenance_(on|off)$/);
@@ -1878,6 +1945,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         [{ text: "✏️ Change bKash", callback_data: "adm_set_bkash" }, { text: "✏️ Change Nagad", callback_data: "adm_set_nagad" }],
         [{ text: "✏️ Change Rocket", callback_data: "adm_set_rocket" }, { text: "✏️ Change Binance Pay ID", callback_data: "adm_set_binance" }],
         [{ text: `🤖 Binance Auto-Verify: ${binanceAuto ? "ON" : "OFF"}`, callback_data: "adm_toggle_binance_auto" }],
+        [{ text: "Payment Custom Emojis", callback_data: "adm_payment_icons" }],
         [{ text: "✏️ Change BEP20 Address", callback_data: "adm_set_bep20" }],
         [{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]
       ]);
@@ -2541,9 +2609,13 @@ async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId
 }
 
 async function sendDeposit(env, chatId, editMessageId = null) {
-  const user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
+  const [paymentButton,user,rawRate]=await Promise.all([
+    loadPaymentIcons(env),
+    env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first(),
+    getSetting(env,"usd_to_bdt_rate","125")
+  ]);
   const usdBal = user ? (user.balance_usd || 0).toFixed(2) : "0.00";
-  const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
+  const rate = parseFloat(rawRate);
   const bdtBal = user ? Math.round((user.balance_usd || 0) * rate) : 0;
 
   const text = `💳 <b>Deposit Funds to Wallet</b>\n\n` +
@@ -2552,12 +2624,12 @@ async function sendDeposit(env, chatId, editMessageId = null) {
     `Select a payment method below to get deposit instructions:`;
 
   const buttons = [
-    [{ text: "Binance Pay (Auto)", callback_data: "dep_method_binance" }],
-    [{ text: "🔵 BEP20 USDT (Auto)", callback_data: "dep_method_bep20" }],
-    [{ text: "🟢 bKash", callback_data: "dep_method_bkash" }],
-    [{ text: "🟠 Nagad", callback_data: "dep_method_nagad" }],
-    [{ text: "🟣 Rocket", callback_data: "dep_method_rocket" }],
-    [{ text: "🎁 Redeem Code", callback_data: "redeem_open" }],
+    [paymentButton("binance","Binance Pay (Auto)","dep_method_binance")],
+    [paymentButton("bep20","BEP20 USDT (Auto)","dep_method_bep20")],
+    [paymentButton("bkash","bKash","dep_method_bkash")],
+    [paymentButton("nagad","Nagad","dep_method_nagad")],
+    [paymentButton("rocket","Rocket","dep_method_rocket")],
+    [paymentButton("redeem","Redeem Code","redeem_open")],
     [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, text, buttons);

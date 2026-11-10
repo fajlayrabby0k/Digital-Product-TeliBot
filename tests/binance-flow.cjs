@@ -9,7 +9,7 @@ const DB={prepare(sql){let args=[];const statement={bind(...a){args=a;return sta
  if(sql.includes('FROM products'))return {id:7,name:'Local Product',price_usd:5,is_external:0};
  if(sql.includes('FROM deposits'))return deposits.get(Number(args[0]))??null;
  return null;
-},async run(){
+},async all(){return {results:[]};},async run(){
  if(sql.startsWith('INSERT OR REPLACE INTO user_states')) state={state:sql.includes('awaiting_binance_amount')?'awaiting_binance_amount':'awaiting_binance_receipt',data:args[1]??'{}'};
  if(sql.startsWith('DELETE FROM user_states')){
   if(!sql.includes('AND data = ?')||state?.data===args[1]) state=null;
