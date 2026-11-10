@@ -1411,7 +1411,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         [
           [{ text: "🟢 bKash", callback_data: `pay_bkash_${prod.id}_${qty}` }, { text: "🟠 Nagad", callback_data: `pay_nagad_${prod.id}_${qty}` }],
           [{ text: "🟣 Rocket", callback_data: `pay_rocket_${prod.id}_${qty}` }],
-          [{ text: "🟡 Binance Pay (Auto Verify)", callback_data: `pay_binance_${prod.id}_${qty}` }, { text: "🔵 BEP20 USDT (Auto Verify)", callback_data: `pay_bep20_${prod.id}_${qty}` }],
+          [{ text: "Binance Pay (Auto Verify)", callback_data: `pay_binance_${prod.id}_${qty}` }, { text: "🔵 BEP20 USDT (Auto Verify)", callback_data: `pay_bep20_${prod.id}_${qty}` }],
           [{ text: `👛 Wallet Pay (Bal: $${userBal.toFixed(2)})`, callback_data: `wallet_pay_check_${prod.id}_${qty}` }],
           [{ text: "◀️ Back to Quantity", callback_data: `buynow_${prod.id}_${qty}` }]
         ]
@@ -1494,7 +1494,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
           [
             [{ text: "🟢 bKash", callback_data: `dep_setmeth_bkash_${needed.toFixed(2)}` }, { text: "🟠 Nagad", callback_data: `dep_setmeth_nagad_${needed.toFixed(2)}` }],
             [{ text: "🟣 Rocket", callback_data: `dep_setmeth_rocket_${needed.toFixed(2)}` }],
-            [{ text: "🟡 Binance Pay (Auto)", callback_data: `dep_setmeth_binance_${needed.toFixed(2)}` }, { text: "🔵 BEP20 USDT (Auto)", callback_data: `dep_setmeth_bep20_${needed.toFixed(2)}` }],
+            [{ text: "Binance Pay (Auto)", callback_data: `dep_setmeth_binance_${needed.toFixed(2)}` }, { text: "🔵 BEP20 USDT (Auto)", callback_data: `dep_setmeth_bep20_${needed.toFixed(2)}` }],
             [{ text: "◀️ Cancel", callback_data: "home" }]
           ]
         );
@@ -2552,7 +2552,7 @@ async function sendDeposit(env, chatId, editMessageId = null) {
     `Select a payment method below to get deposit instructions:`;
 
   const buttons = [
-    [{ text: "🟡 Binance Pay (Auto)", callback_data: "dep_method_binance" }],
+    [{ text: "Binance Pay (Auto)", callback_data: "dep_method_binance" }],
     [{ text: "🔵 BEP20 USDT (Auto)", callback_data: "dep_method_bep20" }],
     [{ text: "🟢 bKash", callback_data: "dep_method_bkash" }],
     [{ text: "🟠 Nagad", callback_data: "dep_method_nagad" }],
