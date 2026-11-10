@@ -126,7 +126,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-speed-3-maintenance";
+const DB_SCHEMA_VERSION = "2026-11-speed-4-shop";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -201,6 +201,7 @@ async function initializeDatabase(db, force) {
       "CREATE INDEX IF NOT EXISTS inventory_order ON inventory(order_id, is_sold)",
       "CREATE INDEX IF NOT EXISTS orders_user_history ON orders(user_id, id DESC)",
       "CREATE INDEX IF NOT EXISTS orders_status ON orders(status)",
+      "CREATE INDEX IF NOT EXISTS products_shop_active ON products(is_active, id)",
       "CREATE INDEX IF NOT EXISTS products_external ON products(external_id, is_external)",
       "CREATE INDEX IF NOT EXISTS preorders_product_status ON preorders(product_id, status)",
       "CREATE INDEX IF NOT EXISTS preorders_user_history ON preorders(user_id, id DESC)",
@@ -1292,7 +1293,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     const firstName = cb.from.first_name || "Customer";
     const username = cb.from.username ? `@${cb.from.username}` : firstName;
 
-    if (["home", "deposit", "shop", "shop_refresh"].includes(data) || /^(?:prod_|dep_|pay_|direct_pay_|custom_qty_|buynow_)/.test(data)) await clearBinanceInput(env, chatId);
+    if (["home", "deposit", "shop", "shop_refresh"].includes(data) || /^(?:shop_|prod_|dep_|pay_|direct_pay_|custom_qty_|buynow_)/.test(data)) await clearBinanceInput(env, chatId);
     if (data === "binance_cancel") {
       await clearBinanceInput(env, chatId);
       await sendDeposit(env, chatId, messageId);
@@ -1365,13 +1366,23 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Navigation Callbacks
     if (data === "home") { await clearAdminState(env, chatId); await sendHomeDashboard(env, chatId, user, firstName, messageId); return; }
-    if (data === "shop" || data === "shop_refresh") {
+    const shopPage=data.match(/^shop_(page|refresh)_(\d+)$/);
+    if (data === "shop" || data === "shop_refresh" || shopPage) {
       try {
-        await sendProductsDirectly(env, chatId, messageId, data === "shop_refresh");
+        const page=shopPage?Number(shopPage[2]):0;
+        const refresh=data==='shop_refresh'||shopPage?.[1]==='refresh';
+        // Opening Shop sends a new message; page navigation edits that catalog message.
+        await sendProductsDirectly(env,chatId,data==='shop'?null:messageId,refresh,page);
       } catch (e) {
         console.error("Error in shop callback:", e);
         await sendMsg(env, chatId, `⚠️ <b>Error opening shop:</b> <code>${escapeHtml(e.message)}</code>`);
       }
+      return;
+    }
+    const shopReturn=data.match(/^shop_return_(\d+)$/);
+    if(shopReturn){
+      const rank=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active = 1 AND id < ?').bind(shopReturn[1]).first();
+      await sendProductsDirectly(env,chatId,messageId,false,Math.floor(Number(rank?.count||0)/SHOP_PAGE_SIZE));
       return;
     }
     if (data === "profile") { await sendProfile(env, chatId, user, messageId); return; }
@@ -2476,23 +2487,29 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
   return await sendMsg(env, chatId, welcome, keyboard);
 }
 
-async function sendProductsDirectly(env, chatId, editMessageId = null, forceFresh = false) {
+const SHOP_PAGE_SIZE = 10;
+async function sendProductsDirectly(env, chatId, editMessageId = null, forceFresh = false, requestedPage = 0) {
   try {
     await ensureDbReady(env.DB);
 
     // Reuse a recent browsing result; explicit Refresh still fetches the provider.
     const stockSync = await syncExternalProducts(env, null, null, false, null, forceFresh);
 
-    // Defensively query products
+    const counted=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active = 1').first();
+    const total=Number(counted?.count||0);
+    const pages=Math.max(1,Math.ceil(total/SHOP_PAGE_SIZE));
+    const page=Math.min(pages-1,Math.max(0,Number.isSafeInteger(requestedPage)?requestedPage:0));
+    const offset=page*SHOP_PAGE_SIZE;
+    // Fetch this page only; inventory counts use the existing covering index.
     let prods = [];
     try {
       const q = await env.DB.prepare(
-        `SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1 ORDER BY p.id ASC`
-      ).all();
+        `SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1 ORDER BY p.id ASC LIMIT ? OFFSET ?`
+      ).bind(SHOP_PAGE_SIZE,offset).all();
       prods = q && q.results ? q.results : [];
     } catch (dbErr) {
       console.error("Products query error, falling back:", dbErr);
-      const q = await env.DB.prepare("SELECT * FROM products WHERE is_active = 1 ORDER BY id ASC").all();
+      const q = await env.DB.prepare("SELECT *, api_stock AS stock_qty FROM products WHERE is_active = 1 ORDER BY id ASC LIMIT ? OFFSET ?").bind(SHOP_PAGE_SIZE,offset).all();
       prods = q && q.results ? q.results : [];
     }
 
@@ -2504,8 +2521,15 @@ async function sendProductsDirectly(env, chatId, editMessageId = null, forceFres
       });
     }
 
+    if(pages>1){
+      const navigation=[];
+      if(page>0)navigation.push({text:'◀️ Previous',callback_data:`shop_page_${page-1}`});
+      navigation.push({text:`${page+1}/${pages}`,callback_data:`shop_page_${page}`});
+      if(page<pages-1)navigation.push({text:'Next ▶️',callback_data:`shop_page_${page+1}`});
+      keyboard.push(navigation);
+    }
     keyboard.push([
-      { text: "🔄 Refresh Stock", callback_data: "shop_refresh" },
+      { text: "🔄 Refresh Stock", callback_data: `shop_refresh_${page}` },
       { text: "🏠 Main Menu", callback_data: "home" }
     ]);
 
@@ -2513,7 +2537,7 @@ async function sendProductsDirectly(env, chatId, editMessageId = null, forceFres
     if (!prods || prods.length === 0) {
       text = `🛍️ <b>Store Products</b>\n\n⚠️ Currently no products are available in the store.\n\nPlease check back later or contact admin @fojlaybd.`;
     } else {
-      text = `🛍️ <b>Available Products</b>\n\n<i>Click any product below to view details and order:</i>`;
+      text = `🛍️ <b>Available Products</b>\n<b>Page ${page+1}/${pages}</b> · ${total} products\n\n<i>Click any product below to view details and order:</i>`;
     }
 
     if (editMessageId) {
@@ -2559,7 +2583,7 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null, 
     }
     buttons.push([
       { text: "🔄 Refresh Stock", callback_data: `prod_refresh_${prod.id}` },
-      { text: "◀️ Back to Shop", callback_data: "shop" }
+      { text: "◀️ Back to Shop", callback_data: `shop_return_${prod.id}` }
     ]);
 
     if (editMessageId) {
