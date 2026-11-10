@@ -835,7 +835,37 @@ async function handleRedeemInput(env,chatId,text,state) {
 const BINANCE_DEPOSIT_MAX = 10;
 
 async function clearBinanceInput(env, chatId) {
-  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state IN ('awaiting_binance_amount', 'awaiting_binance_receipt', 'awaiting_bep20_amount', 'awaiting_bep20_hash', 'awaiting_redeem_code')").bind(chatId).run();
+  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state IN ('awaiting_binance_amount', 'awaiting_binance_receipt', 'awaiting_bep20_amount', 'awaiting_bep20_hash', 'awaiting_redeem_code', 'awaiting_manual_deposit_amount')").bind(chatId).run();
+}
+
+const DEPOSIT_PRESETS = [5,10,15,20,30,50];
+const DEPOSIT_AMOUNT_METHODS = ['binance','bep20','bkash','nagad','rocket'];
+
+async function showDepositAmounts(env,chatId,method,messageId=null,custom=false) {
+  if(!DEPOSIT_AMOUNT_METHODS.includes(method))return;
+  const state=method==='binance'?'awaiting_binance_amount':method==='bep20'?'awaiting_bep20_amount':'awaiting_manual_deposit_amount';
+  await env.DB.prepare('INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, ?, ?)').bind(chatId,state,JSON.stringify({method})).run();
+  const currency=['binance','bep20'].includes(method)?'USDT':'USD';
+  const text=`<b>${PAYMENT_ICON_LABELS[method]} Deposit</b>\n\nHow much ${currency} would you like to deposit?\n\n${custom?'Type your custom amount in chat (e.g. 12.50).':'Choose an amount below, or select Custom Amount.'}${method==='binance'?'\n\n<i>Binance Pay supports deposits up to $10. Use BEP20 for larger amounts.</i>':''}`;
+  const buttons=custom?[]:[
+    DEPOSIT_PRESETS.slice(0,3).map(amount=>({text:`$${amount}`,callback_data:`dep_amount_${method}_${amount}`})),
+    DEPOSIT_PRESETS.slice(3).map(amount=>({text:`$${amount}`,callback_data:`dep_amount_${method}_${amount}`})),
+    [{text:'Custom Amount',callback_data:`dep_custom_${method}`}]
+  ];
+  buttons.push([{text:'Back',callback_data:custom?`dep_method_${method}`:'deposit'}]);
+  return messageId?await editMsg(env,chatId,messageId,text,buttons):await sendMsg(env,chatId,text,buttons);
+}
+
+async function handleManualDepositAmount(env,chatId,username,text,state) {
+  if(state?.state!=='awaiting_manual_deposit_amount')return false;
+  if(text.startsWith('/')){await clearBinanceInput(env,chatId);return false;}
+  let method;try{method=JSON.parse(state.data).method;}catch(_){await clearBinanceInput(env,chatId);return true;}
+  if(!['bkash','nagad','rocket'].includes(method)){await clearBinanceInput(env,chatId);return true;}
+  const amount=Number(text);
+  if(!/^\d+(?:\.\d{1,2})?$/.test(text)||!Number.isFinite(amount)||amount<=0){await sendMsg(env,chatId,'Enter a positive USD amount with up to two decimal places, e.g. 5 or 12.50.');return true;}
+  await clearBinanceInput(env,chatId);
+  await renderDepositInstructions(env,chatId,username,method,amount);
+  return true;
 }
 
 async function showBinanceInstructions(env, chatId, type, invoice, messageId = null) {
@@ -857,12 +887,7 @@ async function startBinanceDeposit(env, chatId, username, amount = 0, messageId 
     const buttons = [[paymentButton('bep20','Use USDT BEP20',`dep_setmeth_bep20_${Number.isFinite(amount) && amount > 0 ? amount.toFixed(2) : "0"}`)], [{ text: "⏪ Back", callback_data: "deposit" }]];
     return messageId ? await editMsg(env, chatId, messageId, text, buttons) : await sendMsg(env, chatId, text, buttons);
   }
-  if (amount === 0) {
-    await env.DB.prepare("INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, 'awaiting_binance_amount', '{}')").bind(chatId).run();
-    const text = "💳 <b>Binance Pay</b>\n\nHow much USDT would you like to deposit?\n\n<i>Type the amount in the chat (e.g. 5).</i>";
-    const buttons = [[{ text: "⏪ Back", callback_data: "deposit" }]];
-    return messageId ? await editMsg(env, chatId, messageId, text, buttons) : await sendMsg(env, chatId, text, buttons);
-  }
+  if (amount === 0) return await showDepositAmounts(env,chatId,'binance',messageId);
   const result = await env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, status) VALUES (?, ?, 'BINANCE', ?, 'pending')").bind(chatId, username, amount).run();
   if (!result.meta?.last_row_id) throw new Error("Could not create Binance deposit invoice.");
   return await showBinanceInstructions(env, chatId, "deposit", { id: result.meta.last_row_id, amount_usd: amount }, messageId);
@@ -936,12 +961,7 @@ async function showBep20Instructions(env, chatId, type, invoice, messageId = nul
 async function startBep20Deposit(env, chatId, username, amount = 0, messageId = null) {
   await clearBinanceInput(env,chatId);
   if (!Number.isFinite(amount) || amount<0) {await sendMsg(env,chatId,'Enter a positive USDT amount.');return;}
-  if (amount===0) {
-    await env.DB.prepare("INSERT OR REPLACE INTO user_states (user_id, state, data) VALUES (?, 'awaiting_bep20_amount', '{}')").bind(chatId).run();
-    const text='💵 <b>USDT BEP20 Deposit</b>\n\nHow much USDT would you like to deposit?\n\n<i>Type the amount in chat (e.g. 50).</i>';
-    const buttons=[[{text:'⏪ Back',callback_data:'deposit'}]];
-    return messageId ? await editMsg(env,chatId,messageId,text,buttons) : await sendMsg(env,chatId,text,buttons);
-  }
+  if (amount===0) return await showDepositAmounts(env,chatId,'bep20',messageId);
   const address=String(await getSetting(env,'bep20_addr','')).trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(address) || /^0x0{40}$/.test(address)) {await sendMsg(env,chatId,'Admin must configure the BEP20 receive address before you deposit.');return;}
   const result=await env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, bep20_wallet, status) VALUES (?, ?, 'BEP20', ?, ?, 'pending')").bind(chatId,username,amount,address).run();
@@ -996,6 +1016,8 @@ async function handleBep20Input(env,chatId,username,text,state) {
 }
 
 async function renderDepositInstructions(env, chatId, username, method, neededAmount, messageId) {
+  if(!DEPOSIT_AMOUNT_METHODS.includes(method)||!Number.isFinite(neededAmount)||neededAmount<0||!/^\d+(?:\.\d{1,2})?$/.test(String(neededAmount))){await sendMsg(env,chatId,'Invalid deposit method or amount. Please select a payment method again.');return;}
+  if(neededAmount===0 && DEPOSIT_AMOUNT_METHODS.includes(method))return await showDepositAmounts(env,chatId,method,messageId);
   if (method === "bep20") return await startBep20Deposit(env, chatId, username, neededAmount, messageId);
   if (method === "binance") return await startBinanceDeposit(env, chatId, username, neededAmount, messageId);
   let mTitle = "bKash Personal";
@@ -1021,7 +1043,9 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
     `Exchange Rate: <b>1 USD = ${rate} BDT</b>\n\n` +
     `${promptDetails}`;
 
-  await editMsg(env, chatId, messageId, depPrompt, [[{ text: "◀️ Back to Deposit", callback_data: "deposit" }]]);
+  const buttons=[[{ text: "◀️ Back to Deposit", callback_data: "deposit" }]];
+  if(messageId)await editMsg(env,chatId,messageId,depPrompt,buttons);
+  else await sendMsg(env,chatId,depPrompt,buttons);
 }
 
 // ====================================================================
@@ -1148,6 +1172,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     const redeemStart=text.match(/^\/start(?:@\w+)?\s+redeem_(RDM-[A-Fa-f0-9]{32})$/i);
     if (redeemStart) {await clearBinanceInput(env,chatId);await submitRedeemCode(env,chatId,redeemStart[1]);return;}
     if (await handleRedeemInput(env,chatId,text,userState)) return;
+    if (await handleManualDepositAmount(env,chatId,username,text,userState))return;
     if (await handleBep20Input(env, chatId, username, text, userState)) return;
     if (await handleBinanceInput(env, chatId, username, text, userState)) return;
 
@@ -1531,6 +1556,15 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // ----------------------------------------------------------------
     // DEPOSIT SELECTION & INSTRUCTIONS
+    const depositPreset=data.match(/^dep_amount_(binance|bep20|bkash|nagad|rocket)_(\d+)$/);
+    if(depositPreset){
+      const [,method,rawAmount]=depositPreset;
+      const amount=Number(rawAmount);
+      if(DEPOSIT_PRESETS.includes(amount))await renderDepositInstructions(env,chatId,username,method,amount,messageId);
+      return;
+    }
+    const depositCustom=data.match(/^dep_custom_(binance|bep20|bkash|nagad|rocket)$/);
+    if(depositCustom){await showDepositAmounts(env,chatId,depositCustom[1],messageId,true);return;}
     // ----------------------------------------------------------------
     if (data.startsWith("dep_method_") || data.startsWith("dep_needed_")) {
       const isNeeded = data.startsWith("dep_needed_");

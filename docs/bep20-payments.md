@@ -4,7 +4,7 @@
 
 Deploy the Pages bot with its existing D1 `DB` binding. The schema initializer adds `bep20_payment_claims`. In `/admin` → Payment Settings → Change BEP20 Address, enter the public receive address for **USDT on BNB Smart Chain (chain ID 56)**. Never enter a private key or seed phrase. Binance Pay API credentials are not used for blockchain payments.
 
-The deposit flow is: select BEP20, type an amount, copy the receive address, pay, tap **Enter TxHash**, and send the hash as the next chat message. Direct checkout uses the same Copy Wallet Address and Enter TxHash buttons. Reply submissions from older instructions also use the same verification path. Cancel/Back clears entry state without deleting payment records.
+The deposit flow is: select BEP20, choose a preset ($5, $10, $15, $20, $30, $50) or Custom Amount, copy the receive address, pay, tap **Enter TxHash**, and send the hash as the next chat message. Direct checkout uses the same Copy Wallet Address and Enter TxHash buttons. Reply submissions from older instructions also use the same verification path. Cancel/Back clears entry state without deleting payment records.
 
 The receive address is saved on each invoice. Changing the admin address later does not change already displayed invoices. The initializer adds nullable `bep20_wallet` fields to orders/deposits for this snapshot.
 

@@ -12,7 +12,7 @@ The Worker uses the account-signed `GET https://api.binance.com/sapi/v1/pay/tran
 
 ## Deposit screens
 
-Select Binance Pay and type a positive amount with at most two decimal places. Binance wallet deposits are capped at **10 USDT**. Larger deposits show a BEP20 alternative without creating a Binance invoice. The instructions include **Copy Pay ID**, **Enter Order ID**, and **Back** buttons. Cancel or navigate away to stop receipt entry. This deposit cap does not limit direct product order totals.
+Select Binance Pay, choose a $5/$10/$15/$20/$30/$50 preset, or use Custom Amount to type a positive amount with at most two decimal places. Binance wallet deposits are capped at **10 USDT**. Larger deposits show a BEP20 alternative without creating a Binance invoice. The instructions include **Copy Pay ID**, **Enter Order ID**, and **Back** buttons. Cancel or navigate away to stop receipt entry. This deposit cap does not limit direct product order totals.
 
 Submit the receipt ID within **ten minutes of the payment timestamp**. Older payments require admin reconciliation; do not send money again. This limit is checked by the verifier, including legacy Reply submissions.
 
