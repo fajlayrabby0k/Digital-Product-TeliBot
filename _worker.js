@@ -984,16 +984,20 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
   if (update.message) {
     const msg = update.message;
     const chatId = msg.chat.id;
-    const text = (msg.text || "").trim();
+    let text = (msg.text || "").trim();
+    const navigationCommand = text.match(/^\/(start|home|admin|shop|deposit|profile|orders|preorder|refer|support|cancel)(?:@\w+)?(?=\s|$)/i);
+    if (navigationCommand) text = text.replace(navigationCommand[0], `/${navigationCommand[1].toLowerCase()}`);
     const from = msg.from;
     const username = from.username ? `@${from.username}` : (from.first_name || "Customer");
     const firstName = from.first_name || "Customer";
 
     // User Registration / Loading & Referral Tracking
-    const [storedUser, userState] = await Promise.all([
+    const [storedUser, storedState] = await Promise.all([
       env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first(),
       env.DB.prepare("SELECT * FROM user_states WHERE user_id = ?").bind(chatId).first()
     ]);
+    const userState = navigationCommand ? null : storedState;
+    if (navigationCommand && storedState) await env.DB.prepare("DELETE FROM user_states WHERE user_id = ?").bind(chatId).run();
     let user = storedUser;
     if (!user) {
       let refId = 0;
@@ -1025,7 +1029,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     // Admin Text States
     if (String(chatId) === String(env.ADMIN_ID)) {
       let adminState = await env.DB.prepare("SELECT * FROM admin_states WHERE user_id = ?").bind(chatId).first();
-      if (adminState?.state === 'awaiting_redeem_amount' && text.startsWith('/')) {
+      if (adminState && navigationCommand) {
         await clearAdminState(env,chatId);adminState=null;
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
@@ -1034,9 +1038,19 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (await handleProductIconText(env, chatId, text, adminState)) return;
         if (await handleBinanceSettingText(env, chatId, text, adminState)) return;
         if (await handleBep20SettingText(env, chatId, text, adminState)) return;
-        const handled = await handleAdminTextState(env, chatId, text, adminState);
-        if (handled) return;
+        // Older code created states with no text handler. Reset safely instead of
+        // throwing ReferenceError and blocking every subsequent admin message.
+        await clearAdminState(env,chatId);
+        await sendMsg(env,chatId,'The previous admin action was reset. Please choose an option from the panel.');
+        await sendAdminDashboard(env,chatId);
+        return;
       }
+    }
+
+    if (text === '/cancel') {
+      if (String(chatId) === String(env.ADMIN_ID)) await sendAdminDashboard(env,chatId);
+      else await sendHomeDashboard(env,chatId,user,firstName);
+      return;
     }
 
     // Customer Custom Quantity State
@@ -1061,7 +1075,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (await handleBinanceInput(env, chatId, username, text, userState)) return;
 
     // Automatic Payment Verification upon Reply with TxID / Order ID
-    if (msg.reply_to_message && msg.reply_to_message.text) {
+    if (!navigationCommand && msg.reply_to_message && msg.reply_to_message.text) {
       const rText = msg.reply_to_message.text;
 
       // 1. ORDER PAYMENT SUBMISSION
