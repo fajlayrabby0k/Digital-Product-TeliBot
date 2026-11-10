@@ -126,7 +126,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-speed-2-redeem";
+const DB_SCHEMA_VERSION = "2026-11-speed-3-maintenance";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -211,6 +211,7 @@ async function initializeDatabase(db, force) {
     else for (const sql of indexes) await db.prepare(sql).run();
 
     const defaults = [
+      ['maintenance_mode', '0'],
       ['usd_to_bdt_rate', '125'],
       ['referral_commission_percent', '5'],
       ['support_admin', '@fojlaybd'],
@@ -975,10 +976,34 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
 // ====================================================================
 // Telegram Update Processor
 // ====================================================================
+const MAINTENANCE_MESSAGE = `🔧 Bot Under Maintenance
+┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅┅
+
+⚙️ We are currently performing scheduled maintenance to improve your experience.
+
+🕐 The bot will be back online shortly. Thank you for your patience!`;
+
+async function showMaintenance(env,update,ctx) {
+  const callback=update.callback_query;
+  const chatId=update.message?.chat?.id ?? callback?.message?.chat?.id;
+  if(callback?.id){
+    const acknowledgement=ansCb(env,callback.id).catch(()=>{});
+    if(ctx&&typeof ctx.waitUntil==='function')ctx.waitUntil(acknowledgement);
+    else await acknowledgement;
+  }
+  if(callback?.message?.message_id) return await editMsg(env,chatId,callback.message.message_id,MAINTENANCE_MESSAGE,[]);
+  return await sendMsg(env,chatId,MAINTENANCE_MESSAGE);
+}
+
 async function handleUpdate(update, env, originUrl = "", ctx = null) {
   const actor = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
   if (String(actor) !== String(env.ADMIN_ID)) env = { ...env, __requestSettings: new Map() };
   await ensureDbReady(env.DB);
+  if (actor !== undefined && actor !== null && String(actor) !== String(env.ADMIN_ID)) {
+    // Read on every update so admin changes take effect across Pages instances immediately.
+    const mode=await env.DB.prepare("SELECT value FROM settings WHERE key = 'maintenance_mode'").first();
+    if(mode?.value==='1'){await showMaintenance(env,update,ctx);return;}
+  }
 
   // 1. Text Messages Handler
   if (update.message) {
@@ -1494,6 +1519,16 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     // ----------------------------------------------------------------
     if (data === "admin_panel") {
       if (String(chatId) === String(env.ADMIN_ID)) { await clearAdminState(env, chatId); await sendAdminDashboard(env, chatId, messageId); }
+      return;
+    }
+
+    const maintenanceAction=data.match(/^adm_maintenance_(on|off)$/);
+    if(maintenanceAction){
+      if(String(chatId)!==String(env.ADMIN_ID))return;
+      const enabled=maintenanceAction[1]==='on';
+      await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintenance_mode', ?)").bind(enabled?'1':'0').run();
+      await clearAdminState(env,chatId);
+      await sendAdminDashboard(env,chatId,messageId);
       return;
     }
 
@@ -2528,7 +2563,7 @@ async function sendDeposit(env, chatId, editMessageId = null) {
 }
 
 async function sendAdminDashboard(env, chatId, editMessageId = null) {
-  const [totalUsers, totalOrders, completed, stock, pendingPo, apiProds, rate, commPct, forceChan, forceGrp] = await Promise.all([
+  const [totalUsers, totalOrders, completed, stock, pendingPo, apiProds, rate, commPct, forceChan, forceGrp, maintenanceMode] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) as count FROM users").first(),
     env.DB.prepare("SELECT COUNT(*) as count FROM orders").first(),
     env.DB.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'completed'").first(),
@@ -2538,10 +2573,12 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     getSetting(env, "usd_to_bdt_rate", "125"),
     getSetting(env, "referral_commission_percent", "5"),
     getSetting(env, "force_channel_username", ""),
-    getSetting(env, "force_group_username", "")
+    getSetting(env, "force_group_username", ""),
+    getSetting(env, "maintenance_mode", "0")
   ]);
   const forceStatus = (forceChan || forceGrp) ? "Active ✅" : "Off ❌";
 
+  const maintenanceOn=maintenanceMode==='1';
   const report = `👑 <b>Store Administration Control Center</b>\n\n` +
     `📊 <b>Store Analytics:</b>\n` +
     `• Registered Users: <b>${totalUsers ? totalUsers.count : 0} members</b>\n` +
@@ -2549,9 +2586,11 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     `• In-Stock Items: <b>${stock ? stock.count : 0}</b> | Live Synced Products: <b>${apiProds ? apiProds.count : 0} active</b>\n` +
     `• Pending Pre-Orders: <b>${pendingPo ? pendingPo.count : 0}</b>\n\n` +
     `⚙️ <b>Rates:</b> 1 USD = ${rate} BDT | Referral: ${commPct}% | Force Join: <b>${forceStatus}</b>\n\n` +
+    `🔧 <b>Maintenance: ${maintenanceOn?'ON — users paused':'OFF — bot online'}</b>\n\n` +
     `Select any button below to manage your store:`;
 
   const buttons = [
+    [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
     [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
     [{ text: "💰 Custom Prices", callback_data: "adm_price_menu" }, { text: "📋 Manage Products", callback_data: "adm_manage_products" }],
     [{ text: `🔌 Live API Center (${apiProds ? apiProds.count : 0})`, callback_data: "adm_api_menu" }, { text: `⏳ Pre-Orders (${pendingPo ? pendingPo.count : 0})`, callback_data: "adm_view_preorders" }],
