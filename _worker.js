@@ -465,6 +465,27 @@ async function verifyBscUsdtTx(env, txHash, expectedUsd, invoice = null) {
 // ====================================================================
 // Binance Pay Auto-Verification Engine
 // ====================================================================
+function normalizeMobileWalletNumber(method,text) {
+  const raw=String(text).replace(/[০-৯]/g,digit=>String(digit.charCodeAt(0)-'০'.charCodeAt(0))).replace(/[\s()-]/g,'');
+  const match=raw.match(/^(?:\+?88)?(01[3-9]\d{8,9})$/);
+  if(!match)return null;
+  const number=match[1];
+  return method==='rocket'?(number.length===11||number.length===12?number:null):number.length===11?number:null;
+}
+
+async function handleMobileWalletSettingText(env,chatId,text,state) {
+  if(String(chatId)!==String(env.ADMIN_ID))return false;
+  const match=state.state.match(/^awaiting_setting_(bkash|nagad|rocket)$/);
+  if(!match)return false;
+  const method=match[1];
+  const number=normalizeMobileWalletNumber(method,text);
+  if(!number){await sendMsg(env,chatId,method==='rocket'?'Enter the receiving Rocket account number (11 or 12 digits), or /cancel.':'Enter the receiving mobile wallet number (11 digits), or /cancel.');return true;}
+  await env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').bind(`${method}_num`,number).run();
+  await clearAdminState(env,chatId);
+  await sendMsg(env,chatId,`${PAYMENT_ICON_LABELS[method]} receive number updated: <code>${number}</code>`,[[{text:'Payment Settings',callback_data:'adm_payment_settings'}]]);
+  return true;
+}
+
 async function handleBep20SettingText(env, chatId, text, state) {
   if (String(chatId) !== String(env.ADMIN_ID) || state.state !== "awaiting_setting_bep20") return false;
   if (text === "/cancel") { await clearAdminState(env, chatId); await sendMsg(env, chatId, "BEP20 address change cancelled."); return true; }
@@ -1140,6 +1161,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (await handleProductIconText(env, chatId, text, adminState)) return;
         if (await handleBinanceSettingText(env, chatId, text, adminState)) return;
         if (await handleBep20SettingText(env, chatId, text, adminState)) return;
+        if (await handleMobileWalletSettingText(env,chatId,text,adminState)) return;
         // Older code created states with no text handler. Reset safely instead of
         // throwing ReferenceError and blocking every subsequent admin message.
         await clearAdminState(env,chatId);
