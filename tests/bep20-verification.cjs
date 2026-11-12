@@ -42,5 +42,6 @@ const verify=(inv=invoice,expected=5,tx=hash)=>context.verify({DB},tx,expected,i
  reset();assert.equal((await verify({...invoice,status:'completed'})).reason,'invalid_invoice');
  reset();const concurrent=await Promise.all([verify(),verify()]);assert.equal(concurrent.filter(r=>r.success).length,1);assert.equal(claims.length,1);
  reset();assert.equal((await verify({...invoice,type:'deposit'},0)).paidAmount,5);
+ reset();const older={...invoice,created_at:new Date(now-15*60000).toISOString()};timestamp='0x'+Math.floor((now-11*60000)/1000).toString(16);assert.equal((await verify(older)).reason,'payment_expired');reset();timestamp='0x'+Math.floor((now-9*60000)/1000).toString(16);assert.equal((await verify(older)).success,true);
  console.log('PASS: BSC chain, USDT token/recipient, 12 confirmations, canonical block, exact amounts, combined logs, old/failed/pending transactions, RPC failure and concurrent replay protection');
 })().catch(e=>{console.error(e);process.exitCode=1;});

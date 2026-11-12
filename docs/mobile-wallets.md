@@ -1,6 +1,6 @@
 # Personal bKash and Nagad automatic payments
 
-Users choose bKash/Nagad, create an invoice, send the **exact displayed BDT amount**, then tap **Enter Transaction ID** and submit only the receipt's TrxID/TxnID within 10 minutes. Orders trigger direct delivery; deposits credit the wallet. Rocket remains manual because no Rocket SMS template was supplied.
+Users choose bKash/Nagad, create an invoice, send the **exact displayed BDT amount**, then tap **Enter Transaction ID** and submit only the receipt's TrxID/TxnID within 60 minutes. Orders trigger direct delivery; deposits credit the wallet. Rocket remains manual because no Rocket SMS template was supplied.
 
 The Android receiving-phone app sends a minimal signed receipt (no raw SMS/OTP). It must remain online with SMS permission/background execution, configured with the same receiving account as Admin → Payment Settings. Existing v0.2 APKs work; v0.3 only updates user guidance. Do not reinstall/clear data, which changes the key/device ID. [APK/setup](../android-bridge/README.md).
 
@@ -14,7 +14,7 @@ The Android receiving-phone app sends a minimal signed receipt (no raw SMS/OTP).
 
 ## Matching and concurrency
 
-Each invoice snapshots method, receiving account, exact integer BDT poisha, USD cents, user, creation time and 10-minute expiry. Later exchange-rate changes do not reprice it. Required evidence: enrolled device, same method/account/TrxID, exact amount, payment timestamp within invoice window and timely submission. SMS time is only minute-precision; the invoice creation minute is the earliest accepted time. An SMS arriving after timely submission triggers background settlement without a Cron. A manual **Check Payment** button retries missing/late records. SMS received before the user submits remains unclaimed until an explicit TrxID is submitted; amount alone never identifies the user.
+Each invoice snapshots method, receiving account, exact integer BDT poisha, USD cents, user, creation time and 60-minute expiry. Later exchange-rate changes do not reprice it. Required evidence: enrolled device, same method/account/TrxID, exact amount, payment timestamp within invoice window and timely submission. SMS time is only minute-precision; the invoice creation minute is the earliest accepted time. An SMS arriving after timely submission triggers background settlement without a Cron. A manual **Check Payment** button retries missing/late records. SMS received before the user submits remains unclaimed until an explicit TrxID is submitted; amount alone never identifies the user.
 
 A single D1 batch rechecks current invoice/target/receipt eligibility and inserts a unique `(method,trx_id)` claim, unique invoice claim and unique receipt event before crediting a deposit or marking an order paid. Per-attempt tokens make simultaneous retries idempotent. Any write failure rolls back the entire batch. Already manually completed transactions cannot be claimed again. Invoice status and claims remain durable if network notifications fail.
 
@@ -47,3 +47,7 @@ ORDER BY created_at DESC LIMIT 20;
 ```
 
 `amount_minor` is BDT poisha (500 Tk = 50000). Wallet credits retain the invoice's USD cents. Do not edit claim/receipt rows to retry delivery or remove duplicates; review provider history and order inventory first.
+
+## Payment windows
+
+bKash/Nagad invoices allow payment and first TrxID submission within **60 minutes of invoice creation**. Pending invoices previously issued with a 10-minute window are extended to 60 minutes by the schema migration. A timely submission can still settle when its SMS arrives late. Rocket remains manual, with a 60-minute receipt-submission window. Binance Pay Order IDs and BEP20 TxHashes must be submitted within **10 minutes of payment**; BEP20 still requires 12 confirmations. Expired paid transactions require admin review; never ask the customer to pay twice.

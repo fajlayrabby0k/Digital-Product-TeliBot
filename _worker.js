@@ -128,7 +128,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-mobile-auto-1";
+const DB_SCHEMA_VERSION = "2026-11-mobile-auto-60m";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -202,6 +202,7 @@ async function initializeDatabase(db, force) {
       if (typeof db.batch === "function") await db.batch(missing.map(sql => db.prepare(sql)));
       else for (const sql of missing) await db.prepare(sql).run();
     }
+    await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
       "CREATE UNIQUE INDEX IF NOT EXISTS deposits_redeem_once ON deposits(trx_id) WHERE method = 'REDEEM'",
       "CREATE INDEX IF NOT EXISTS inventory_available ON inventory(product_id, is_sold, id)",
@@ -451,6 +452,7 @@ async function verifyBscUsdtTx(env, txHash, expectedUsd, invoice = null) {
     if (!/^0x[0-9a-f]+$/i.test(block.timestamp || "") || Number(BigInt(block.timestamp)) * 1000 < createdAt || Number(BigInt(block.timestamp)) * 1000 > Date.now()) {
       return { success: false, reason: "old_payment", message: "The transfer must be made after this invoice was created." };
     }
+    if(Date.now()-Number(BigInt(block.timestamp))*1000>10*60000)return {success:false,reason:'payment_expired',message:'Submit the TxHash within 10 minutes of paying. Contact admin for review; do not pay again.'};
     const recipientTopic = `0x${wallet.slice(2).padStart(64, "0")}`;
     let total = 0n;
     for (const log of receipt.logs || []) {
@@ -988,7 +990,7 @@ async function showBep20Instructions(env, chatId, type, invoice, messageId = nul
   const table=type==='order'?'orders':'deposits';
   const saved=await env.DB.prepare(`UPDATE ${table} SET bep20_wallet = ? WHERE id = ? AND user_id = ? AND status = 'pending'`).bind(address,invoice.id,chatId).run();
   if (saved.meta.changes!==1) { await sendMsg(env,chatId,'This invoice is not payable.');return; }
-  const text=`💵 <b>USDT BEP20 ${type==='order'?'Payment':'Deposit'}</b>\nNetwork: <b>BNB Smart Chain (BEP20)</b>\n\nSend <b>${Number(invoice.amount_usd).toFixed(2)} USDT</b> to:\n<blockquote><code>${escapeHtml(address)}</code></blockquote>\nAfter paying, tap <b>Enter TxHash</b> and paste the blockchain transaction hash from your receipt.\n\n<i>Verification requires 12 confirmations. Cover withdrawal fees so the required USDT amount reaches this address. Use a TxHash, not a Binance Pay Order ID.</i>`;
+  const text=`💵 <b>USDT BEP20 ${type==='order'?'Payment':'Deposit'}</b>\nNetwork: <b>BNB Smart Chain (BEP20)</b>\n\nSend <b>${Number(invoice.amount_usd).toFixed(2)} USDT</b> to:\n<blockquote><code>${escapeHtml(address)}</code></blockquote>\nAfter paying, tap <b>Enter TxHash</b> and paste the blockchain transaction hash from your receipt.\n\n<i>Submit the TxHash within 10 minutes of paying. Verification requires 12 confirmations. Cover withdrawal fees so the required USDT amount reaches this address. Use a TxHash, not a Binance Pay Order ID.</i>`;
   const buttons=[
     [{text:'📋 Copy Wallet Address',copy_text:{text:address}},{text:'⚡ Enter TxHash',callback_data:`bep20_enter_${type}_${invoice.id}`}],
     [{text:'⏪ Back',callback_data:type==='order'?`prod_${invoice.product_id}`:'deposit'}]
@@ -1060,7 +1062,7 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
   if (method === "binance") return await startBinanceDeposit(env, chatId, username, neededAmount, messageId);
   let mTitle = "bKash Personal";
   let accNum = await getSetting(env, "bkash_num", "017XXXXXXXX");
-  let promptDetails = ["bkash","nagad"].includes(method)?"Send the exact BDT amount within <b>10 minutes</b>, then tap <b>Enter Transaction ID</b>. Verification uses the receiving phone’s payment SMS. Do not send your PIN or OTP.":"After sending, please <b>REPLY to this message</b> with your <b>Transaction ID</b>.";
+  let promptDetails = ["bkash","nagad"].includes(method)?"Send the exact BDT amount within <b>60 minutes</b>, then tap <b>Enter Transaction ID</b>. Verification uses the receiving phone’s payment SMS. Do not send your PIN or OTP.":"Send payment and <b>REPLY to this message</b> with your <b>Transaction ID within 60 minutes</b>.";
 
   if (method === "nagad") {
     mTitle = "Nagad Personal";
@@ -1253,6 +1255,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
             if (['BKASH','NAGAD'].includes(method)) {await submitMobilePayment(env,chatId,'order',orderId,cleanText);return;}
 
+            if(method==='ROCKET'&&Date.now()-invoiceTimestamp(order.created_at)>60*60000){await sendMsg(env,chatId,'The 60-minute Rocket payment window expired. If you paid, contact admin. Do not pay again.');return;}
             // C. Manual Payments (bKash, Nagad, Rocket)
             await env.DB.prepare("UPDATE orders SET trx_id = ? WHERE id = ?").bind(cleanText, orderId).run();
             await sendMsg(env, chatId, `✅ <b>Payment Details Received!</b>\n\nOrder ID: #${orderId}\nMethod: <b>${order.payment_method}</b>\nTransaction ID: <code>${cleanText}</code>\n\nOur team is verifying your payment. Your product will be delivered automatically upon confirmation.`);
@@ -1290,6 +1293,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
           if (['BKASH','NAGAD'].includes(depMethod)) {await submitMobilePayment(env,chatId,'deposit',depId,cleanText);return;}
 
+          if(depMethod==='ROCKET'&&Date.now()-invoiceTimestamp(dRow.created_at)>60*60000){await sendMsg(env,chatId,'The 60-minute Rocket payment window expired. If you paid, contact admin. Do not pay again.');return;}
           await env.DB.prepare("UPDATE deposits SET trx_id = ? WHERE id = ?").bind(cleanText, depId).run();
         }
 
@@ -1612,12 +1616,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       } else if (method === "rocket") {
         mTitle = "Rocket Personal";
         accNum = await getSetting(env, "rocket_num", "017XXXXXXXX");
-        customInstructions = `👉 <b>Send Money to:</b>\n<code>${accNum}</code>\n\n⚠️ After payment, please <b>REPLY to this message</b> with your <b>Rocket Transaction ID</b>.`;
+        customInstructions = `👉 <b>Send Money to:</b>\n<code>${accNum}</code>\n\n⚠️ After payment, please <b>REPLY to this message</b> with your <b>Rocket Transaction ID within 60 minutes</b>.`;
       }
 
       if(['bkash','nagad'].includes(method)) {
         await createMobileInvoice(env,'order',orderId,chatId,method,accNum,totalUsd,totalBdt);
-        customInstructions=`👉 <b>Send Money (Personal) to:</b>\n<code>${escapeHtml(accNum)}</code>\n\nSend the exact BDT amount within <b>10 minutes</b>, then tap <b>Enter Transaction ID</b>. Payment is verified against our received transaction record. Never submit a PIN or OTP.`;
+        customInstructions=`👉 <b>Send Money (Personal) to:</b>\n<code>${escapeHtml(accNum)}</code>\n\nSend the exact BDT amount within <b>60 minutes</b>, then tap <b>Enter Transaction ID</b>. Payment is verified against our received transaction record. Never submit a PIN or OTP.`;
       }
       const checkoutText = `💳 <b>Payment Instructions — ${mTitle}</b>\n\n` +
         `Order ID: <b>#${orderId}</b>\n` +
@@ -2936,7 +2940,7 @@ async function createMobileInvoice(env,type,id,userId,method,account,usd,bdt) {
   const cents=Math.round(Number(usd)*100),minor=Math.round(Number(bdt)*100),now=Date.now();
   if(!['order','deposit'].includes(type)||!['bkash','nagad'].includes(method)||!Number.isSafeInteger(cents)||cents<=0||!Number.isSafeInteger(minor)||minor<=0)throw new Error('Invalid mobile invoice');
   await env.DB.prepare(`INSERT INTO mobile_payment_invoices(invoice_type,invoice_id,user_id,method,account,amount_minor,amount_cents,created_ms,expires_ms) VALUES(?,?,?,?,?,?,?,?,?)`)
-    .bind(type,id,userId,method,account,minor,cents,now,now+10*60000).run();
+    .bind(type,id,userId,method,account,minor,cents,now,now+60*60000).run();
 }
 
 async function mobileInvoiceTarget(env,type,id) {
