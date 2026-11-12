@@ -1,0 +1,24 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto,createHmac}=require('node:crypto');
+const sql=new DatabaseSync(':memory:');sql.exec("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);INSERT INTO settings VALUES('bkash_num','01712345678');CREATE TABLE users(balance_usd REAL);INSERT INTO users VALUES(0)");
+const DB={prepare(s){let args=[];return{bind(...a){args=a;return this;},async first(){return sql.prepare(s).get(...args)||null;},async run(){return sql.prepare(s).run(...args);}}}};
+const c=vm.createContext({console,TextEncoder,TextDecoder,URL,Response,crypto:webcrypto});vm.runInContext(fs.readFileSync(require('node:path').join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\nglobalThis.receive=receiveMobileBridgeReceipt',c);
+const env={DB,MOBILE_BRIDGE_SECRET:'a'.repeat(64),MOBILE_BRIDGE_DEVICE_ID:'test-device'},base={version:1,eventId:'11111111-1111-4111-8111-111111111111',deviceId:'test-device',method:'bkash',account:'01712345678',trxId:'TEST123456',amountMinor:50000,receivedAt:Date.now(),paidAt:Date.now()};
+async function send(body=base,opts={}){let raw=JSON.stringify(body),ts=String(opts.ts||Math.floor(Date.now()/1000)),signature=createHmac('sha256',opts.key||env.MOBILE_BRIDGE_SECRET).update(raw+ts).digest('hex');return c.receive(new Request('https://example.test/api/mobile-receipt',{method:'POST',body:raw,headers:{'X-Timestamp':ts,'X-Signature':signature}}),opts.env||env);}
+(async()=>{
+ assert.equal((await send(base,{env:{DB}})).status,503);
+ assert.equal((await send(base,{key:'wrong'})).status,401);
+ assert.equal((await send(base,{ts:Math.floor(Date.now()/1000)-600})).status,401);
+ assert.equal((await send({...base,deviceId:'foreign'})).status,400);
+ assert.equal((await send({...base,account:'01912345678'})).status,409);
+ assert.equal((await send({...base,amountMinor:1.5})).status,400);
+ assert.equal((await send({...base,rawSms:'OTP 123456'})).status,400);
+ assert.equal((await send({...base,receivedAt:Date.now(),paidAt:Date.now()-90000000})).status,400);
+ const results=await Promise.all([send(),send()]);assert(results.every(r=>r.status===200));
+ assert.equal(sql.prepare('SELECT count(*) AS n FROM mobile_bridge_receipts').get().n,1);
+ assert.equal((await send({...base,amountMinor:999})).status,409);
+ assert.equal((await send({...base,eventId:'22222222-2222-4222-8222-222222222222'})).status,409);
+ assert.equal(sql.prepare('SELECT status FROM mobile_bridge_receipts').get().status,'unverified_sms');
+ assert.equal(sql.prepare('SELECT balance_usd FROM users').get().balance_usd,0);
+ console.log('PASS: bridge signature, timestamp, device/account binding, minimal payload, exact duplicate acknowledgement, conflict rejection; receipts never credit funds');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sql.close());

@@ -9,3 +9,7 @@ Automatic verification requires a chosen transaction source before integration: 
 A future verifier must match incoming successful transactions against provider/method, receiving account, exact BDT amount, TrxID, invoice time and ownership, then atomically reserve the transaction and credit/fulfill once. Its API paths, signatures and response format must come from the actual source's documentation, not an invented generic protocol. No such integration or external account access was configured in this change.
 
 `node tests/mobile-wallet-settings.cjs` checks admin-only editing, number normalization/validation, customer instructions, cancellation and pending status for unverified deposits.
+
+## Optional custom Android bridge (enrollment only)
+
+See [android-bridge/README.md](../android-bridge/README.md). `/api/mobile-receipt` accepts signed, device-bound, minimal receipt evidence only when explicitly configured. It stores `unverified_sms` records with duplicate protection and **does not** authorize deposits or orders. Android forwarding defaults OFF. Supplied bKash/Nagad receipt formats are built in; Rocket is disabled pending its receipt sample. Existing manual payment review remains.

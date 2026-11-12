@@ -16,6 +16,8 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
+    if (url.pathname === "/api/mobile-receipt") return receiveMobileBridgeReceipt(request, env);
+
     // 1. Database Setup & Telegram Command Registration (/api/setup)
     if (url.pathname === "/api/setup") {
       try {
@@ -2832,4 +2834,37 @@ async function sendSupport(env, chatId, editMessageId = null) {
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, supText, buttons);
   else await sendMsg(env, chatId, supText, buttons);
+}
+
+// Device-authenticated SMS evidence only. This endpoint never credits money or delivers orders.
+async function receiveMobileBridgeReceipt(request, env) {
+  const reply=(status,body)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json','Cache-Control':'no-store'}});
+  if(request.method!=='POST')return reply(405,{error:'method_not_allowed'});
+  if(!env.MOBILE_BRIDGE_SECRET || env.MOBILE_BRIDGE_SECRET.length<32 || !env.MOBILE_BRIDGE_DEVICE_ID || !env.DB)return reply(503,{error:'bridge_not_configured'});
+  if(Number(request.headers.get('Content-Length')||0)>4096)return reply(413,{error:'too_large'});
+  const reader=request.body?.getReader();if(!reader)return reply(400,{error:'invalid_body'});
+  let chunks=[],size=0;while(true){const {value,done}=await reader.read();if(done)break;size+=value.length;if(size>4096){await reader.cancel();return reply(413,{error:'too_large'});}chunks.push(value);}
+  const bytes=new Uint8Array(size);let offset=0;for(const b of chunks){bytes.set(b,offset);offset+=b.length;}
+  const raw=new TextDecoder().decode(bytes),ts=request.headers.get('X-Timestamp')||'',signature=request.headers.get('X-Signature')||'';
+  if(!/^[0-9]{10}$/.test(ts)||Math.abs(Date.now()/1000-Number(ts))>300||!/^([0-9a-f]{64})$/.test(signature))return reply(401,{error:'unauthorized'});
+  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.MOBILE_BRIDGE_SECRET),{name:'HMAC',hash:'SHA-256'},false,['verify']);
+  const sig=Uint8Array.from(signature.match(/../g),x=>parseInt(x,16));
+  if(!await crypto.subtle.verify('HMAC',key,sig,new TextEncoder().encode(raw+ts)))return reply(401,{error:'unauthorized'});
+  let b;try{b=JSON.parse(raw);}catch{return reply(400,{error:'invalid_json'});}
+  const allowed=['version','eventId','deviceId','method','account','trxId','amountMinor','receivedAt','paidAt'];
+  if(!b||Array.isArray(b)||Object.keys(b).some(k=>!allowed.includes(k))||b.version!==1||b.deviceId!==env.MOBILE_BRIDGE_DEVICE_ID||!['bkash','nagad'].includes(b.method)||!/^[a-f0-9-]{36}$/.test(b.eventId||'')||!/^[A-Z0-9]{6,40}$/.test(b.trxId||'')||typeof b.account!=='string'||!Number.isSafeInteger(b.amountMinor)||b.amountMinor<=0||b.amountMinor>100000000||!Number.isSafeInteger(b.receivedAt)||b.receivedAt>Date.now()+60000||b.receivedAt<Date.now()-86400000||!Number.isSafeInteger(b.paidAt)||b.paidAt>b.receivedAt+300000||b.paidAt<b.receivedAt-86400000)return reply(400,{error:'invalid_receipt'});
+  try{
+    const configured=await env.DB.prepare('SELECT value FROM settings WHERE key=?').bind(b.method+'_num').first();
+    if(!configured?.value||configured.value!==b.account)return reply(409,{error:'receiving_account_mismatch'});
+    await env.DB.prepare(`CREATE TABLE IF NOT EXISTS mobile_bridge_receipts (
+      event_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, method TEXT NOT NULL, account TEXT NOT NULL,
+      trx_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, received_at INTEGER NOT NULL, paid_at INTEGER NOT NULL,
+      body_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unverified_sms',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(method,trx_id))`).run();
+    const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');
+    await env.DB.prepare(`INSERT INTO mobile_bridge_receipts(event_id,device_id,method,account,trx_id,amount_minor,received_at,paid_at,body_hash) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`).bind(b.eventId,b.deviceId,b.method,b.account,b.trxId,b.amountMinor,b.receivedAt,b.paidAt,digest).run();
+    const saved=await env.DB.prepare('SELECT event_id,body_hash FROM mobile_bridge_receipts WHERE event_id=?').bind(b.eventId).first();
+    if(!saved||saved.body_hash!==digest)return reply(409,{error:'receipt_conflict'});
+    return reply(200,{accepted:true,eventId:b.eventId,status:'unverified_sms'});
+  }catch{return reply(503,{error:'receipt_storage_unavailable'});}
 }
