@@ -62,7 +62,7 @@ const verify=(settings=env,inv=invoice,expected=5)=>context.api.verifyBinancePay
  const messages=[],updates=[];
  context.capture=async(_env,_chat,text)=>{messages.push(text);return {ok:true};};
  vm.runInContext('sendMsg=capture; dispatchExternalOrder=async()=>({success:false});',context);
- const deliveryDB={prepare(sql){return {bind(){return this;},async run(){updates.push(sql);}}}};
+ const deliveryDB={prepare(sql){return {bind(){return this;},async run(){updates.push(sql);return {success:true,meta:{changes:1}};}}}};
  await context.api.completeSuccessfulOrder({DB:deliveryDB,ADMIN_ID:1},{id:9,is_external:1,quantity:1,product_id:4},incoming.transactionId,99);
  assert(messages.some(text=>text.includes('Delivery is pending')));
  assert(!messages.some(text=>text.includes('Your Order is Delivered')));

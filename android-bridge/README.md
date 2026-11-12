@@ -1,10 +1,10 @@
-# TeliBot Receipt Bridge v0.2 — সহজ সেটআপ
+# TeliBot Receipt Bridge v0.3 — সহজ সেটআপ
 
-[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.2.apk)
+[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.3.apk)
 
 Android 8+। পুরোনো v0.1 ইনস্টল থাকলে তার ওপর Update করুন; Uninstall করার দরকার নেই। একই release certificate ব্যবহার করা হয়েছে; আগের Device ID ও encrypted secret রাখা হবে। Uninstall করলে বা Clear data করলে নতুন চাবি/ID তৈরি হবে এবং Cloudflare-এ আবার দিতে হবে।
 
-**বর্তমানে SMS থেকে পেমেন্টের রেকর্ড পৌঁছানো পর্যন্ত তৈরি। অটো ব্যালেন্স যোগ/ডেলিভারি এখনো চালু নয়।** এটি provider API verification নয়; sender name-ও spoof হতে পারে।
+**বটের নতুন কোডে বিকাশ/নগদের SMS রেকর্ড ও ইউজারের TrxID মিলিয়ে অটো ব্যালেন্স যোগ/সরাসরি অর্ডার ডেলিভারি যুক্ত হয়েছে।** এটি receiving-phone evidence; provider API verification নয়, sender name-ও spoof হতে পারে। v0.2 অ্যাপও একই protocol-এ কাজ করবে; v0.3-তে পুরোনো “অটো ব্যালেন্স এখনো নেই” লেখাটি আপডেট হয়েছে।
 
 ## আগে থেকেই দেওয়া আছে
 
@@ -62,7 +62,7 @@ ORDER BY created_at DESC
 LIMIT 10;
 ```
 
-`amount_minor` পয়সায়: ৫০০ টাকা = `50000`। `unverified_sms` মানে রেকর্ড পৌঁছেছে, পেমেন্ট অনুমোদিত নয়। Setup check কোনো receipt table/row তৈরি করে না; প্রথম valid SMS upload-এর আগে table না থাকতেও পারে। Setup success প্রমাণ করে signature, device ID ও receiving numbers মিলেছে; বাস্তব SMS reception প্রমাণ করে না।
+`amount_minor` পয়সায়: ৫০০ টাকা = `50000`। `unverified_sms` মানে রেকর্ড পৌঁছেছে কিন্তু কোনো ইনভয়েসের জন্য দাবি হয়নি; `claimed` মানে পেমেন্ট একটি নির্দিষ্ট ইনভয়েসে ব্যবহৃত হয়েছে। ইউজার আগে TrxID জমা দিয়ে থাকলে valid SMS এলে সার্ভার নিজে matching চালাবে; SMS আগে এলে TrxID submission-এ matching হবে। Setup check কোনো receipt table/row তৈরি করে না; প্রথম valid SMS upload-এর আগে table না থাকতেও পারে। Setup success প্রমাণ করে signature, device ID ও receiving numbers মিলেছে; বাস্তব SMS reception প্রমাণ করে না।
 
 সমস্যা হলে অ্যাপে **অন্য সেটিং / পরীক্ষা → Pending রেকর্ড আবার পাঠান**। **বন্ধ করুন** সঙ্গে সঙ্গে নতুন forwarding বন্ধ করে, pending queue রাখে। সেটিং সত্যিই বদলালে পুরোনো queue মুছে যায় যাতে অন্য account/server-এ reroute না হয়। একই সেটিং পুনরায় Save করলে queue থাকে। Pending আলাদা বাটন দিয়ে confirmation-এর পরে মোছা যায়।
 
@@ -76,7 +76,7 @@ HTTPS uses Android's normal certificate validation, no cleartext/redirects. JobS
 
 `POST /api/mobile-receipt`: body <4096 bytes; `X-Timestamp` Unix seconds ±300; lowercase `X-Signature` HMAC-SHA256 of exact UTF-8 `rawBody + timestamp`. Requires production `MOBILE_BRIDGE_SECRET` (32+ chars), `MOBILE_BRIDGE_DEVICE_ID` and D1 DB. Setup check body: `{version:1,type:"check",deviceId,bkashAccount,nagadAccount}`. Authenticated check reads receiving-account settings, performs no credit or receipt insertion, and returns `{connected:true,deviceId}` only on exact account matches.
 
-Receipt fields: `version:1,eventId,deviceId,method,account,trxId,amountMinor,receivedAt,paidAt`. Unknown fields are refused. Method is bkash/nagad only. Integer `amountMinor` is BDT poisha. SMS timestamp parsed as dd/MM/yyyy HH:mm in Asia/Dhaka. Capture within 24 hours; parsed payment within 24 hours before capture (up to 5 minutes ahead for skew). Signature/device/account validation precedes insert. Same event+body is idempotent; conflicting event or transaction reuse is refused. Successful receipt reply is `{accepted:true,eventId,status:"unverified_sms"}`. The phone deletes queued metadata only after this explicit acknowledgement. Rejected records may retry until expiry. **No balance mutation, order matching, automatic payment approval or delivery is implemented by this bridge.**
+Receipt fields: `version:1,eventId,deviceId,method,account,trxId,amountMinor,receivedAt,paidAt`. Unknown fields are refused. Method is bkash/nagad only. Integer `amountMinor` is BDT poisha. SMS timestamp parsed as dd/MM/yyyy HH:mm in Asia/Dhaka. Capture within 24 hours; parsed payment within 24 hours before capture (up to 5 minutes ahead for skew). Signature/device/account validation precedes insert. Same event+body is idempotent; conflicting event or transaction reuse is refused. Successful receipt reply is `{accepted:true,eventId,status:"stored"}`. The phone deletes queued metadata only after this explicit acknowledgement. Rejected records may retry until expiry. The setup check never moves money. Receipt ingestion persists evidence then schedules pending invoice matching; user TrxID submissions also trigger matching. An atomic D1 claim+invoice+balance transaction ensures one-time deposit credit; orders are marked paid before delivery. Provider failure/insufficient stock remains paid_pending_delivery. Only new snapshotted invoices can auto-settle. Payment/submission deadline is 10 minutes; payment timestamps have one-minute precision, so the earliest accepted timestamp is the invoice creation minute. Pending, timely TrxID submissions can accept delayed SMS (up to 24-hour receipt age). Rocket remains manual. A compromised receiving device/signing key or spoofed company SMS can supply false evidence; no claim of provider-confirmed settlement is made.
 
 ## Build and verification
 

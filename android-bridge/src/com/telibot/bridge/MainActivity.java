@@ -29,7 +29,7 @@ public final class MainActivity extends Activity {
   try{android.content.SharedPreferences.Editor init=p.edit();if(!p.contains("device"))init.putString("device",UUID.randomUUID().toString());if(!p.contains("secret")){byte[] bytes=new byte[32];new SecureRandom().nextBytes(bytes);StringBuilder key=new StringBuilder();for(byte b:bytes)key.append(String.format(Locale.ROOT,"%02x",b&255));init.putString("secret",Store.seal(key.toString()));}init.commit();}catch(Exception e){TextView error=new TextView(this);error.setText("ফোনের নিরাপদ storage চালু করা যায়নি। অ্যাপ বন্ধ করে আবার খুলুন।");setContentView(error);return;}
   ScrollView scroll=new ScrollView(this);box=new LinearLayout(this);box.setOrientation(1);box.setPadding(dp(20),dp(16),dp(20),dp(24));scroll.addView(box);setContentView(scroll);
   scroll.setOnApplyWindowInsetsListener((v,insets)->{if(android.os.Build.VERSION.SDK_INT>=30){android.graphics.Insets safe=insets.getInsets(android.view.WindowInsets.Type.systemBars()|android.view.WindowInsets.Type.displayCutout());v.setPadding(safe.left,safe.top,safe.right,safe.bottom);}else{applyLegacyInsets(v,insets);}return insets;});
-  text(box,"পেমেন্ট SMS সংযোগ",25);text(box,"সহজ সেটআপ · v0.2\nআপনার বটের ঠিকানা আগে থেকেই দেওয়া আছে।",16);
+  text(box,"পেমেন্ট SMS সংযোগ",25);text(box,"সহজ সেটআপ · v0.3\nআপনার বটের ঠিকানা আগে থেকেই দেওয়া আছে।",16);
   status=new TextView(this);status.setTextSize(16);status.setPadding(0,dp(12),0,dp(12));box.addView(status);
   text(box,"১. SMS-এর অনুমতি দিন",20);text(box,"শুধু নতুন SMS গ্রহণ করবে। পুরোনো ইনবক্স পড়বে না।",14);
   button(box,"SMS permission দিন",()->requestPermissions(new String[]{"android.permission.RECEIVE_SMS"},1));
@@ -50,7 +50,7 @@ public final class MainActivity extends Activity {
   if(value("bkashSender").isEmpty())fields.get("bkashSender").setText("bKash");if(value("nagadSender").isEmpty())fields.get("nagadSender").setText("NAGAD");
   button(advanced,"SMS format ফোনেই পরীক্ষা",()->preview());button(advanced,"Pending রেকর্ড আবার পাঠান",()->{UploadJob.schedule(this);say("আবার পাঠানোর চেষ্টা হবে। ইন্টারনেট ও forwarding চালু থাকতে হবে।");});
   button(advanced,"Pending রেকর্ড মুছুন",()->new AlertDialog.Builder(this).setMessage("ফোনে পাঠানোর অপেক্ষায় থাকা রেকর্ড মুছবেন? সার্ভারের রেকর্ড মুছবে না।").setNegativeButton("না",null).setPositiveButton("মুছুন",(d,w)->{stop();try(Store s=new Store(this)){s.getWritableDatabase().delete("receipts",null,null);}say("বন্ধ করা হয়েছে ও pending রেকর্ড মুছেছে।");}).show());
-  text(box,"রকেট এখন বন্ধ। এই সংস্করণে শুধু SMS পেমেন্টের রেকর্ড পৌঁছাবে; অটো ব্যালেন্স যোগ/ডেলিভারি এখনো চালু হয়নি।",14);
+  text(box,"রকেট এখন বন্ধ। বটে TrxID জমা দিলে সার্ভার SMS-এর সঙ্গে নম্বর, পরিমাণ ও সময় মিলিয়ে যাচাই করবে। সংযোগ সফল হওয়া মানেই পেমেন্ট যাচাই নয়।",14);
   showStatus();
  }
  protected void onDestroy(){attemptNumber++;testing=false;super.onDestroy();}

@@ -16,7 +16,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
-    if (url.pathname === "/api/mobile-receipt") return receiveMobileBridgeReceipt(request, env);
+    if (url.pathname === "/api/mobile-receipt") return receiveMobileBridgeReceipt(request, env, ctx);
 
     // 1. Database Setup & Telegram Command Registration (/api/setup)
     if (url.pathname === "/api/setup") {
@@ -128,7 +128,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-speed-4-shop";
+const DB_SCHEMA_VERSION = "2026-11-mobile-auto-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -162,6 +162,9 @@ async function initializeDatabase(db, force) {
       `CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
       `CREATE TABLE IF NOT EXISTS redeem_codes (code_hash TEXT PRIMARY KEY, amount_cents INTEGER NOT NULL CHECK(amount_cents > 0), created_by INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, redeemed_by INTEGER DEFAULT NULL, redeemed_at DATETIME DEFAULT NULL, redemption_token TEXT UNIQUE DEFAULT NULL, redeemed_bdt INTEGER DEFAULT NULL);`,
       `CREATE TABLE IF NOT EXISTS bep20_payment_claims (tx_hash TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_wei TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`,
+      `CREATE TABLE IF NOT EXISTS mobile_bridge_receipts (event_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, method TEXT NOT NULL, account TEXT NOT NULL, trx_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, received_at INTEGER NOT NULL, paid_at INTEGER NOT NULL, body_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unverified_sms', created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(method,trx_id));`,
+      `CREATE TABLE IF NOT EXISTS mobile_payment_invoices (invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, method TEXT NOT NULL, account TEXT NOT NULL, amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), amount_cents INTEGER NOT NULL CHECK(amount_cents > 0), created_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL, trx_id TEXT, submitted_at INTEGER, status TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(invoice_type,invoice_id));`,
+      `CREATE TABLE IF NOT EXISTS mobile_payment_claims (method TEXT NOT NULL, trx_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_minor INTEGER NOT NULL, amount_cents INTEGER NOT NULL, token TEXT NOT NULL UNIQUE, created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(method,trx_id), UNIQUE(invoice_type,invoice_id));`,
       `CREATE TABLE IF NOT EXISTS binance_payment_claims (transaction_id TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_usdt TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`
     ];
     if (typeof db.batch === "function") await db.batch(schema.map(q => db.prepare(q)));
@@ -178,11 +181,13 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE products ADD COLUMN api_stock INTEGER DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN provider_emoji_id TEXT DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN delivery_data TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN bep20_wallet TEXT DEFAULT NULL;",
       "ALTER TABLE deposits ADD COLUMN bep20_wallet TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN quantity INTEGER DEFAULT 1;",
       "ALTER TABLE orders ADD COLUMN amount_usd REAL DEFAULT 0;",
-      "ALTER TABLE orders ADD COLUMN amount_bdt REAL DEFAULT 0;"
+      "ALTER TABLE orders ADD COLUMN amount_bdt REAL DEFAULT 0;",
+      "ALTER TABLE deposits ADD COLUMN amount_bdt REAL DEFAULT 0;"
     ];
     const tables = [...new Set(alters.map(sql => sql.match(/ALTER TABLE (\w+)/)[1]))];
     const columns = new Map(await Promise.all(tables.map(async table => {
@@ -202,6 +207,7 @@ async function initializeDatabase(db, force) {
       "CREATE INDEX IF NOT EXISTS inventory_available ON inventory(product_id, is_sold, id)",
       "CREATE INDEX IF NOT EXISTS inventory_order ON inventory(order_id, is_sold)",
       "CREATE INDEX IF NOT EXISTS orders_user_history ON orders(user_id, id DESC)",
+      "CREATE INDEX IF NOT EXISTS mobile_pending_receipts ON mobile_payment_invoices(method,trx_id,status,submitted_at)",
       "CREATE INDEX IF NOT EXISTS orders_status ON orders(status)",
       "CREATE INDEX IF NOT EXISTS products_shop_active ON products(is_active, id)",
       "CREATE INDEX IF NOT EXISTS products_external ON products(external_id, is_external)",
@@ -601,21 +607,23 @@ async function verifyBinancePayOrder(env, transactionId, expectedUsd, invoice = 
 async function completeSuccessfulOrder(env, order, trxId, chatId) {
   const orderId = order.id;
   const orderQty = order.quantity || 1;
+  const dispatchClaim=await env.DB.prepare("UPDATE orders SET status='delivering',trx_id=? WHERE id=? AND status IN ('pending','paid_pending_delivery')").bind(trxId,orderId).run();
+  if(!dispatchClaim.meta?.changes)return;
 
   if (order.is_external === 1) {
-    await env.DB.prepare("UPDATE orders SET status = 'paid_pending_delivery', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     const apiRes = await dispatchExternalOrder(env, order, orderQty, orderId);
     if (!apiRes.success) {
+      await env.DB.prepare("UPDATE orders SET status='paid_pending_delivery' WHERE id=? AND status='delivering'").bind(orderId).run();
       await sendMsg(env, chatId, `✅ Payment verified for Order #${orderId}. Delivery is pending; admin has been notified. Do not pay again.`);
       await sendMsg(env, env.ADMIN_ID, `⚠️ Paid Order #${orderId} needs manual delivery. Provider delivery was not confirmed. Check provider order history before retrying.`);
       return;
     }
     const creds = apiRes.credentials;
-    await env.DB.prepare("UPDATE orders SET status = 'completed' WHERE id = ?").bind(orderId).run();
+    await env.DB.prepare("UPDATE orders SET status = 'completed',delivery_data=? WHERE id = ?").bind(creds,orderId).run();
     if (apiRes.success) {
       await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(orderQty, order.product_id).run();
     }
-    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${creds}</code></blockquote>`, [
+    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${escapeHtml(creds)}</code></blockquote>`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
@@ -626,13 +634,13 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
 
   // Local Stock Order
   // Claim local inventory with one atomic write to prevent concurrent double delivery.
-  await env.DB.prepare("UPDATE inventory SET is_sold = 1, order_id = ? WHERE id IN (SELECT id FROM inventory WHERE product_id = ? AND is_sold = 0 ORDER BY id LIMIT ?)")
-    .bind(orderId, order.product_id, orderQty).run();
+  await env.DB.prepare("UPDATE inventory SET is_sold = 1, order_id = ? WHERE id IN (SELECT id FROM inventory WHERE product_id = ? AND is_sold = 0 ORDER BY id LIMIT MAX(0, ? - (SELECT COUNT(*) FROM inventory WHERE order_id = ? AND is_sold = 1)))")
+    .bind(orderId, order.product_id, orderQty, orderId).run();
   const { results: items } = await env.DB.prepare("SELECT * FROM inventory WHERE order_id = ? AND is_sold = 1").bind(orderId).all();
   if (items && items.length >= orderQty) {
     await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     const lines = items.map(item => item.item_data);
-    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${lines.join("\n\n")}</code></blockquote>`, [
+    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${escapeHtml(lines.join("\n\n"))}</code></blockquote>`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
@@ -661,14 +669,20 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     }
 
     await env.DB.prepare("UPDATE users SET balance_usd = balance_usd - ?, balance_bdt = balance_bdt - ?, total_spent_usd = total_spent_usd + ? WHERE user_id = ?").bind(totalUsd, totalBdt, totalUsd, chatId).run();
-    const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, status) VALUES (?, ?, ?, ?, 'WALLET', 'AUTO_DISPATCH', ?, ?, 'completed')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt).run();
+    const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, status) VALUES (?, ?, ?, ?, 'WALLET', 'AUTO_DISPATCH', ?, ?, 'paid_pending_delivery')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt).run();
     const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
 
     const apiResult = await dispatchExternalOrder(env, prod, qty, orderId);
-    const creds = apiResult.success ? apiResult.credentials : "Order registered with external provider. Details arriving shortly.";
-    if (apiResult.success) await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(qty, prod.id).run();
+    if(!apiResult.success){
+      await sendMsg(env,chatId,`Payment recorded for Order #${orderId}. Provider delivery is pending; admin has been notified. Do not pay again.`);
+      await sendMsg(env,env.ADMIN_ID,`⚠️ Wallet Order #${orderId} needs delivery review. Check provider history before retrying.`);
+      return;
+    }
+    const creds=apiResult.credentials;
+    await env.DB.prepare("UPDATE orders SET status='completed',delivery_data=? WHERE id=?").bind(creds,orderId).run();
+    await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(qty, prod.id).run();
 
-    await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${creds}</code></blockquote>`, [
+    await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${escapeHtml(creds)}</code></blockquote>`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
@@ -859,7 +873,7 @@ async function handleRedeemInput(env,chatId,text,state) {
 const BINANCE_DEPOSIT_MAX = 10;
 
 async function clearBinanceInput(env, chatId) {
-  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state IN ('awaiting_binance_amount', 'awaiting_binance_receipt', 'awaiting_bep20_amount', 'awaiting_bep20_hash', 'awaiting_redeem_code', 'awaiting_manual_deposit_amount')").bind(chatId).run();
+  await env.DB.prepare("DELETE FROM user_states WHERE user_id = ? AND state IN ('awaiting_binance_amount', 'awaiting_binance_receipt', 'awaiting_bep20_amount', 'awaiting_bep20_hash', 'awaiting_redeem_code', 'awaiting_manual_deposit_amount', 'awaiting_mobile_receipt')").bind(chatId).run();
 }
 
 const DEPOSIT_PRESETS = [5,10,15,20,30,50];
@@ -1046,7 +1060,7 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
   if (method === "binance") return await startBinanceDeposit(env, chatId, username, neededAmount, messageId);
   let mTitle = "bKash Personal";
   let accNum = await getSetting(env, "bkash_num", "017XXXXXXXX");
-  let promptDetails = "After sending, please <b>REPLY to this message</b> with the amount and <b>Transaction ID</b>.";
+  let promptDetails = ["bkash","nagad"].includes(method)?"Send the exact BDT amount within <b>10 minutes</b>, then tap <b>Enter Transaction ID</b>. Verification uses the receiving phone’s payment SMS. Do not send your PIN or OTP.":"After sending, please <b>REPLY to this message</b> with your <b>Transaction ID</b>.";
 
   if (method === "nagad") {
     mTitle = "Nagad Personal";
@@ -1056,18 +1070,24 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
     accNum = await getSetting(env, "rocket_num", "017XXXXXXXX");
   }
 
-  const res = await env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, status) VALUES (?, ?, ?, ?, 'pending')").bind(chatId, username, method.toUpperCase(), neededAmount).run();
-  const depId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 1000);
   const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
+  const bdt=Math.round(neededAmount*rate);
+  if(!Number.isFinite(bdt)||bdt<=0){await sendMsg(env,chatId,'Payment amount is unavailable. Contact admin.');return;}
+  const res = await env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, amount_bdt, status) VALUES (?, ?, ?, ?, ?, 'pending')").bind(chatId, username, method.toUpperCase(), neededAmount, bdt).run();
+  const depId = res.meta?.last_row_id;
+  if(!depId)throw new Error('Deposit invoice creation failed');
+  if(['bkash','nagad'].includes(method))await createMobileInvoice(env,'deposit',depId,chatId,method,accNum,neededAmount,bdt);
 
   const depPrompt = `💰 <b>Deposit Instructions — ${mTitle}</b>\n\n` +
     `Deposit ID: <b>#${depId}</b>\n` +
-    (neededAmount > 0 ? `Target Deposit: <b>$${neededAmount.toFixed(2)} USD (≈ ৳${Math.round(neededAmount * rate)} BDT)</b>\n` : "") +
+    (neededAmount > 0 ? `Target Deposit: <b>$${neededAmount.toFixed(2)} USD (৳${Math.round(neededAmount * rate)} BDT)</b>\n` : "") +
     `Send funds to:\n<blockquote><code>${accNum}</code></blockquote>\n` +
     `Exchange Rate: <b>1 USD = ${rate} BDT</b>\n\n` +
     `${promptDetails}`;
 
-  const buttons=[[{ text: "◀️ Back to Deposit", callback_data: "deposit" }]];
+  const buttons=[];
+  if(['bkash','nagad'].includes(method))buttons.push([{text:'Enter Transaction ID',callback_data:`mobile_enter_deposit_${depId}`}]);
+  buttons.push([{ text: "◀️ Back to Deposit", callback_data: "deposit" }]);
   if(messageId)await editMsg(env,chatId,messageId,depPrompt,buttons);
   else await sendMsg(env,chatId,depPrompt,buttons);
 }
@@ -1190,7 +1210,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // Mandatory Force Join Gate
     if (String(chatId) !== String(env.ADMIN_ID)) {
-      const forceCheck = await checkForceJoin(env, chatId, Boolean(userState?.state === "awaiting_redeem_code" || /^\/start(?:@\w+)?\s+redeem_/i.test(text) || msg.reply_to_message || /^awaiting_(?:binance|bep20)_/.test(userState?.state || "")));
+      const forceCheck = await checkForceJoin(env, chatId, Boolean(userState?.state === "awaiting_redeem_code" || /^\/start(?:@\w+)?\s+redeem_/i.test(text) || msg.reply_to_message || /^awaiting_(?:binance|bep20|mobile)_/.test(userState?.state || "")));
       if (!forceCheck.passed) { await sendForceJoinScreen(env, chatId, forceCheck); return; }
     }
 
@@ -1198,6 +1218,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (redeemStart) {await clearBinanceInput(env,chatId);await submitRedeemCode(env,chatId,redeemStart[1]);return;}
     if (await handleRedeemInput(env,chatId,text,userState)) return;
     if (await handleManualDepositAmount(env,chatId,username,text,userState))return;
+    if (await handleMobileReceiptInput(env,chatId,text,userState)) return;
     if (await handleBep20Input(env, chatId, username, text, userState)) return;
     if (await handleBinanceInput(env, chatId, username, text, userState)) return;
 
@@ -1229,6 +1250,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
               await submitBinancePayment(env, chatId, "order", order, cleanText);
               return;
             }
+
+            if (['BKASH','NAGAD'].includes(method)) {await submitMobilePayment(env,chatId,'order',orderId,cleanText);return;}
 
             // C. Manual Payments (bKash, Nagad, Rocket)
             await env.DB.prepare("UPDATE orders SET trx_id = ? WHERE id = ?").bind(cleanText, orderId).run();
@@ -1264,6 +1287,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
             await submitBinancePayment(env, chatId, "deposit", dRow, cleanText);
             return;
           }
+
+          if (['BKASH','NAGAD'].includes(depMethod)) {await submitMobilePayment(env,chatId,'deposit',depId,cleanText);return;}
 
           await env.DB.prepare("UPDATE deposits SET trx_id = ? WHERE id = ?").bind(cleanText, depId).run();
         }
@@ -1321,6 +1346,19 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (data === "binance_cancel") {
       await clearBinanceInput(env, chatId);
       await sendDeposit(env, chatId, messageId);
+      return;
+    }
+    const mobileAction=data.match(/^mobile_(enter|retry)_(order|deposit)_(\d+)$/);
+    if(mobileAction) {
+      const [,action,type,id]=mobileAction;
+      const invoice=await env.DB.prepare('SELECT * FROM mobile_payment_invoices WHERE invoice_type=? AND invoice_id=? AND user_id=?').bind(type,id,chatId).first();
+      if(!invoice){await sendMsg(env,chatId,'This invoice is unavailable. Contact admin if you already paid. Do not pay again.');return;}
+      if(action==='retry'&&invoice.trx_id){await submitMobilePayment(env,chatId,type,id,invoice.trx_id);return;}
+      const target=await env.DB.prepare(type==='order'?'SELECT status FROM orders WHERE id=?':'SELECT status FROM deposits WHERE id=?').bind(id).first();
+      if(invoice.status!=='pending'||target?.status!=='pending'){await sendMsg(env,chatId,'This payment is already processed or closed.');return;}
+      await clearBinanceInput(env,chatId);
+      await env.DB.prepare("INSERT OR REPLACE INTO user_states(user_id,state,data) VALUES(?,'awaiting_mobile_receipt',?)").bind(chatId,JSON.stringify({type,id:Number(id)})).run();
+      await editMsg(env,chatId,messageId,'💳 <b>Enter Transaction ID</b>\n\nPaste only the TrxID / TxnID from your payment receipt. We will match it to the payment received.',[[{text:'◀️ Cancel',callback_data:type==='deposit'?'deposit':'shop'}]]);
       return;
     }
     if (data.startsWith("binance_enter_")) {
@@ -1519,7 +1557,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         `💳 <b>Select Payment Method:</b>\n\n` +
         `Product: <b>${productDisplayName(prod)}</b>\n` +
         `Quantity: <b>${qty} item(s)</b>\n` +
-        `Total Payable: <b>$${totalUsd.toFixed(2)} USD (≈ ৳${totalBdt} BDT)</b>\n\n` +
+        `Total Payable: <b>$${totalUsd.toFixed(2)} USD (৳${totalBdt} BDT)</b>\n\n` +
         `Choose your preferred payment method below:`,
         [
           [paymentButton("bkash","bKash",`pay_bkash_${prod.id}_${qty}`), paymentButton("nagad","Nagad",`pay_nagad_${prod.id}_${qty}`)],
@@ -1577,15 +1615,20 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         customInstructions = `👉 <b>Send Money to:</b>\n<code>${accNum}</code>\n\n⚠️ After payment, please <b>REPLY to this message</b> with your <b>Rocket Transaction ID</b>.`;
       }
 
+      if(['bkash','nagad'].includes(method)) {
+        await createMobileInvoice(env,'order',orderId,chatId,method,accNum,totalUsd,totalBdt);
+        customInstructions=`👉 <b>Send Money (Personal) to:</b>\n<code>${escapeHtml(accNum)}</code>\n\nSend the exact BDT amount within <b>10 minutes</b>, then tap <b>Enter Transaction ID</b>. Payment is verified against our received transaction record. Never submit a PIN or OTP.`;
+      }
       const checkoutText = `💳 <b>Payment Instructions — ${mTitle}</b>\n\n` +
         `Order ID: <b>#${orderId}</b>\n` +
         `Product: <b>${productDisplayName(prod)}</b> (${qty} item(s))\n` +
-        `Total Payable: <b>$${totalUsd.toFixed(2)} USD (≈ ৳${totalBdt} BDT)</b>\n\n` +
+        `Total Payable: <b>$${totalUsd.toFixed(2)} USD (৳${totalBdt} BDT)</b>\n\n` +
         `${customInstructions}`;
 
-      await editMsg(env, chatId, messageId, checkoutText, [
-        [{ text: "◀️ Cancel Order", callback_data: `prod_${prod.id}` }]
-      ]);
+      const checkoutButtons=[];
+      if(['bkash','nagad'].includes(method))checkoutButtons.push([{text:'Enter Transaction ID',callback_data:`mobile_enter_order_${orderId}`}]);
+      checkoutButtons.push([{text:'◀️ Cancel Order',callback_data:`prod_${prod.id}`}]);
+      await editMsg(env,chatId,messageId,checkoutText,checkoutButtons);
       return;
     }
 
@@ -2049,14 +2092,16 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const order = await env.DB.prepare("SELECT o.*, p.name as product_name, p.is_external, p.external_id FROM orders o JOIN products p ON o.product_id = p.id WHERE o.id = ?").bind(orderId).first();
       if (order && order.status === "pending") {
         await completeSuccessfulOrder(env, order, order.trx_id || "MANUAL_APPROVAL", order.user_id);
-        await editMsg(env, chatId, messageId, `✅ <b>Order #${orderId} approved and delivered!</b>`);
+        const latest=await env.DB.prepare('SELECT status FROM orders WHERE id=?').bind(orderId).first();
+        await editMsg(env,chatId,messageId,latest?.status==='completed'?`✅ Order #${orderId} delivered.`:`Payment recorded for Order #${orderId}. Delivery is pending or processing; check order history before retrying.`);
       }
       return;
     }
 
     if (data.startsWith("admin_reject_")) {
       const orderId = data.replace("admin_reject_", "");
-      await env.DB.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").bind(orderId).run();
+      const rejected=await env.DB.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ? AND status='pending'").bind(orderId).run();
+      if(!rejected.meta?.changes){await editMsg(env,chatId,messageId,'This order is already processed or closed.');return;}
       const order = await env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
       if (order) await sendMsg(env, order.user_id, `❌ <b>Order #${orderId} cancelled:</b> Payment details could not be verified.`);
       await editMsg(env, chatId, messageId, `❌ Order #${orderId} rejected.`);
@@ -2077,7 +2122,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     if (data.startsWith("adm_rejdep_")) {
       const depId = data.replace("adm_rejdep_", "");
-      await env.DB.prepare("UPDATE deposits SET status = 'rejected' WHERE id = ?").bind(depId).run();
+      const rejected=await env.DB.prepare("UPDATE deposits SET status = 'rejected' WHERE id = ? AND status='pending'").bind(depId).run();
+      if(!rejected.meta?.changes){await editMsg(env,chatId,messageId,'This deposit is already processed or closed.');return;}
       const dep = await env.DB.prepare("SELECT * FROM deposits WHERE id = ?").bind(depId).first();
       if (dep) await sendMsg(env, dep.user_id, `❌ Deposit #${depId} could not be verified.`);
       await editMsg(env, chatId, messageId, `❌ Deposit #${depId} rejected.`);
@@ -2383,11 +2429,11 @@ async function dispatchExternalOrder(env, prod, quantity, orderId) {
     if (!apiKey) return { success: false, message: "External API Key is not set." };
 
     const vexorixOrderUrl = `${baseUrl}/api/reseller/orders`;
-    const vResp = await fetch(vexorixOrderUrl, {
+    const vResp = await fetchWithTimeout(vexorixOrderUrl, {
       method: "POST",
       headers: { "X-Reseller-Key": apiKey, "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify({ product_id: String(prod.external_id), quantity, external_order_id: `shop-${orderId}-${Date.now().toString(36)}` })
-    });
+    }, 8000);
 
     if (vResp.ok || vResp.status === 201 || vResp.status === 200) {
       const resData = await vResp.json();
@@ -2799,7 +2845,7 @@ async function sendOrders(env, chatId, editMessageId = null) {
   const { results } = await env.DB.prepare("SELECT o.*, p.name as product_name, i.item_data FROM orders o JOIN products p ON o.product_id = p.id LEFT JOIN inventory i ON o.id = i.order_id WHERE o.user_id = ? AND o.status = 'completed' ORDER BY o.id DESC LIMIT 5").bind(chatId).all();
   let orderText = `📦 <b>Your Completed Orders:</b>\n\n`;
   if (!results || results.length === 0) orderText += `You have not completed any purchases yet.`;
-  else results.forEach(o => { orderText += `🔹 <b>${o.product_name}</b>\nOrder: #${o.id} | Quantity: ${o.quantity || 1} | Amount: $${o.amount_usd} USD\nCredentials: <code>${o.item_data || o.trx_id || "Delivered"}</code>\n\n`; });
+  else results.forEach(o => { orderText += `🔹 <b>${o.product_name}</b>\nOrder: #${o.id} | Quantity: ${o.quantity || 1} | Amount: $${o.amount_usd} USD\nCredentials: <code>${escapeHtml(o.delivery_data || o.item_data || o.trx_id || "Delivered")}</code>\n\n`; });
   const buttons = [[{ text: "◀️ Main Menu", callback_data: "home" }]];
   if (editMessageId) await editMsg(env, chatId, editMessageId, orderText, buttons);
   else await sendMsg(env, chatId, orderText, buttons);
@@ -2836,8 +2882,8 @@ async function sendSupport(env, chatId, editMessageId = null) {
   else await sendMsg(env, chatId, supText, buttons);
 }
 
-// Device-authenticated SMS evidence only. This endpoint never credits money or delivers orders.
-async function receiveMobileBridgeReceipt(request, env) {
+// Device-authenticated SMS evidence. Only matched, atomically claimed invoices may settle.
+async function receiveMobileBridgeReceipt(request, env, ctx) {
   const reply=(status,body)=>new Response(JSON.stringify(body),{status,headers:{'Content-Type':'application/json','Cache-Control':'no-store'}});
   if(request.method!=='POST')return reply(405,{error:'method_not_allowed'});
   if(!env.MOBILE_BRIDGE_SECRET || env.MOBILE_BRIDGE_SECRET.length<32 || !env.MOBILE_BRIDGE_DEVICE_ID || !env.DB)return reply(503,{error:'bridge_not_configured'});
@@ -2879,6 +2925,121 @@ async function receiveMobileBridgeReceipt(request, env) {
     await env.DB.prepare(`INSERT INTO mobile_bridge_receipts(event_id,device_id,method,account,trx_id,amount_minor,received_at,paid_at,body_hash) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`).bind(b.eventId,b.deviceId,b.method,b.account,b.trxId,b.amountMinor,b.receivedAt,b.paidAt,digest).run();
     const saved=await env.DB.prepare('SELECT event_id,body_hash FROM mobile_bridge_receipts WHERE event_id=?').bind(b.eventId).first();
     if(!saved||saved.body_hash!==digest)return reply(409,{error:'receipt_conflict'});
-    return reply(200,{accepted:true,eventId:b.eventId,status:'unverified_sms'});
+    const resume=()=>resumeMobilePayments(env,b.method,b.trxId).catch(()=>console.error('Mobile receipt settlement needs retry'));
+    if(ctx?.waitUntil)ctx.waitUntil(resume());else await resume();
+    return reply(200,{accepted:true,eventId:b.eventId,status:'stored'});
   }catch{return reply(503,{error:'receipt_storage_unavailable'});}
+}
+
+// Personal mobile-wallet verification: authenticated receiving-phone evidence, exact invoice snapshots.
+async function createMobileInvoice(env,type,id,userId,method,account,usd,bdt) {
+  const cents=Math.round(Number(usd)*100),minor=Math.round(Number(bdt)*100),now=Date.now();
+  if(!['order','deposit'].includes(type)||!['bkash','nagad'].includes(method)||!Number.isSafeInteger(cents)||cents<=0||!Number.isSafeInteger(minor)||minor<=0)throw new Error('Invalid mobile invoice');
+  await env.DB.prepare(`INSERT INTO mobile_payment_invoices(invoice_type,invoice_id,user_id,method,account,amount_minor,amount_cents,created_ms,expires_ms) VALUES(?,?,?,?,?,?,?,?,?)`)
+    .bind(type,id,userId,method,account,minor,cents,now,now+10*60000).run();
+}
+
+async function mobileInvoiceTarget(env,type,id) {
+  return await env.DB.prepare(type==='order'?
+    'SELECT o.*,p.name AS product_name,p.is_external,p.external_id,p.api_stock FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?':
+    'SELECT * FROM deposits WHERE id=?').bind(id).first();
+}
+
+async function handleMobileReceiptInput(env,chatId,text,state) {
+  if(state?.state!=='awaiting_mobile_receipt')return false;
+  if(text.startsWith('/')){await clearBinanceInput(env,chatId);return false;}
+  let data;try{data=JSON.parse(state.data);}catch{await clearBinanceInput(env,chatId);return true;}
+  if(!['order','deposit'].includes(data.type)){await clearBinanceInput(env,chatId);return true;}
+  await submitMobilePayment(env,chatId,data.type,data.id,text);
+  return true;
+}
+
+async function submitMobilePayment(env,chatId,type,id,input) {
+  if(!['order','deposit'].includes(type))return;
+  const invoice=await env.DB.prepare('SELECT * FROM mobile_payment_invoices WHERE invoice_type=? AND invoice_id=? AND user_id=?').bind(type,id,chatId).first();
+  if(!invoice){await sendMsg(env,chatId,'This invoice cannot be automatically verified. If you already paid, contact admin. Do not pay again.');return;}
+  const target=await mobileInvoiceTarget(env,type,id);
+  if(!target||String(target.user_id)!==String(chatId)||target.status!=='pending'||invoice.status!=='pending'){
+    await sendMsg(env,chatId,target?.status==='completed'?'This payment is already completed.':'This payment is closed or awaiting delivery. Do not pay again.');return;
+  }
+  const trx=String(input||'').trim().toUpperCase();
+  if(!(invoice.method==='bkash'?/^[A-Z0-9]{10}$/:/^[A-Z0-9]{8}$/).test(trx)){
+    await sendMsg(env,chatId,'Enter only the Transaction ID from your payment receipt. Do not send an amount, PIN or OTP.');return;
+  }
+  // First submission must be within the invoice window. An existing submission may retry late SMS.
+  if(Date.now()>invoice.expires_ms&&(!invoice.submitted_at||invoice.trx_id!==trx)){
+    await sendMsg(env,chatId,'This payment window expired. If you paid, contact admin for review. Do not pay again.');return;
+  }
+  await env.DB.prepare("UPDATE mobile_payment_invoices SET trx_id=?,submitted_at=CASE WHEN trx_id=? AND submitted_at IS NOT NULL THEN submitted_at ELSE ? END WHERE invoice_type=? AND invoice_id=? AND user_id=? AND status='pending'")
+    .bind(trx,trx,Date.now(),type,id,chatId).run();
+  const outcome=await settleMobileInvoice(env,type,id);
+  if(outcome==='completed'||outcome==='processing'||outcome==='membership')return;
+  const messages={missing:'Payment SMS has not arrived yet. Keep the receiving phone online. We will automatically check again when its SMS arrives. You can also tap Check Payment.',mismatch:'The received payment does not match this invoice (method, account, amount or payment time). Contact admin if you paid. Do not pay again.',used:'This transaction has already been used for another payment. Contact admin if you need help.',unavailable:'Automatic verification is not available right now. Keep your payment receipt and retry. Do not pay again.',maintenance:'Verification is paused for maintenance. Retry after the bot reopens. Do not pay again.',closed:'This payment is already processed or closed. Do not pay again.'};
+  await sendMsg(env,chatId,`⏳ ${messages[outcome]||messages.unavailable}`,[[{text:'Check Payment',callback_data:`mobile_retry_${type}_${id}`}],[{text:'Enter Transaction ID',callback_data:`mobile_enter_${type}_${id}`}]]);
+}
+
+async function settleMobileInvoice(env,type,id) {
+  const invoice=await env.DB.prepare('SELECT * FROM mobile_payment_invoices WHERE invoice_type=? AND invoice_id=?').bind(type,id).first();
+  if(!invoice||invoice.status!=='pending'||!invoice.trx_id)return 'closed';
+  if(await getSetting(env,'maintenance_mode','0')==='1'&&String(invoice.user_id)!==String(env.ADMIN_ID))return 'maintenance';
+  if(!env.MOBILE_BRIDGE_SECRET||env.MOBILE_BRIDGE_SECRET.length<32||!env.MOBILE_BRIDGE_DEVICE_ID)return 'unavailable';
+  if(String(invoice.user_id)!==String(env.ADMIN_ID)){const gate=await checkForceJoin(env,invoice.user_id,true);if(!gate.passed){await sendForceJoinScreen(env,invoice.user_id,gate);return 'membership';}}
+  const receipt=await env.DB.prepare('SELECT * FROM mobile_bridge_receipts WHERE method=? AND trx_id=?').bind(invoice.method,invoice.trx_id).first();
+  if(!receipt)return 'missing';
+  const used=await env.DB.prepare('SELECT invoice_type,invoice_id FROM mobile_payment_claims WHERE method=? AND trx_id=?').bind(invoice.method,invoice.trx_id).first();
+  if(used)return used.invoice_type===type&&Number(used.invoice_id)===Number(id)?'processing':'used';
+  if(receipt.device_id!==env.MOBILE_BRIDGE_DEVICE_ID||receipt.account!==invoice.account||receipt.amount_minor!==invoice.amount_minor||receipt.paid_at<Math.floor(invoice.created_ms/60000)*60000||receipt.paid_at>invoice.expires_ms||receipt.received_at<invoice.created_ms-60000||!invoice.submitted_at||invoice.submitted_at>invoice.expires_ms)return 'mismatch';
+  const token=crypto.randomUUID(),table=type==='order'?'orders':'deposits',methodColumn=type==='order'?'payment_method':'method';
+  // All eligibility checks are repeated inside the transaction. Each attempt has a fresh token;
+  // only the attempt that inserted the unique claim can change a balance or dispatch an order.
+  const conditions=`i.invoice_type=? AND i.invoice_id=? AND i.trx_id=? AND i.status='pending' AND t.status='pending' AND t.user_id=i.user_id AND UPPER(t.${methodColumn})=UPPER(i.method) AND ROUND(t.amount_usd*100)=i.amount_cents AND ROUND(t.amount_bdt*100)=i.amount_minor
+    AND r.status='unverified_sms' AND r.device_id=? AND r.account=i.account AND r.amount_minor=i.amount_minor AND r.paid_at>=CAST(i.created_ms/60000 AS INTEGER)*60000 AND r.paid_at<=i.expires_ms AND r.received_at>=i.created_ms-60000 AND i.submitted_at<=i.expires_ms
+    AND NOT EXISTS(SELECT 1 FROM orders o WHERE UPPER(o.payment_method)=UPPER(i.method) AND UPPER(o.trx_id)=i.trx_id AND o.status IN ('completed','paid_pending_delivery'))
+    AND NOT EXISTS(SELECT 1 FROM deposits d WHERE UPPER(d.method)=UPPER(i.method) AND UPPER(d.trx_id)=i.trx_id AND d.status='completed')`;
+  const claim=`EXISTS(SELECT 1 FROM mobile_payment_claims c WHERE c.token=?)`;
+  const statements=[
+    env.DB.prepare(`INSERT INTO mobile_payment_claims(method,trx_id,event_id,invoice_type,invoice_id,user_id,amount_minor,amount_cents,token)
+      SELECT i.method,i.trx_id,r.event_id,i.invoice_type,i.invoice_id,i.user_id,i.amount_minor,i.amount_cents,? FROM mobile_payment_invoices i
+      JOIN mobile_bridge_receipts r ON r.method=i.method AND r.trx_id=i.trx_id JOIN ${table} t ON t.id=i.invoice_id JOIN users u ON u.user_id=i.user_id
+      WHERE ${conditions} ON CONFLICT DO NOTHING`).bind(token,type,id,invoice.trx_id,env.MOBILE_BRIDGE_DEVICE_ID),
+    env.DB.prepare(`UPDATE ${table} SET status=?,trx_id=? WHERE id=? AND user_id=? AND status='pending' AND ${claim}`).bind(type==='order'?'paid_pending_delivery':'completed',invoice.trx_id,id,invoice.user_id,token),
+    env.DB.prepare(`UPDATE mobile_payment_invoices SET status='paid' WHERE invoice_type=? AND invoice_id=? AND status='pending' AND ${claim}`).bind(type,id,token),
+    env.DB.prepare(`UPDATE mobile_bridge_receipts SET status='claimed' WHERE event_id=? AND ${claim}`).bind(receipt.event_id,token)
+  ];
+  if(type==='deposit')statements.push(env.DB.prepare(`UPDATE users SET balance_usd=COALESCE(balance_usd,0)+?/100.0,balance_bdt=COALESCE(balance_bdt,0)+?/100.0 WHERE user_id=? AND ${claim}`).bind(invoice.amount_cents,invoice.amount_minor,invoice.user_id,token));
+  await env.DB.batch(statements);
+  const won=await env.DB.prepare('SELECT token FROM mobile_payment_claims WHERE token=?').bind(token).first();
+  if(!won){
+    const other=await env.DB.prepare('SELECT invoice_type,invoice_id FROM mobile_payment_claims WHERE method=? AND trx_id=?').bind(invoice.method,invoice.trx_id).first();
+    if(other)return other.invoice_type===type&&Number(other.invoice_id)===Number(id)?'processing':'used';
+    return 'mismatch';
+  }
+  // Payment is durably claimed before any network delivery. A failed delivery must never charge again.
+  try{
+    if(type==='order'){
+      const order=await mobileInvoiceTarget(env,type,id);
+      await completeSuccessfulOrder(env,order,invoice.trx_id,invoice.user_id);
+    }else{
+      await sendMsg(env,invoice.user_id,`✅ <b>Payment verified!</b>\n\n${invoice.method==='bkash'?'bKash':'Nagad'} deposit #${id}\nWallet credited: <b>$${(invoice.amount_cents/100).toFixed(2)} USD</b>\nTrxID: <code>${escapeHtml(invoice.trx_id)}</code>`,[[{text:'Open Shop',callback_data:'shop'}]]);
+      await sendMsg(env,env.ADMIN_ID,`✅ ${invoice.method} deposit #${id} automatically credited $${(invoice.amount_cents/100).toFixed(2)}. User: ${invoice.user_id}`);
+    }
+  }catch{
+    if(type==='order'){
+      await env.DB.prepare("UPDATE orders SET status='paid_pending_delivery' WHERE id=? AND status='delivering'").bind(id).run();
+      await sendMsg(env,env.ADMIN_ID,`⚠️ Verified mobile payment for Order #${id} needs delivery review. Check provider history and local order records before retrying.`).catch(()=>{});
+      await sendMsg(env,invoice.user_id,`Payment verified for Order #${id}. Check My Orders or contact admin if delivery is missing. Do not pay again.`).catch(()=>{});
+    }
+    console.error('Verified mobile payment notification or delivery needs admin review');
+    // Never undo the claim/credit after a network failure. The ledger remains the source of truth.
+  }
+  await env.DB.prepare("DELETE FROM user_states WHERE user_id=? AND state='awaiting_mobile_receipt' AND data=?").bind(invoice.user_id,JSON.stringify({type,id:Number(id)})).run();
+  return 'completed';
+}
+
+async function resumeMobilePayments(env,method,trx) {
+  // On first deployment, the receiving phone may upload before bot migrations run.
+  const exists=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mobile_payment_invoices'").first();
+  if(!exists)return;
+  const {results}=await env.DB.prepare("SELECT invoice_type,invoice_id FROM mobile_payment_invoices WHERE method=? AND trx_id=? AND status='pending' AND submitted_at IS NOT NULL ORDER BY submitted_at,invoice_id LIMIT 20").bind(method,trx).all();
+  for(const row of results)await settleMobileInvoice(env,row.invoice_type,row.invoice_id);
 }

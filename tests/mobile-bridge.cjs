@@ -29,5 +29,5 @@ async function send(body=base,opts={}){let raw=JSON.stringify(body),ts=String(op
  assert.equal((await send({...base,eventId:'22222222-2222-4222-8222-222222222222'})).status,409);
  assert.equal(sql.prepare('SELECT status FROM mobile_bridge_receipts').get().status,'unverified_sms');
  assert.equal(sql.prepare('SELECT balance_usd FROM users').get().balance_usd,0);
- console.log('PASS: authenticated setup check, account mismatch and read-only handshake; bridge signature, timestamp, device/account binding, minimal payload, exact duplicate acknowledgement, conflict rejection; receipts never credit funds');
+ console.log('PASS: authenticated setup check, account mismatch and read-only handshake; bridge signature, timestamp, device/account binding, minimal payload, exact duplicate acknowledgement, conflict rejection; unmatched receipts never credit funds');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sql.close());
