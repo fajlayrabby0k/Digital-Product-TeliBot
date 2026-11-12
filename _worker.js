@@ -2851,6 +2851,20 @@ async function receiveMobileBridgeReceipt(request, env) {
   const sig=Uint8Array.from(signature.match(/../g),x=>parseInt(x,16));
   if(!await crypto.subtle.verify('HMAC',key,sig,new TextEncoder().encode(raw+ts)))return reply(401,{error:'unauthorized'});
   let b;try{b=JSON.parse(raw);}catch{return reply(400,{error:'invalid_json'});}
+  // Authenticated setup check: no receipt insertion, balance mutation or raw SMS.
+  if(b?.type==='check') {
+    if(b.deviceId!==env.MOBILE_BRIDGE_DEVICE_ID)return reply(403,{error:'device_mismatch'});
+    if(b.version!==1||Object.keys(b).some(k=>!['type','version','deviceId','bkashAccount','nagadAccount'].includes(k))||typeof b.bkashAccount!=='string'||typeof b.nagadAccount!=='string'||(!b.bkashAccount&&!b.nagadAccount))return reply(400,{error:'invalid_setup'});
+    try{
+      for(const method of ['bkash','nagad']) {
+        const number=b[method+'Account'];if(!number)continue;
+        if(!/^01[3-9][0-9]{8}$/.test(number))return reply(400,{error:'invalid_account'});
+        const setting=await env.DB.prepare('SELECT value FROM settings WHERE key=?').bind(method+'_num').first();
+        if(setting?.value!==number)return reply(409,{error:'receiving_account_mismatch'});
+      }
+      return reply(200,{connected:true,deviceId:b.deviceId});
+    }catch{return reply(503,{error:'bridge_storage_unavailable'});}
+  }
   const allowed=['version','eventId','deviceId','method','account','trxId','amountMinor','receivedAt','paidAt'];
   if(!b||Array.isArray(b)||Object.keys(b).some(k=>!allowed.includes(k))||b.version!==1||b.deviceId!==env.MOBILE_BRIDGE_DEVICE_ID||!['bkash','nagad'].includes(b.method)||!/^[a-f0-9-]{36}$/.test(b.eventId||'')||!/^[A-Z0-9]{6,40}$/.test(b.trxId||'')||typeof b.account!=='string'||!Number.isSafeInteger(b.amountMinor)||b.amountMinor<=0||b.amountMinor>100000000||!Number.isSafeInteger(b.receivedAt)||b.receivedAt>Date.now()+60000||b.receivedAt<Date.now()-86400000||!Number.isSafeInteger(b.paidAt)||b.paidAt>b.receivedAt+300000||b.paidAt<b.receivedAt-86400000)return reply(400,{error:'invalid_receipt'});
   try{

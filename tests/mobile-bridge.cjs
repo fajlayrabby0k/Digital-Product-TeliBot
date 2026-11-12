@@ -6,6 +6,15 @@ const c=vm.createContext({console,TextEncoder,TextDecoder,URL,Response,crypto:we
 const env={DB,MOBILE_BRIDGE_SECRET:'a'.repeat(64),MOBILE_BRIDGE_DEVICE_ID:'test-device'},base={version:1,eventId:'11111111-1111-4111-8111-111111111111',deviceId:'test-device',method:'bkash',account:'01712345678',trxId:'TEST123456',amountMinor:50000,receivedAt:Date.now(),paidAt:Date.now()};
 async function send(body=base,opts={}){let raw=JSON.stringify(body),ts=String(opts.ts||Math.floor(Date.now()/1000)),signature=createHmac('sha256',opts.key||env.MOBILE_BRIDGE_SECRET).update(raw+ts).digest('hex');return c.receive(new Request('https://example.test/api/mobile-receipt',{method:'POST',body:raw,headers:{'X-Timestamp':ts,'X-Signature':signature}}),opts.env||env);}
 (async()=>{
+ const check={version:1,type:'check',deviceId:'test-device',bkashAccount:'01712345678',nagadAccount:''};
+ assert.equal((await send(check,{key:'wrong'})).status,401);
+ assert.equal((await send({...check,deviceId:'other'})).status,403);
+ assert.equal((await send({...check,bkashAccount:'01912345678'})).status,409);
+ assert.equal((await send({...check,bkashAccount:''})).status,400);
+ assert.equal((await send({...check,nagadAccount:123})).status,400);
+ assert.equal((await send({...check,rawSms:'private'})).status,400);
+ const checked=await send(check);assert.equal(checked.status,200);assert.deepEqual(await checked.json(),{connected:true,deviceId:'test-device'});
+ assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='mobile_bridge_receipts'").get().n,0);
  assert.equal((await send(base,{env:{DB}})).status,503);
  assert.equal((await send(base,{key:'wrong'})).status,401);
  assert.equal((await send(base,{ts:Math.floor(Date.now()/1000)-600})).status,401);
@@ -20,5 +29,5 @@ async function send(body=base,opts={}){let raw=JSON.stringify(body),ts=String(op
  assert.equal((await send({...base,eventId:'22222222-2222-4222-8222-222222222222'})).status,409);
  assert.equal(sql.prepare('SELECT status FROM mobile_bridge_receipts').get().status,'unverified_sms');
  assert.equal(sql.prepare('SELECT balance_usd FROM users').get().balance_usd,0);
- console.log('PASS: bridge signature, timestamp, device/account binding, minimal payload, exact duplicate acknowledgement, conflict rejection; receipts never credit funds');
+ console.log('PASS: authenticated setup check, account mismatch and read-only handshake; bridge signature, timestamp, device/account binding, minimal payload, exact duplicate acknowledgement, conflict rejection; receipts never credit funds');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sql.close());

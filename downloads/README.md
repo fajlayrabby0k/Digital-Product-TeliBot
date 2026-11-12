@@ -1,11 +1,15 @@
 # Android APK download
 
-[Download TeliBot Receipt Bridge v0.1 APK](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.1.apk)
+## Latest: v0.2 — সহজ সেটআপ
 
-Android 8+; approximately 21 KB. On the APK's GitHub page, use **Download raw file** to download it to your phone.
+[Download TeliBot Receipt Bridge v0.2 APK](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.2.apk)
 
-[Setup and source documentation](../android-bridge/README.md) · [SHA-256 checksum](telibot-receipt-bridge-v0.1.sha256)
+Android 8+. Bengali four-step setup, default bot URL/senders, automatic private key generation, copy buttons, authenticated connection test and clear status/errors. Update over v0.1 without uninstalling to retain the existing key/Device ID.
 
-This folder contains a prebuilt download only; the bot does not import or execute it. No signing keystore, password, API key or device credentials are included.
+[সহজ সেটআপ নির্দেশনা](../android-bridge/README.md) · [SHA-256 checksum](telibot-receipt-bridge-v0.2.sha256)
 
-Forwarding defaults OFF. Supports the supplied bKash/Nagad receipt formats; Rocket is not enabled. This enrollment build stores unverified receipt evidence and does not automatically credit balances or deliver orders. Live Android phone testing is still required.
+On GitHub's APK page, choose **Download raw file**. This folder contains downloads only; the bot does not import/execute APKs. No signing keystore, password, API key or device credentials are included.
+
+Forwarding starts OFF; supports supplied bKash/Nagad receipts. Rocket is disabled. This bridge records `unverified_sms` evidence and does not automatically credit balances or deliver orders. Live phone testing remains necessary.
+
+Older v0.1 APK is kept for history; install v0.2.
