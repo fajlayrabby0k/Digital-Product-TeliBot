@@ -1,0 +1,28 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,salesReportPeriod,showAdminSalesReport};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);
+ db.prepare("INSERT INTO users(user_id,username) VALUES(1,'@admin')").run();
+ const start=JSON.parse(JSON.stringify(c.api.salesReportPeriod('today',Date.parse('2026-11-14T19:00:00Z'))));assert.equal(start.start,'2026-11-14T18:00:00.000Z');assert.equal(c.api.salesReportPeriod('month',Date.parse('2026-11-01T00:00:00Z')).start,'2026-10-31T18:00:00.000Z');
+ db.prepare("UPDATE products SET is_external=1,cost_price_usd=2 WHERE id=1").run();
+ const add=(status,price,qty=1,product=1)=>db.prepare("INSERT INTO orders(user_id,product_id,quantity,payment_method,amount_usd,status) VALUES(1,?,?,'WALLET',?,?)").run(product,qty,price,status).lastInsertRowid;
+ const first=add('completed',10,2);assert.equal(db.prepare('SELECT provider_unit_cost_usd FROM orders WHERE id=?').get(first).provider_unit_cost_usd,2);
+ db.prepare('UPDATE products SET cost_price_usd=9 WHERE id=1').run();assert.equal(db.prepare('SELECT provider_unit_cost_usd FROM orders WHERE id=?').get(first).provider_unit_cost_usd,2);
+ add('pending',100);add('refunded',200);add('paid_pending_delivery',300);add('completed',3,1,2);
+ const old=add('completed',8);db.prepare('UPDATE orders SET sale_origin=NULL,provider_unit_cost_usd=NULL WHERE id=?').run(old);
+ db.prepare("INSERT INTO deposits(user_id,method,amount_usd,status) VALUES(1,'BINANCE',500,'completed')").run();
+ await cb('adm_sales_all');assert(last().text.includes('Total sales: <b>$21.00</b>'));assert(last().text.includes('Gross profit: <b>$6.00</b>'));assert(last().text.includes('Recorded provider cost: <b>$4.00</b>'));assert(last().text.includes('API sales: $10.00'));assert(last().text.includes('Local product sales: $3.00'));assert(last().text.includes('history: <b>1</b>'));assert(buttons().some(b=>b.callback_data==='adm_sales_month'));
+ const expired=add('completed',99);db.prepare("UPDATE orders SET created_at='2000-01-01 00:00:00' WHERE id=?").run(expired);await cb('adm_sales_today');assert(last().text.includes('Total sales: <b>$21.00</b>'));
+ await cb('adm_sales_month');assert(last().text.includes('This Month'));assert(last().text.includes('Total sales: <b>$21.00</b>'));
+ const future=add('completed',500);db.prepare("UPDATE orders SET created_at='2099-01-01 00:00:00' WHERE id=?").run(future);await cb('adm_sales_all');assert(last().text.includes('Total sales: <b>$120.00</b>'));
+ const count=messages.length;await c.api.showAdminSalesReport(env,99,'all');assert.equal(messages.length,count);
+ const before=db.prepare('SELECT SUM(amount_usd) AS n FROM orders').get().n;await cb('adm_sales_today',99);assert(!messages.slice(count).some(m=>m.text?.includes('Total sales:')));assert.equal(db.prepare('SELECT SUM(amount_usd) AS n FROM orders').get().n,before);
+ await c.api.ensureDbReady(DB,true);assert.equal(db.prepare('SELECT provider_unit_cost_usd FROM orders WHERE id=?').get(first).provider_unit_cost_usd,2);
+ console.log('PASS: Dhaka day/month boundaries, cost snapshots and price changes, completed-only sales, quantity cost/profit, unknown/local costs, deposits/refunds excluded, admin access and repeated migration');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
