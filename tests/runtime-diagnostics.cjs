@@ -22,7 +22,7 @@ const env={DB,ADMIN_ID:1,BOT_TOKEN:'fixture-bot-secret'},balance=()=>db.prepare(
  const before=messages.length;await c.api.processBotUpdate({message:{chat:{id:99},text:'/diagnostics'}},env,'https://bot.test');assert.equal(messages.length,before);
  await c.api.processBotUpdate({message:{chat:{id:1},text:'/diagnostics'}},env,'https://bot.test');assert(messages.at(-1).text.includes('Provider /me: HTTP'));assert(messages.at(-1).text.includes(error.reference));assert(calls.every(x=>x.method==='GET'));
  db.exec('ALTER TABLE orders DROP COLUMN provider_error');await c.api.sendOrderDiagnostics(env,1);assert(messages.at(-1).text.includes('missing columns: provider_error'));assert(messages.every(m=>!m.text?.includes('fixture-provider-key')&&!m.text?.includes('fixture-bot-secret')));
- const response=await c.api.worker.fetch({url:'https://bot.test/api/health'},env);assert((await response.json()).build.includes('diagnostics'));
+ const response=await c.api.worker.fetch({url:'https://bot.test/api/health'},env);const health=await response.json();assert.equal(typeof health.build,'string');assert.deepEqual(health.configured,{database:true,telegram:true,admin:true});
  await assert.rejects(()=>c.api.ensureDbReady({prepare(){throw Error('database unavailable');}},true),/database unavailable/);
  console.log('PASS: silent checkout exceptions reach customer/admin and persist references; secrets redacted; admin-only diagnostics survives missing columns and stale handlers, makes no purchase; migration failures propagate; public build check');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-diagnostics-1";
+const BOT_BUILD="2026-11-14-checkout-preview-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1520,7 +1520,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (data.startsWith("prod_")) { await sendProductDetailView(env, chatId, data.replace("prod_", ""), messageId); return; }
     if (data.startsWith("buynow_")) {
       const parts = data.replace("buynow_", "").split("_");
-      await sendOrderPreview(env, chatId, parts[0], parseInt(parts[1]) || 1, messageId);
+      await sendOrderPreview(env, chatId, parts[0], parseInt(parts[1]) || 1);
       return;
     }
     if (data.startsWith("qty_")) {
@@ -2746,7 +2746,8 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null, 
 async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId = null) {
   try {
     let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
-    if (!prod) return;
+    if (!prod){await sendMsg(env,chatId,'This product is no longer available. Open /shop again.');return;}
+    orderStage(env,'preview.live_stock');
     if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod, false);
     if (!await checkExternalStock(env, chatId, prod, quantity)) return;
 
@@ -2769,7 +2770,7 @@ async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId
       `💼 Total: <b>$${totalPrice.toFixed(2)} USD</b> (≈ ৳${totalBdt} BDT)\n` +
       `👛 Wallet Balance: <b>$${userBal.toFixed(2)} USD</b>\n\n` +
       (hasEnoughBal
-        ? `✅ <b>Wallet balance is sufficient for this order!</b>`
+        ? `✅ <b>Wallet balance is sufficient.</b>\nTap <b>Wallet Payment</b> below to confirm the purchase.`
         : `⚠️ <b>Need $${diff.toFixed(2)} USD more in your wallet to pay with balance.</b>\nChoose Direct Payment or Wallet Payment below:`);
 
     // Keypad for 1-9 & Custom Quantity
@@ -2804,10 +2805,12 @@ async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId
       const res = await editMsg(env, chatId, editMessageId, previewText, keypad);
       if (res && res.ok) return res;
     }
-    return await sendMsg(env, chatId, previewText, keypad);
+    orderStage(env,'preview.send');
+    const sent=await sendMsg(env,chatId,previewText,keypad);
+    if(!sent?.ok)throw new Error('Could not send order preview: '+(sent?.description||sent?.error||'Telegram rejected the message'));
+    return sent;
   } catch (err) {
-    console.error("sendOrderPreview error:", err);
-    await sendMsg(env, chatId, `⚠️ Error loading order preview: ${escapeHtml(err.message)}`);
+    throw err; // Report through the authenticated webhook error handler, including admin diagnostics.
   }
 }
 
@@ -3170,6 +3173,8 @@ async function sendOrderDiagnostics(env,chatId){
     const names=new Set(columns.map(x=>x.name));const needed=['provider_request_id','provider_error','provider_order_id','provider_retry_at','delivery_data'];
     const missing=needed.filter(x=>!names.has(x));
     report+='Database: '+(missing.length?'missing columns: '+missing.join(', '):'order columns OK')+'\n';
+    const localWallet=await env.DB.prepare('SELECT balance_usd FROM users WHERE user_id=?').bind(chatId).first();
+    report+='This bot wallet (your account): '+(localWallet?Number(localWallet.balance_usd||0).toFixed(2)+' USD':'not registered; send /start')+'\n';
     const key=await getSetting(env,'external_api_key','');let base=String(await getSetting(env,'external_api_url','')).trim().replace(/\/+$/,'');if(base.includes('/api/reseller'))base=base.split('/api/reseller')[0];
     report+='API key: '+(key?'configured':'NOT SET')+'\n';
     if(key&&base){
