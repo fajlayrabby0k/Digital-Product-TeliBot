@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-checkout-preview-1";
+const BOT_BUILD="2026-11-14-legacy-preorders-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-diagnostics-1";
+const DB_SCHEMA_VERSION = "2026-11-legacy-preorders-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -173,6 +173,15 @@ async function initializeDatabase(db, force) {
     else for (const q of schema) await db.prepare(q).run();
 
     const alters = [
+      // Historical preorder tables stored product names without a numeric product_id.
+      // Keep those rows intact and unlinked; never guess a product/account for an old request.
+      "ALTER TABLE preorders ADD COLUMN username TEXT DEFAULT NULL;",
+      "ALTER TABLE preorders ADD COLUMN product_name TEXT DEFAULT NULL;",
+      "ALTER TABLE preorders ADD COLUMN created_at TEXT DEFAULT NULL;",
+      "ALTER TABLE preorders ADD COLUMN product_id INTEGER DEFAULT NULL;",
+      "ALTER TABLE preorders ADD COLUMN user_id INTEGER DEFAULT NULL;",
+      "ALTER TABLE preorders ADD COLUMN status TEXT DEFAULT 'pending';",
+      "ALTER TABLE orders ADD COLUMN product_id INTEGER DEFAULT NULL;",
       "ALTER TABLE users ADD COLUMN balance_usd REAL DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN balance_bdt REAL DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN total_spent_usd REAL DEFAULT 0;",
@@ -1503,7 +1512,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (prod) {
         const existingPo = await env.DB.prepare("SELECT id FROM preorders WHERE user_id = ? AND product_id = ? AND status = 'pending'").bind(chatId, prodId).first();
-        if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, status) VALUES (?, ?, ?, 'pending')").bind(chatId, username, prodId).run();
+        if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, product_name, status, created_at) VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)").bind(chatId, username, prodId, prod.name).run();
         await editMsg(env, chatId, messageId, `⏳ <b>Pre-Order Confirmed!</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your pre-order is registered! As soon as new stock is added or synced via API, you will receive an instant notification with a direct purchase link. ❤️`, [
           [{ text: "🛒 Continue Shopping", callback_data: "shop" }],
           [{ text: "🏠 Main Menu", callback_data: "home" }]
@@ -3173,6 +3182,7 @@ async function sendOrderDiagnostics(env,chatId){
     const names=new Set(columns.map(x=>x.name));const needed=['provider_request_id','provider_error','provider_order_id','provider_retry_at','delivery_data'];
     const missing=needed.filter(x=>!names.has(x));
     report+='Database: '+(missing.length?'missing columns: '+missing.join(', '):'order columns OK')+'\n';
+    for(const [table,required] of [['preorders',['id','user_id','product_id','status']],['inventory',['id','product_id','order_id','is_sold']]]){const {results:info}=await env.DB.prepare(`PRAGMA table_info(${table})`).all();const have=new Set(info.map(c=>c.name));const absent=required.filter(c=>!have.has(c));report+=table+': '+(absent.length?'missing '+absent.join(', '):'columns OK')+'\n';}
     const localWallet=await env.DB.prepare('SELECT balance_usd FROM users WHERE user_id=?').bind(chatId).first();
     report+='This bot wallet (your account): '+(localWallet?Number(localWallet.balance_usd||0).toFixed(2)+' USD':'not registered; send /start')+'\n';
     const key=await getSetting(env,'external_api_key','');let base=String(await getSetting(env,'external_api_url','')).trim().replace(/\/+$/,'');if(base.includes('/api/reseller'))base=base.split('/api/reseller')[0];
