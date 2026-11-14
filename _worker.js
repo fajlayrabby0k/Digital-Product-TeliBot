@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-user-management-1";
+const BOT_BUILD="2026-11-14-sms-diagnostics-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3206,6 +3206,7 @@ async function processBotUpdate(update,env,origin,ctx){
 async function sendOrderDiagnostics(env,chatId){
   if(String(chatId)!==String(env.ADMIN_ID))return;
   let report=`🔍 <b>API / Order Diagnostics</b>\nBuild: <code>${BOT_BUILD}</code>\n`;
+  report+='Server time (Dhaka): '+new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Dhaka',dateStyle:'short',timeStyle:'medium',hour12:false}).format(Date.now())+'\n';
   try{
     const {results:columns}=await env.DB.prepare('PRAGMA table_info(orders)').all();
     const names=new Set(columns.map(x=>x.name));const needed=['provider_request_id','provider_error','provider_order_id','provider_retry_at','delivery_data'];
@@ -3234,6 +3235,14 @@ async function sendOrderDiagnostics(env,chatId){
     const {results:orders}=await env.DB.prepare(sql).all();report+='\n<b>Recent orders</b>\n';
     if(!orders.length)report+='No local orders found.\n';
     for(const order of orders)report+=`#${order.id}: ${escapeHtml(order.status)}${order.provider_error?' — '+escapeHtml(await safeDiagnostic(env,order.provider_error)):''}\n`;
+    report+='\n<b>Phone SMS receipts received by server</b>\n';
+    try{
+      const {results:receipts}=await env.DB.prepare('SELECT method,trx_id,amount_minor,status FROM mobile_bridge_receipts ORDER BY received_at DESC LIMIT 5').all();
+      if(!receipts.length)report+='No signed payment SMS records received.\n';
+      for(const r of receipts)report+=escapeHtml(r.method)+' · '+escapeHtml(r.trx_id)+' · '+(r.amount_minor/100).toFixed(2)+' BDT · '+escapeHtml(r.status)+'\n';
+      const {results:waiting}=await env.DB.prepare("SELECT invoice_type,invoice_id,method,trx_id FROM mobile_payment_invoices WHERE status='pending' AND trx_id IS NOT NULL ORDER BY submitted_at DESC LIMIT 3").all();
+      if(waiting.length){report+='Pending TrxID submissions:\n';for(const r of waiting)report+=r.invoice_type+' #'+r.invoice_id+' · '+r.method+' · '+r.trx_id+'\n';}
+    }catch{report+='SMS tables not initialized; send /start.\n';}
     await ensureDiagnosticTable(env.DB);const {results:errors}=await env.DB.prepare('SELECT reference,stage,detail FROM bot_runtime_errors ORDER BY created_at DESC,rowid DESC LIMIT 3').all();
     if(errors.length){report+='\n<b>Recent runtime errors</b>\n';for(const error of errors)report+=`${error.reference}: ${escapeHtml(error.stage)} — ${escapeHtml(await safeDiagnostic(env,error.detail))}\n`;}
   }catch(error){report+='\nDatabase/configuration failure: '+escapeHtml(await safeDiagnostic(env,error?.message));}

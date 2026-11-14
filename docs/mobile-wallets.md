@@ -51,3 +51,5 @@ ORDER BY created_at DESC LIMIT 20;
 ## Payment windows
 
 bKash/Nagad invoices allow payment and first TrxID submission within **60 minutes of invoice creation**. Pending invoices previously issued with a 10-minute window are extended to 60 minutes by the schema migration. A timely submission can still settle when its SMS arrives late. Rocket remains manual, with a 60-minute receipt-submission window. Binance Pay Order IDs and BEP20 TxHashes must be submitted within **10 minutes of payment**; BEP20 still requires 12 confirmations. Expired paid transactions require admin review; never ask the customer to pay twice.
+
+Missing-SMS diagnostics: Android v0.6 reports capture/upload stages and keeps failed receipts while sending other pending items. Server `/diagnostics` now lists recent signed receipt metadata and waiting transaction submissions (admin only), without raw SMS/OTP/credentials or automatic balance changes. A missing receipt must be traced on both sides; do not repeatedly ask the customer to pay again.

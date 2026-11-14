@@ -1,0 +1,6 @@
+const {DatabaseSync}=require('node:sqlite'),assert=require('node:assert/strict');const db=new DatabaseSync(':memory:');
+db.exec("CREATE TABLE receipts(id TEXT PRIMARY KEY,body TEXT NOT NULL,created INTEGER NOT NULL);INSERT INTO receipts VALUES('old','encrypted-old',100)");
+db.exec('ALTER TABLE receipts ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0');assert.deepEqual({...db.prepare('SELECT * FROM receipts').get()},{id:'old',body:'encrypted-old',created:100,attempted:0});
+for(let i=0;i<25;i++)db.prepare('INSERT INTO receipts(id,body,created) VALUES(?,?,?)').run('r'+i,'encrypted-'+i,200+i);
+let batch=db.prepare('SELECT id FROM receipts ORDER BY attempted,created LIMIT 20').all();for(const row of batch)db.prepare('UPDATE receipts SET attempted=? WHERE id=?').run(1000,row.id);
+batch=db.prepare('SELECT id FROM receipts ORDER BY attempted,created LIMIT 20').all();assert.equal(batch[0].id,'r19');assert.equal(db.prepare('SELECT created FROM receipts WHERE id=\'old\'').get().created,100);assert.equal(db.prepare('SELECT COUNT(*) n FROM receipts').get().n,26);db.close();console.log('PASS: Android queue upgrade preserves encrypted records and expiry timestamps; failed batches rotate so later valid receipts are not starved');

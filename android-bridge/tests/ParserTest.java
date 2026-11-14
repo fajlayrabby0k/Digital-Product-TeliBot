@@ -15,6 +15,7 @@ public class ParserTest {
  check(ReceiptParser.matchesSender("nagad","NAGAD",null));check(ReceiptParser.matchesSender("nagad","Nagad",""));
  check(!ReceiptParser.matchesSender("bkash","01800000000","bKash"));check(!ReceiptParser.matchesSender("bkash","NAGAD","bKash"));
  check(!ReceiptParser.matchesSender("nagad","01800000000","01800000000"));check(!ReceiptParser.matchesSender("rocket","bKash","bKash"));
+ ReceiptParser.Receipt latest=ReceiptParser.parse(withRef.replace("13.00","26.00").replace("TEST123456","TEST987654").replace("14:18","14:56"),"bkash");check(latest!=null&&latest.minor==2600&&latest.trx.equals("TEST987654"));
  ReceiptParser.Receipt referenced=ReceiptParser.parse(withRef,"bkash");check(referenced!=null&&referenced.minor==1300&&referenced.trx.equals("TEST123456"));
  check(ReceiptParser.parse(withRef.replace("Ref 2.","Ref Store 123."),"bkash").minor==1300);
  for(String rejected:new String[]{withRef.replace("Ref 2.","Ref 2"),withRef.replace("received","sent"),withRef.replace("TrxID TEST123456","TrxID BAD")})check(ReceiptParser.parse(rejected,"bkash")==null);

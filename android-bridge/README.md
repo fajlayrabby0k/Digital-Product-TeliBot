@@ -1,6 +1,6 @@
-# TeliBot Receipt Bridge v0.5 — সহজ সেটআপ
+# TeliBot Receipt Bridge v0.6 — সহজ সেটআপ
 
-[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.5.apk)
+[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.6.apk)
 
 Android 8+। পুরোনো v0.1 ইনস্টল থাকলে তার ওপর Update করুন; Uninstall করার দরকার নেই। একই release certificate ব্যবহার করা হয়েছে; আগের Device ID ও encrypted secret রাখা হবে। Uninstall করলে বা Clear data করলে নতুন চাবি/ID তৈরি হবে এবং Cloudflare-এ আবার দিতে হবে।
 
@@ -99,3 +99,16 @@ Based on the supplied phone screenshots, bKash sender is `bKash` and Nagad is `N
 Both incoming-receipt templates accept the reference field being present or absent; reference content (numbers, names, Bangla text, N/A, punctuation, etc., up to the bounded receipt-template length) is ignored and never uploaded. Reference words like “payment”, “sent” or “OTP” no longer make an otherwise complete incoming receipt fail. Actual OTP-only/outgoing messages are still rejected by full-message incoming-receipt matching. No reference value is used to identify a payment: amount, transaction ID, paid time and receiving account are matched by the server as before. Company sender allowlisting is not independent provider settlement proof.
 
 Install v0.5 as an update; same signing key, settings, device ID, permissions and server protocol. No additional permissions/inbox reading. Historical SMS ignored before the update is not automatically recovered. Java tests cover default senders, case differences, ordinary-number/cross-provider rejection, optional/varied references, and unchanged receipt amount/transaction/date extraction. Real Android reception/forwarding still needs a live phone check.
+
+
+## v0.6 — diagnose missing SMS records
+
+The reported 26 Tk bKash receipt with Ref 2 matches the parser; a pending count of 0 alone does not distinguish missing capture, an old/stale status display or a completed/rejected upload. v0.6 adds local status timestamps (Asia/Dhaka), configured-method presence, actual permission status, current encrypted queue count, last matching-company SMS result and last upload outcome. It refreshes on resume and via **অ্যাপের রিপোর্ট দেখুন / Refresh**. **পরীক্ষার রিপোর্ট কপি** copies these diagnostics only: no signing key, device ID, account numbers, raw SMS, OTP or receipt content. No extra permissions or inbox access.
+
+Receiver statuses distinguish forwarding OFF, format mismatch, phone/SMS time mismatch, missing receiving number, queue capacity and storage failure. Status metadata contains only the known method and fixed explanatory strings; unmatched ordinary senders are not logged. Existing receipts from older versions do not acquire historical capture logs retrospectively.
+
+Uploader reports HTTP/signature/account/conflict/connection errors without logging payloads. A failed record stays encrypted in the queue; the batch continues to other records, preventing a bad earlier receipt from blocking all subsequent payments. Explicit server acknowledgement with the same event ID is still required before deletion. Queue expiry/capacity remain 24 hours / 200 records. `QueueTest.java` verifies continuation, retained failures and cancellation; `ParserTest.java` covers the reported format and existing sender/reference rules. Build/signature verification does not replace live Android reception testing.
+
+For this issue: update over the installed app; ensure the receiving bKash number is saved and forwarding ON. Do not edit/delete settings or clear pending records while diagnosing. Tap **অন্য সেটিং / পরীক্ষা → Pending রেকর্ড আবার পাঠান**, wait a few seconds, then **পরীক্ষার রিপোর্ট কপি**. After server deployment, `/diagnostics` shows the latest 5 signed SMS receipt records and last 3 waiting TrxID submissions. Compare the same transaction across phone and server reports before making any further payment. If an old SMS was never captured, updating still cannot read it from the inbox.
+
+Queue database v2 adds only an attempted-time column; existing encrypted bodies, IDs and creation/expiry times are retained. Retry batches prioritize unattempted/older attempts, so 20 bad records cannot permanently starve later valid receipts. The main screen has **অপেক্ষার রেকর্ড এখন পাঠান**; no new payment is needed to retry an existing queued record. `tests/android-queue-migration.cjs` verifies the migration/ordering with SQLite.
