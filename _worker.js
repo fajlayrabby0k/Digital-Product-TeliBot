@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-sales-reports-1";
+const BOT_BUILD="2026-11-14-sales-periods-2";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1418,7 +1418,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await env.DB.prepare('UPDATE users SET username=?,first_name=? WHERE user_id=?').bind(username,firstName,chatId).run();
       user={...user,username,first_name:firstName};
     }
-    if(/^adm_sales_(today|month|all)$/.test(data)){await showAdminSalesReport(env,chatId,data.slice(10),messageId);return;}
+    if(/^adm_sales_(today|week|days30|month|all)$/.test(data)){await showAdminSalesReport(env,chatId,data.slice(10),messageId);return;}
     if(await handlePricingCallback(env,chatId,data,messageId))return;
     if(await handleAdminUserCallback(env,chatId,data,messageId))return;
 
@@ -3491,22 +3491,23 @@ async function showPricingProducts(env,chatId,page=0,messageId=null){
 
 function salesReportPeriod(period,now=Date.now()){
   const local=new Date(now+6*3600000),year=local.getUTCFullYear(),month=local.getUTCMonth(),day=local.getUTCDate();
-  const start=period==='all'?null:new Date(Date.UTC(year,month,period==='month'?1:day)-6*3600000).toISOString();
-  return {start,end:new Date(now).toISOString(),label:period==='all'?'All Time':period==='month'?'This Month':'Today'};
+  const days=period==='week'?7:period==='days30'?30:1;
+  const start=period==='all'?null:new Date(Date.UTC(year,month,period==='month'?1:day-days+1)-6*3600000).toISOString();
+  return {start,end:new Date(now).toISOString(),label:period==='all'?'All Time':period==='month'?'This Month':period==='week'?'Last 7 Days':period==='days30'?'Last 30 Days':'Today'};
 }
 async function showAdminSalesReport(env,chatId,period='today',messageId=null){
   if(!adminUserAccess(env,chatId))return;
-  if(!['today','month','all'].includes(period))period='today';
+  if(!['today','week','days30','month','all'].includes(period))period='today';
   const range=salesReportPeriod(period),filter=range.start?' AND julianday(created_at)>=julianday(?)':'',args=range.start?[range.start,range.end]:[range.end];
   const row=await env.DB.prepare(`SELECT COUNT(*) AS completed,COALESCE(SUM(quantity),0) AS items,COALESCE(SUM(amount_usd),0) AS revenue,
     COALESCE(SUM(CASE WHEN sale_origin='api' THEN amount_usd ELSE 0 END),0) AS api_revenue,
     COALESCE(SUM(CASE WHEN sale_origin='local' THEN amount_usd ELSE 0 END),0) AS local_revenue,
-    COALESCE(SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN provider_unit_cost_usd*quantity ELSE 0 END),0) AS known_cost,
-    COALESCE(SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN amount_usd-provider_unit_cost_usd*quantity ELSE 0 END),0) AS gross_profit,
+    COALESCE(SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN ROUND(provider_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS known_cost,
+    COALESCE(SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN ROUND(amount_usd*100)-ROUND(provider_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS gross_profit,
     SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN 1 ELSE 0 END) AS costed,
     SUM(CASE WHEN sale_origin IS NULL OR (sale_origin='api' AND provider_unit_cost_usd IS NULL) THEN 1 ELSE 0 END) AS unknown
     FROM orders WHERE status='completed'${filter} AND julianday(created_at)<=julianday(?)`).bind(...args).first();
-  const text=`📊 <b>Sales & Profit · ${range.label}</b>\nTimezone: Asia/Dhaka\nBy order creation date · completed orders only\n\n<b>Sales</b>\nCompleted orders: <b>${row?.completed||0}</b> · Items: <b>${row?.items||0}</b>\nTotal sales: <b>$${adminMoney(row?.revenue)}</b>\nAPI sales: $${adminMoney(row?.api_revenue)}\nLocal product sales: $${adminMoney(row?.local_revenue)}\n\n<b>API gross profit estimate</b>\nRecorded provider cost: <b>$${adminMoney(row?.known_cost)}</b>\nGross profit: <b>$${adminMoney(row?.gross_profit)}</b>\nCost recorded for ${row?.costed||0} completed API orders.\n\nOrders without origin/API cost history: <b>${row?.unknown||0}</b> (profit excluded). Local product costs are not recorded; local profit is excluded.\n\nCost is the supplier price saved when the order was created, not a confirmed supplier wallet debit. Payment fees, referral commissions and other expenses are excluded. Deposits are not sales.`;
-  const buttons=[[{text:'Today',callback_data:'adm_sales_today'},{text:'This Month',callback_data:'adm_sales_month'},{text:'All Time',callback_data:'adm_sales_all'}],[{text:'🔄 Refresh',callback_data:`adm_sales_${period}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]];
+  const text=`📊 <b>Sales & Profit · ${range.label}</b>\nTimezone: Asia/Dhaka\nBy order creation date · completed orders only\n\n<b>Sales</b>\nCompleted orders: <b>${row?.completed||0}</b> · Items: <b>${row?.items||0}</b>\nTotal sales: <b>$${adminMoney(row?.revenue)}</b>\nAPI sales: $${adminMoney(row?.api_revenue)}\nLocal product sales: $${adminMoney(row?.local_revenue)}\n\n<b>API gross profit estimate</b>\nRecorded provider cost: <b>$${adminMoney(row?.known_cost)}</b>\nGross profit: <b>$${adminMoney(row?.gross_profit)}</b>\nCost recorded for ${row?.costed||0} completed API orders.\nProfit = saved selling total − saved provider cost × quantity.\n\nOrders without origin/API cost history: <b>${row?.unknown||0}</b> (profit excluded). Local product costs are not recorded; local profit is excluded.\n\nCost is the supplier price saved when the order was created, not a confirmed supplier wallet debit. Payment fees, referral commissions and other expenses are excluded. Deposits are not sales.`;
+  const buttons=[[{text:'Today',callback_data:'adm_sales_today'},{text:'7 Days',callback_data:'adm_sales_week'},{text:'30 Days',callback_data:'adm_sales_days30'}],[{text:'This Month',callback_data:'adm_sales_month'},{text:'All Time',callback_data:'adm_sales_all'}],[{text:'🔄 Refresh',callback_data:`adm_sales_${period}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }

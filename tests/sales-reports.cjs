@@ -21,6 +21,18 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const expired=add('completed',99);db.prepare("UPDATE orders SET created_at='2000-01-01 00:00:00' WHERE id=?").run(expired);await cb('adm_sales_today');assert(last().text.includes('Total sales: <b>$21.00</b>'));
  await cb('adm_sales_month');assert(last().text.includes('This Month'));assert(last().text.includes('Total sales: <b>$21.00</b>'));
  const future=add('completed',500);db.prepare("UPDATE orders SET created_at='2099-01-01 00:00:00' WHERE id=?").run(future);await cb('adm_sales_all');assert(last().text.includes('Total sales: <b>$120.00</b>'));
+ assert.equal(c.api.salesReportPeriod('week',Date.parse('2026-11-14T19:00:00Z')).start,'2026-11-08T18:00:00.000Z');
+ assert.equal(c.api.salesReportPeriod('days30',Date.parse('2026-03-01T00:00:00Z')).start,'2026-01-30T18:00:00.000Z');
+ const week=c.api.salesReportPeriod('week'),thirty=c.api.salesReportPeriod('days30');
+ const dated=(amount,date)=>{const id=add('completed',amount);db.prepare('UPDATE orders SET created_at=? WHERE id=?').run(date,id);return id;};
+ const inside=dated(11,week.start),beforeWeek=dated(13,new Date(Date.parse(week.start)-1).toISOString());dated(17,new Date(Date.parse(thirty.start)-1).toISOString());
+ await cb('adm_sales_week');assert(last().text.includes('Last 7 Days'));assert(last().text.includes('Total sales: <b>$32.00</b>'));assert(buttons().some(b=>b.callback_data==='adm_sales_days30'));
+ await cb('adm_sales_days30');assert(last().text.includes('Last 30 Days'));assert(last().text.includes('Total sales: <b>$45.00</b>'));
+ // Both percentage and fixed-profit selling prices use immutable order totals and costs.
+ db.prepare('UPDATE products SET cost_price_usd=0.10 WHERE id=1').run();const percent=add('completed',0.36,3),fixed=add('completed',0.80,2);
+ db.prepare('UPDATE products SET cost_price_usd=50,price_usd=100 WHERE id=1').run();
+ assert.equal(db.prepare('SELECT ROUND(amount_usd*100)-ROUND(provider_unit_cost_usd*quantity*100) AS cents FROM orders WHERE id=?').get(percent).cents,6);
+ assert.equal(db.prepare('SELECT ROUND(amount_usd*100)-ROUND(provider_unit_cost_usd*quantity*100) AS cents FROM orders WHERE id=?').get(fixed).cents,60);
  const count=messages.length;await c.api.showAdminSalesReport(env,99,'all');assert.equal(messages.length,count);
  const before=db.prepare('SELECT SUM(amount_usd) AS n FROM orders').get().n;await cb('adm_sales_today',99);assert(!messages.slice(count).some(m=>m.text?.includes('Total sales:')));assert.equal(db.prepare('SELECT SUM(amount_usd) AS n FROM orders').get().n,before);
  await c.api.ensureDbReady(DB,true);assert.equal(db.prepare('SELECT provider_unit_cost_usd FROM orders WHERE id=?').get(first).provider_unit_cost_usd,2);
