@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-legacy-preorders-1";
+const BOT_BUILD="2026-11-14-diagnostic-command-2";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3157,7 +3157,7 @@ async function safeDiagnostic(env,value){
 async function ensureDiagnosticTable(db){await db.prepare('CREATE TABLE IF NOT EXISTS bot_runtime_errors(reference TEXT PRIMARY KEY,stage TEXT,chat_id TEXT,order_id INTEGER,detail TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)').run();}
 async function processBotUpdate(update,env,origin,ctx){
   const chatId=update.message?.chat?.id??update.callback_query?.message?.chat?.id;
-  const diagnosticCommand=/^\/diagnostics(?:@\w+)?\s*$/i.test(update.message?.text||'')||update.callback_query?.data==='adm_diagnostics';
+  const diagnosticCommand=/^\/diagnostics(?:@\w+)?\s*$/i.test(String(update.message?.text||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim())||update.callback_query?.data==='adm_diagnostics';
   const trace={stage:'database.initialize',orderId:null};const scoped={...env,__orderTrace:trace};
   try{
     if(diagnosticCommand){
