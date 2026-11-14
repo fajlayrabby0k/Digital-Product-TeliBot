@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-local-costs-1";
+const BOT_BUILD="2026-11-14-payment-dashboard-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-local-costs-1";
+const DB_SCHEMA_VERSION = "2026-11-payment-dashboard-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -153,6 +153,7 @@ async function initializeDatabase(db, force) {
       } catch (_) { /* First installation has no settings table yet. */ }
     }
     const schema = [
+      `CREATE TABLE IF NOT EXISTS payment_verification_events(invoice_type TEXT NOT NULL,invoice_id INTEGER NOT NULL,user_id INTEGER NOT NULL,method TEXT NOT NULL,trx_id TEXT,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 1,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(invoice_type,invoice_id));`,
       `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE NOT NULL, username TEXT, first_name TEXT, balance_usd REAL DEFAULT 0, balance_bdt REAL DEFAULT 0, referred_by INTEGER DEFAULT 0, total_referrals INTEGER DEFAULT 0, total_spent_usd REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, price_usd REAL NOT NULL, price_bdt REAL NOT NULL, is_active INTEGER DEFAULT 1, is_external INTEGER DEFAULT 0, external_id TEXT DEFAULT '', cost_price_usd REAL DEFAULT 0, custom_price_usd REAL DEFAULT 0, api_stock INTEGER DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, item_data TEXT NOT NULL, is_sold INTEGER DEFAULT 0, order_id INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
@@ -1007,6 +1008,7 @@ async function submitBinancePayment(env, chatId, type, invoice, receiptId) {
   }
   await sendMsg(env, chatId, "🔍 Verifying your Binance Pay payment…");
   const result = await verifyBinancePayOrder(env, receiptId, invoice.amount_usd || 0, { ...invoice, type });
+  await recordPaymentVerification(env,type,invoice.id,chatId,'BINANCE',receiptId,result.success?'verified':result.reason);
   if (!result.success) {
     await sendMsg(env, chatId, `⚠️ ${escapeHtml(result.message)}`, [[{ text: "❌ Cancel", callback_data: "binance_cancel" }]]);
     return;
@@ -1081,6 +1083,7 @@ async function submitBep20Payment(env, chatId, type, invoice, txHash) {
   }
   await sendMsg(env,chatId,'🔍 Verifying the BEP20 USDT transfer…');
   const result=await verifyBscUsdtTx(env,txHash,invoice.amount_usd||0,{...invoice,type});
+  await recordPaymentVerification(env,type,invoice.id,chatId,'BEP20',txHash,result.success?'verified':result.reason);
   if (!result.success) {
     await sendMsg(env,chatId,`⚠️ ${escapeHtml(result.message)}`,[[{text:'❌ Cancel',callback_data:'bep20_cancel'}]]);return;
   }
@@ -1423,6 +1426,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await env.DB.prepare('UPDATE users SET username=?,first_name=? WHERE user_id=?').bind(username,firstName,chatId).run();
       user={...user,username,first_name:firstName};
     }
+    if(await handlePaymentDashboardCallback(env,chatId,data,messageId))return;
     if(/^adm_sales_(today|week|days30|month|all)$/.test(data)){await showAdminSalesReport(env,chatId,data.slice(10),messageId);return;}
     const localCostAction=data.match(/^adm_local_cost_(\d+)$/);
     if(localCostAction){
@@ -2931,6 +2935,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
   const buttons = [
     [{text:'👥 Users / Find Customer',callback_data:'adm_users'}],
     [{text:'📊 Sales & Profit Reports',callback_data:'adm_sales_today'}],
+    [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
     [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'}],
     [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
     [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
@@ -3111,15 +3116,18 @@ async function submitMobilePayment(env,chatId,type,id,input) {
   }
   const trx=String(input||'').trim().toUpperCase();
   if(!(invoice.method==='bkash'?/^[A-Z0-9]{10}$/:/^[A-Z0-9]{8}$/).test(trx)){
+    await recordPaymentVerification(env,type,id,chatId,invoice.method,'','invalid_format');
     await sendMsg(env,chatId,'Enter only the Transaction ID from your payment receipt. Do not send an amount, PIN or OTP.');return;
   }
   // First submission must be within the invoice window. An existing submission may retry late SMS.
   if(Date.now()>invoice.expires_ms&&(!invoice.submitted_at||invoice.trx_id!==trx)){
+    await recordPaymentVerification(env,type,id,chatId,invoice.method,trx,'payment_expired');
     await sendMsg(env,chatId,'This payment window expired. If you paid, contact admin for review. Do not pay again.');return;
   }
   await env.DB.prepare("UPDATE mobile_payment_invoices SET trx_id=?,submitted_at=CASE WHEN trx_id=? AND submitted_at IS NOT NULL THEN submitted_at ELSE ? END WHERE invoice_type=? AND invoice_id=? AND user_id=? AND status='pending'")
     .bind(trx,trx,Date.now(),type,id,chatId).run();
   const outcome=await settleMobileInvoice(env,type,id);
+  await recordPaymentVerification(env,type,id,chatId,invoice.method,trx,['completed','processing'].includes(outcome)?'verified':outcome);
   if(outcome==='completed'||outcome==='processing'||outcome==='membership')return;
   const messages={missing:'Payment SMS has not arrived yet. Keep the receiving phone online. We will automatically check again when its SMS arrives. You can also tap Check Payment.',mismatch:'The received payment does not match this invoice (method, account, amount or payment time). Contact admin if you paid. Do not pay again.',used:'This transaction has already been used for another payment. Contact admin if you need help.',unavailable:'Automatic verification is not available right now. Keep your payment receipt and retry. Do not pay again.',maintenance:'Verification is paused for maintenance. Retry after the bot reopens. Do not pay again.',closed:'This payment is already processed or closed. Do not pay again.'};
   await sendMsg(env,chatId,`⏳ ${messages[outcome]||messages.unavailable}`,[[{text:'Check Payment',callback_data:`mobile_retry_${type}_${id}`}],[{text:'Enter Transaction ID',callback_data:`mobile_enter_${type}_${id}`}]]);
@@ -3571,4 +3579,48 @@ async function handleLocalProductText(env,chatId,text,state){
   if(!result[0].meta?.changes){await sendMsg(env,chatId,'Product draft was already saved or cancelled.');return true;}
   const info=localProfitInfo(draft.cost,value),id=result[0].meta.last_row_id;
   await sendMsg(env,chatId,`✅ <b>Product Added</b>\n${escapeHtml(name)}\n\nPurchase cost: <b>$${draft.cost.toFixed(2)}</b>\nSelling price: <b>$${value.toFixed(2)}</b>\nGross profit per item: <b>$${info.profit}</b>\nMarkup on cost: <b>${info.markup}</b>\n\nCompleted sales will appear in Sales & Profit Reports.`,[[{text:'Add Stock',callback_data:`adm_addstock_${id}`}],[{text:'Product',callback_data:`adm_prod_details_${id}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]]);return true;
+}
+
+
+async function recordPaymentVerification(env,type,id,userId,method,trx,reason){
+  if(!['order','deposit'].includes(type))return;
+  const code=/^[a-z_]{1,50}$/.test(String(reason))?String(reason):'unavailable';
+  try{await env.DB.prepare(`INSERT INTO payment_verification_events(invoice_type,invoice_id,user_id,method,trx_id,reason) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(invoice_type,invoice_id) DO UPDATE SET trx_id=excluded.trx_id,reason=excluded.reason,attempts=attempts+1,updated_at=CURRENT_TIMESTAMP`)
+    .bind(type,id,userId,String(method).slice(0,20),(/^[A-Za-z0-9]{6,100}$/.test(String(trx||''))?String(trx):''),code).run();}catch{console.error('Payment dashboard event could not be saved');}
+}
+function paymentDashboardSource(){return `(SELECT 'order' AS kind,id,user_id,payment_method AS method,amount_usd,amount_bdt,trx_id,status,created_at FROM orders WHERE UPPER(payment_method) NOT IN ('WALLET','REDEEM') UNION ALL SELECT 'deposit',id,user_id,method,amount_usd,amount_bdt,trx_id,status,created_at FROM deposits WHERE UPPER(method) NOT IN ('WALLET','REDEEM'))`;}
+function paymentDashboardReason(code){return ({verified:'Payment verified. Check invoice status for credit/delivery.',missing:'Receiving-phone SMS record has not arrived.',mismatch:'SMS method, receiving account, amount or time did not match.',used:'Transaction was already used.',already_used:'Payment or invoice was already submitted.',not_found:'Transaction was not found in the payment network/history.',rpc_unavailable:'BNB Smart Chain RPC is unavailable.',tx_failed:'Blockchain transaction failed or its hash did not match.',confirmations:'Waiting for 12 blockchain confirmations.',old_payment:'Payment predates the invoice.',recipient_mismatch:'Supported USDT transfer to the receiving wallet was not found.',unconfirmed:'Waiting for blockchain confirmations.',pending:'Blockchain transaction is pending.',amount_low:'Received amount is below the required amount.',amount_high:'Payment exceeds this method’s limit.',invalid_format:'Submitted transaction ID format is invalid.',invalid_invoice:'Invoice is not payable or its time is invalid.',invalid_payment:'Transaction is not an eligible incoming USDT payment.',payment_expired:'Payment was submitted outside the allowed time.',api_rejected:'Binance API rejected verification; check API permissions/access.',not_configured:'Payment verification credentials are missing.',manual_approval:'Automatic verification is disabled.',no_wallet:'Receiving wallet is not configured.',unavailable:'Verification service is unavailable; retry may be needed.',maintenance:'Verification is paused during maintenance.',membership:'Required channel/group membership is missing.',closed:'Invoice was already processed or closed.',claim_failed:'Payment could not be reserved; check for prior use.'})[code]||`Verification result: ${String(code||'No saved attempt').replace(/[^a-z_ ]/gi,'').slice(0,60)}`;}
+async function showPaymentDashboard(env,chatId,filter='pending',page=0,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  await clearAdminState(env,chatId);page=adminUserPage(page);
+  const from=`${paymentDashboardSource()} x LEFT JOIN payment_verification_events e ON e.invoice_type=x.kind AND e.invoice_id=x.id LEFT JOIN mobile_payment_invoices m ON m.invoice_type=x.kind AND m.invoice_id=x.id`;
+  const summary=await env.DB.prepare(`SELECT COUNT(*) AS total,SUM(CASE WHEN x.status='pending' THEN 1 ELSE 0 END) AS pending,SUM(CASE WHEN x.status IN ('paid_pending_delivery','delivering') THEN 1 ELSE 0 END) AS delivery,SUM(CASE WHEN x.status='completed' THEN 1 ELSE 0 END) AS completed FROM ${paymentDashboardSource()} x`).first();
+  const where=filter==='completed'?"x.status='completed'":filter==='delivery'?"x.status IN ('paid_pending_delivery','delivering')":filter==='submitted'?"x.status='pending' AND (NULLIF(x.trx_id,'') IS NOT NULL OR NULLIF(m.trx_id,'') IS NOT NULL OR e.invoice_id IS NOT NULL)":filter==='issues'?"x.status='pending' AND e.reason IS NOT NULL AND e.reason<>'verified'": "x.status='pending'";
+  const {results}=await env.DB.prepare(`SELECT x.*,COALESCE(NULLIF(e.trx_id,''),NULLIF(m.trx_id,''),NULLIF(x.trx_id,'')) AS submitted_trx,e.reason FROM ${from} WHERE ${where} ORDER BY x.created_at DESC,x.kind,x.id DESC LIMIT 11 OFFSET ?`).bind(page*10).all();
+  const titles={pending:'Pending',submitted:'IDs Submitted',issues:'Verification Issues',delivery:'Paid / Delivery Pending',completed:'Completed'};
+  const text=`💳 <b>Payment Dashboard</b>\n\nPending: <b>${summary?.pending||0}</b> · Completed: <b>${summary?.completed||0}</b>\nPaid / delivery pending: <b>${summary?.delivery||0}</b>\n\n<b>${titles[filter]||titles.pending}</b> · Page ${page+1}\n${results.length?'Choose a payment to inspect its status, submitted ID and last verification result.':'No payments in this list.'}\n\nPending instructions do not prove money was received. This dashboard does not approve, retry or charge payments.`;
+  const buttons=results.slice(0,10).map(x=>[{text:`${x.kind==='order'?'Order':'Deposit'} #${x.id} · ${x.method} · $${adminMoney(x.amount_usd)} · ${x.user_id}`,callback_data:`adm_paydetail_${x.kind}_${x.id}`}]);
+  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_paydash_${filter}_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_paydash_${filter}_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'Pending',callback_data:'adm_paydash_pending_0'},{text:'IDs Submitted',callback_data:'adm_paydash_submitted_0'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Completed',callback_data:'adm_paydash_completed_0'}],[{text:'Paid / Delivery Pending',callback_data:'adm_paydash_delivery_0'}],[{text:'🔄 Refresh',callback_data:`adm_paydash_${filter}_${page}`}],[{text:'Find Customer',callback_data:'adm_user_search'},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+function paymentDashboardTime(value){const ms=invoiceTimestamp(value);return Number.isFinite(ms)?new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Dhaka',dateStyle:'medium',timeStyle:'short'}).format(new Date(ms)):'Not recorded';}
+async function showPaymentDashboardDetail(env,chatId,type,id,messageId=null){
+  if(!adminUserAccess(env,chatId)||!['order','deposit'].includes(type))return;
+  const invoice=await env.DB.prepare(`SELECT * FROM ${paymentDashboardSource()} WHERE kind=? AND id=?`).bind(type,id).first();
+  if(!invoice){await sendMsg(env,chatId,'Payment not found.');return;}
+  const [event,mobile]=await Promise.all([env.DB.prepare('SELECT * FROM payment_verification_events WHERE invoice_type=? AND invoice_id=?').bind(type,id).first(),env.DB.prepare('SELECT * FROM mobile_payment_invoices WHERE invoice_type=? AND invoice_id=?').bind(type,id).first()]);
+  const receipt=event?.trx_id||mobile?.trx_id||invoice.trx_id||'Not submitted';
+  let result=invoice.status==='completed'?'Completed.':['paid_pending_delivery','delivering'].includes(invoice.status)?'Payment recorded; product delivery is pending.':event?paymentDashboardReason(event.reason):mobile?.trx_id?'Transaction ID saved; no verification result was recorded.':'No verification attempt recorded. Older attempts may predate this dashboard.';
+  if(mobile?.status==='paid'&&invoice.status==='pending')result='Payment matched by SMS; invoice processing needs review.';
+  const text=`💳 <b>${type==='order'?'Order':'Deposit'} #${invoice.id}</b>\n\nCustomer: <code>${invoice.user_id}</code>\nMethod: ${escapeHtml(invoice.method)}\nAmount: <b>$${adminMoney(invoice.amount_usd)}</b> · ${adminMoney(invoice.amount_bdt)} BDT\nStatus: <b>${escapeHtml(invoice.status)}</b>\nCreated: ${paymentDashboardTime(invoice.created_at)} (Dhaka)\n\nSubmitted ID: <code>${adminSnippet(receipt,100)}</code>\n\n<b>Last verification</b>\n${escapeHtml(result)}\nAttempts recorded: ${event?.attempts||0}\nLast attempt: ${paymentDashboardTime(event?.updated_at)} (Dhaka)${mobile?`\nSMS invoice: ${adminSnippet(mobile.status,20)}\nPayment window: ${Date.now()>mobile.expires_ms?'Ended (not proof of payment failure)':'Open'}`:''}`;
+  const buttons=[[adminUserProfileButton(invoice.user_id)],[{text:'🔄 Refresh',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'Payment Dashboard',callback_data:'adm_paydash_pending_0'}]];
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function handlePaymentDashboardCallback(env,chatId,data,messageId){
+  if(!adminUserAccess(env,chatId))return false;
+  let match=data.match(/^adm_paydash_(pending|submitted|issues|delivery|completed)_(\d+)$/);
+  if(match){await showPaymentDashboard(env,chatId,match[1],match[2],messageId);return true;}
+  match=data.match(/^adm_paydetail_(order|deposit)_(\d+)$/);if(match){await showPaymentDashboardDetail(env,chatId,match[1],match[2],messageId);return true;}return false;
 }
