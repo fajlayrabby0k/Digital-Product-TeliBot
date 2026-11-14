@@ -11,12 +11,6 @@ Open **Admin Panel → Custom Prices**. Below the product list, the current defa
 
 The default applies to API products that have no individual override. Changing it immediately recalculates those products using their stored provider costs. Settings and recalculated prices are saved in one database batch.
 
-## Apply one rule to all API products
-
-Below the list, choose **All Products: %** or **All Products: Fixed +USD**, then enter the value. The prompt explains that this replaces existing individual overrides. The new rule becomes the default for current and newly imported API products. Override removal, default settings and recalculated prices are saved atomically. Local products are unaffected.
-
-To keep individual rules, use the **Default** buttons instead.
-
 ## Set one product
 
 Open **Admin Panel → Custom Prices → product** (the product list has ten items per page):
