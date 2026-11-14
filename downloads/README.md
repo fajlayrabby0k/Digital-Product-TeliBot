@@ -1,19 +1,11 @@
 # Android APK download
 
-## Latest: v0.6 — সহজ সেটআপ
+## Latest: v0.7 — এক বাটনে সেভ ও চালু
 
-[Download TeliBot Receipt Bridge v0.6 APK](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.6.apk)
+[Download TeliBot Receipt Bridge v0.7 APK](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.7.apk)
 
-Android 8+. Bengali four-step setup, default bot URL/senders, automatic private key generation, copy buttons, authenticated connection test and clear status/errors. Update over v0.1 without uninstalling to retain the existing key/Device ID.
+Android 8+. Update over the installed app without uninstalling; existing keys/Device ID/queue retained. One Save-and-Start action, automatic SMS permission request, clear enabled-method/server status, offline capture, queue-safe settings, retry on app opening and persisted jobs after reboot. First-time setup and reports are separate from the simple daily-use screen.
 
-[সহজ সেটআপ নির্দেশনা](../android-bridge/README.md) · [SHA-256 checksum](telibot-receipt-bridge-v0.6.sha256)
+[সহজ সেটআপ নির্দেশনা](../android-bridge/README.md) · [SHA-256 checksum](telibot-receipt-bridge-v0.7.sha256)
 
-On GitHub's APK page, choose **Download raw file**. This folder contains downloads only; the bot does not import/execute APKs. No signing keystore, password, API key or device credentials are included.
-
-Forwarding starts OFF; supports supplied bKash/Nagad receipts. Rocket is disabled. The new bot code matches signed receipt evidence to user-submitted TrxIDs and snapshotted invoices for one-time credit/direct delivery. This is SMS-based verification, not provider API settlement confirmation. Live phone testing remains necessary.
-
-Older APKs remain for history. Update to v0.4: it fixes receipt detection for bKash SMS containing optional `Ref 2.` / other reference text. The old no-Ref format and Nagad remain supported. Install over the previous app without uninstalling; keys and settings are retained.
-
-v0.5 ignores optional reference contents in both supplied receipt templates: references are not matching keys or forwarded fields. Default company senders are bKash and NAGAD (case-insensitive), with ordinary mobile-number senders rejected. Incoming-receipt structure, exact amount/TrxID/date parsing and server-side invoice checks remain required.
-
-v0.6 shows capture/upload status and error reasons, refreshes the pending count on resume, and adds **পরীক্ষার রিপোর্ট কপি**. Rejected old queue records no longer prevent later valid records from being uploaded. Install as an update, preserve pending receipts/settings, and do not send another payment just to diagnose a missing receipt.
+Use **Download raw file** on GitHub. This folder contains downloads only; the bot does not execute APKs. No private signing keys/API credentials are included. Defaults bKash and NAGAD; optional reference fields ignored. Existing server protocol/settings remain compatible. No new inbox-reading permission; normal boot permission restores pending jobs. Live receiving-phone behavior still requires verification. Older APKs retained for history.

@@ -1,114 +1,57 @@
-# TeliBot Receipt Bridge v0.6 — সহজ সেটআপ
+# TeliBot Receipt Bridge v0.7 — সহজ ব্যবহার
 
-[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.6.apk)
+[APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.7.apk)
 
-Android 8+। পুরোনো v0.1 ইনস্টল থাকলে তার ওপর Update করুন; Uninstall করার দরকার নেই। একই release certificate ব্যবহার করা হয়েছে; আগের Device ID ও encrypted secret রাখা হবে। Uninstall করলে বা Clear data করলে নতুন চাবি/ID তৈরি হবে এবং Cloudflare-এ আবার দিতে হবে।
+Android 8+। আগের অ্যাপের ওপর **Update** করুন। Uninstall/Clear data করবেন না: একই signing certificate-এ update করলে চাবি, Device ID এবং encrypted pending queue থাকবে। Backend protocol অপরিবর্তিত; নতুন Cloudflare variable লাগে না।
 
-**বটের নতুন কোডে বিকাশ/নগদের SMS রেকর্ড ও ইউজারের TrxID মিলিয়ে অটো ব্যালেন্স যোগ/সরাসরি অর্ডার ডেলিভারি যুক্ত হয়েছে।** এটি receiving-phone evidence; provider API verification নয়, sender name-ও spoof হতে পারে। v0.2 অ্যাপও একই protocol-এ কাজ করবে; v0.3-তে পুরোনো “অটো ব্যালেন্স এখনো নেই” লেখাটি আপডেট হয়েছে।
+## আগে থেকেই সেটআপ থাকলে
 
-## আগে থেকেই দেওয়া আছে
+1. অ্যাপ খুলে **সেটআপ / নম্বর বদলান** থেকে নিজের টাকা পাওয়ার বিকাশ/নগদ নম্বর দেখুন। বিকাশ চালাতে বিকাশ নম্বর এবং নগদের জন্য নগদ নম্বর আলাদাভাবে লাগবে। বটের Admin → Payment Settings-এ একই নম্বর রাখুন। যে মাধ্যম ব্যবহার করবেন না, ফাঁকা রাখুন। SMS-এর “from” / “Sender” গ্রাহকের নম্বর; সেটি এখানে নয়।
+2. **সেভ করে চালু করুন / সংযোগ পরীক্ষা** চাপুন। SMS permission প্রয়োজন হলে অ্যাপ নিজেই চাইবে। Allow করলে শুরু হবে। আলাদা Save এবং Start করার দরকার নেই।
+3. মূল স্ক্রিনে **সক্রিয়: বিকাশ, নগদ** এবং **সার্ভার: শেষ সংযোগ পরীক্ষা সফল** দেখুন। শুধু নগদ লেখা থাকলে বিকাশের নম্বর সেট হয়নি। SMS সংগ্রহ চালু মানে server যাচাই সফল নয়; দুটি অবস্থা আলাদা দেখা যায়।
+4. নতুন কোম্পানির incoming payment SMS নিজে থেকে পাঠাবে। আগের queued রেকর্ড থাকলে app খোলার সময়ও retry করবে। প্রয়োজন হলে **অপেক্ষার রেকর্ড এখন পাঠান** চাপুন। নতুন করে টাকা পাঠিয়ে পরীক্ষা করবেন না।
 
-- আপনার বটের HTTPS ঠিকানা: `https://digital-product-telibot.pages.dev/api/mobile-receipt`।
-- বিকাশ sender: `bKash`; নগদ sender: `NAGAD` (বড়/ছোট অক্ষর সমস্যা নয়)। ফোনে sender ভিন্ন হলে advanced settings-এ বদলান।
-- আপনার দেওয়া বিকাশ/নগদ incoming payment SMS format। Regex লিখতে হবে না। রকেট বন্ধ আছে।
-- ফোনে নিজে তৈরি ৬৪ অক্ষরের random গোপন চাবি ও Device ID। চাবি APK বা GitHub-এ রাখা নেই।
-- Forwarding প্রথমে বন্ধ। সফল authenticated server check-এর পরই Start বাটন থেকে চালু হয়।
+## প্রথমবার Cloudflare সেটআপ
 
-## মাত্র চার ধাপ
+**সেটআপ / নম্বর বদলান** খুলুন। নিজের নম্বর লিখুন। অ্যাপ নিজে random গোপন চাবি ও Device ID তৈরি করে।
 
-### ১. SMS permission
+Cloudflare → Workers & Pages → Pages project → Settings → Variables and Secrets → Production:
 
-অ্যাপে **SMS permission দিন** চাপুন → Allow। পুরোনো inbox পড়ার অনুমতি নেই। অ্যাপকে Default SMS app বা Accessibility permission দিতে হবে না।
-
-### ২. নিজের নম্বর
-
-**বিকাশ নম্বর** ঘরে আপনার টাকা পাওয়ার বিকাশ নম্বর দিন। **নগদ নম্বর** ঘরে আপনার টাকা পাওয়ার নগদ নম্বর দিন। যেটি ব্যবহার করবেন না ফাঁকা রাখুন। বাংলা অঙ্ক বা +880 prefix দিলে নিজে থেকে ১১ অঙ্কে সাজাবে।
-
-বটের **Admin Panel → Payment Settings**-এও একই receiving number দিন। নমুনা SMS-এর “from” বা “Sender” নম্বর গ্রাহকের; সেটি এখানে দেবেন না। প্রথম বাস্তব পরীক্ষায় শুধু একটি receiving SIM ব্যবহার করুন; dual-SIM mapping এই সংস্করণে নেই।
-
-### ৩. Cloudflare-এ দুটি তথ্য
-
-Cloudflare → **Workers & Pages → আপনার Pages project → Settings → Variables and Secrets → Production**।
-
-| Name | Type | Value কোথা থেকে পাবেন |
+| Name | Type | Value |
 | --- | --- | --- |
-| `MOBILE_BRIDGE_SECRET` | Secret | অ্যাপে **গোপন চাবি কপি** চাপুন; Paste করুন |
-| `MOBILE_BRIDGE_DEVICE_ID` | Text | অ্যাপে **ফোনের ID কপি** চাপুন; Paste করুন |
+| `MOBILE_BRIDGE_SECRET` | Secret | অ্যাপের **গোপন চাবি কপি** থেকে Paste |
+| `MOBILE_BRIDGE_DEVICE_ID` | Text | অ্যাপের **ফোনের ID কপি** থেকে Paste |
 
-একটি কপি করে Paste শেষ হলে অন্যটি কপি করুন। Secret চ্যাটে পাঠাবেন না। Binance/Telegram key ব্যবহার করবেন না।
+Save করে latest deployment Redeploy করুন। একই key অ্যাপে আগে থেকেই encrypted রাখা আছে; নিজের আরেকটি key/Binance key বসাবেন না। চ্যাটে key দেবেন না। বটের ঠিকানা `https://digital-product-telibot.pages.dev/api/mobile-receipt` এবং sender bKash / NAGAD আগে থেকেই দেওয়া আছে।
 
-Save করুন → **Deployments → সর্বশেষ deployment → Retry deployment / Redeploy**। সর্বশেষ GitHub কোড deploy হতে হবে; নতুন version-এ setup-check endpoint যুক্ত হয়েছে।
+নম্বর valid এবং permission থাকলে Start চাপার পর **offline capture-ও চালু হয়**। Cloudflare যাচাই ব্যর্থ হলেও নতুন valid payment SMS encrypted queue-তে থাকবে; error দেখাবে। সঠিক server response ছাড়া কিছু credited/delivered বলা হবে না। পরে settings ঠিক করে আবার একই button চাপলে queued records পাঠানোর চেষ্টা করবে।
 
-### ৪. পরীক্ষা করে চালু
+## ফোনের সেটিং
 
-অ্যাপে **সংযোগ পরীক্ষা করে চালু করুন** চাপুন। সফল হলে “সংযোগ ঠিক আছে। SMS পাঠানো চালু হয়েছে।” দেখাবে। ভুল key, ফোনের ID, receiving number বা deployment হলে বাংলায় কারণ দেখাবে।
+**সমস্যার রিপোর্ট / কপি → ফোনের সেটিং** থেকে SMS permission ও Battery → Unrestricted দিন; Auto-start থাকলে চালু করুন। Force stop করলে Android নতুন SMS দিতে নাও পারে—অ্যাপ আবার খুলুন। Pending jobs ফোন reboot-এর পরেও restore করার জন্য Android-এর normal `RECEIVE_BOOT_COMPLETED` permission যোগ হয়েছে; নতুন inbox/contacts/SMS-sending permission নেই। Android/OEM background restrictions-এর কারণে delay হতে পারে; কোনো “সবসময় তাৎক্ষণিক” নিশ্চয়তা নেই।
 
-এখন ফোনে ইন্টারনেট রাখুন। Settings → Apps → TeliBot Receipt Bridge → Battery → Unrestricted দিন। Auto-start থাকলে চালু করুন। Force stop করবেন না। Android/OEM background limits-এর কারণে দেরি হতে পারে।
+## সমস্যা হলে এক রিপোর্ট
 
-## কীভাবে SMS যাবে?
+**সমস্যার রিপোর্ট / কপি → রিপোর্ট কপি** চাপুন। রিপোর্টে version, permission, সক্রিয় মাধ্যম, queue count, ফোনের Dhaka time, last connection/capture/upload result থাকবে। Raw SMS, OTP, account numbers, Device ID বা key থাকে না। Report মূল স্ক্রিন দখল করে রাখে না; সহজ status প্রতি ২ সেকেন্ডে foreground-এ refresh হয়। Cloudflare-এ admin `/diagnostics` shows signed SMS receipts / pending TrxID submissions, allowing both ends to be compared without paying again.
 
-নতুন SMS → company sender মেলানো → পুরো বিকাশ/নগদ receipt format মেলানো → OTP/outgoing message বাদ → amount/TrxID/time আলাদা করা → encrypted local queue → signed HTTPS upload → server acknowledgement। পুরো SMS, customer sender number, balance বা OTP পাঠায় না। পুরোনো inbox থেকে SMS তুলে পাঠায় না।
+SMS format পরীক্ষা: **সেটআপ / নম্বর বদলান → অন্য সেটিং / পরীক্ষা → SMS format ফোনেই পরীক্ষা**। Paste করা text শুধু local preview; server-এ যাবে না। App পুরোনো inbox পড়ে না, তাই update করার আগে বাদ যাওয়া SMS নিজে থেকে উদ্ধার হয় না। SMS আগে পড়ে/seen করে ফেললে SMS_RECEIVED broadcast নষ্ট হয় না।
 
-**অন্য সেটিং / পরীক্ষা → SMS format ফোনেই পরীক্ষা** দিয়ে পেমেন্ট SMS paste করতে পারেন। ফলাফল শুধু ফোনে দেখাবে; upload/credit হবে না। বাস্তব পরীক্ষার জন্য নতুন ছোট পেমেন্ট প্রয়োজন।
+## Queue preservation fixes
 
-## বুঝবেন কাজ করছে কীভাবে?
+Earlier versions silently deleted pending records whenever setup values changed and could leave forwarding OFF after Save. v0.7 has one Save-and-Start action and never automatically deletes a queue on setup change. Number/sender changes leave existing encrypted payloads/account snapshots untouched. A different endpoint cannot be saved while pending records exist (or storage is unreadable), preventing old evidence being rerouted; send/reconcile those records before changing URL. Explicit deletion remains under advanced settings with confirmation. The existing 24-hour expiry/200-record cap remains. This cannot recover records already deleted/missed by an older app.
 
-Cloudflare → D1 database → Console:
+Offline capture and server-connection state are distinct. Existing valid queues retry on opening the app and through persisted JobScheduler work. Failed records remain; batches rotate by attempted time so an old rejection cannot starve later valid payments. Only a server acknowledgement with the same event ID removes the queued record. Stop cancels work and disables capture while retaining records.
 
-```sql
-SELECT method, trx_id, amount_minor, status, created_at
-FROM mobile_bridge_receipts
-ORDER BY created_at DESC
-LIMIT 10;
-```
+## Receipt security
 
-`amount_minor` পয়সায়: ৫০০ টাকা = `50000`। `unverified_sms` মানে রেকর্ড পৌঁছেছে কিন্তু কোনো ইনভয়েসের জন্য দাবি হয়নি; `claimed` মানে পেমেন্ট একটি নির্দিষ্ট ইনভয়েসে ব্যবহৃত হয়েছে। ইউজার আগে TrxID জমা দিয়ে থাকলে valid SMS এলে সার্ভার নিজে matching চালাবে; SMS আগে এলে TrxID submission-এ matching হবে। Setup check কোনো receipt table/row তৈরি করে না; প্রথম valid SMS upload-এর আগে table না থাকতেও পারে। Setup success প্রমাণ করে signature, device ID ও receiving numbers মিলেছে; বাস্তব SMS reception প্রমাণ করে না।
+Actual originating sender must match the configured company sender (defaults bKash/NAGAD, case-insensitive). Contact display names are not proof; ordinary 11-digit senders are rejected. Full incoming bKash/Nagad receipt structure is required. Ref is optional and ignored regardless of its value; neither Ref, raw SMS, sender/customer phone, balance nor OTP is uploaded. Amount, TrxID and dd/MM/yyyy HH:mm in Asia/Dhaka are extracted. OTP-only/outgoing messages do not match. Rocket remains unsupported.
 
-সমস্যা হলে অ্যাপে **অন্য সেটিং / পরীক্ষা → Pending রেকর্ড আবার পাঠান**। **বন্ধ করুন** সঙ্গে সঙ্গে নতুন forwarding বন্ধ করে, pending queue রাখে। সেটিং সত্যিই বদলালে পুরোনো queue মুছে যায় যাতে অন্য account/server-এ reroute না হয়। একই সেটিং পুনরায় Save করলে queue থাকে। Pending আলাদা বাটন দিয়ে confirmation-এর পরে মোছা যায়।
+Encrypted metadata and key use Android Keystore AES-GCM; backups/screenshots/autofill disabled. No analytics/ads/external runtime libraries/remote code updates. Permissions: RECEIVE_SMS, INTERNET, ACCESS_NETWORK_STATE and normal RECEIVE_BOOT_COMPLETED. HTTPS uses platform CA validation; redirects/cleartext refused. HMAC-SHA256 of exact UTF-8 body+timestamp authenticates the bridge. It proves enrolled-device evidence, not independent provider settlement; compromised devices/keys and spoofed sender IDs remain a risk. Use the receiving payment phone.
 
-## Security and technical details
-
-Native Java; no advertising, analytics, external runtime libraries, remote code updates or hardcoded credentials. Permissions: `RECEIVE_SMS`, `INTERNET`, `ACCESS_NETWORK_STATE`. No `READ_SMS`, contacts, SMS sending, Accessibility, overlay or storage permissions. Android `BROADCAST_SMS` protects the exported receiver; `BIND_JOB_SERVICE` protects the upload service. The app receives new SMS broadcasts before local filtering, so it can encounter OTP messages; rejected messages are never stored/uploaded. Use a dedicated receiving phone/SIM.
-
-Secret and queued metadata use Android Keystore AES-GCM. Backups and screenshots/autofill are disabled. Clipboard copy is explicitly user initiated and marked sensitive; clipboard sharing/access still depends on the keyboard and Android version. No credentials are logged. Rooted/compromised devices remain a risk. Signing identifies the build; it is not an independent security audit.
-
-HTTPS uses Android's normal certificate validation, no cleartext/redirects. JobScheduler retries with exponential backoff; there is no polling/Cron. Queue is capped at 200 records, with 24-hour expiry cleaned on activity. Forwarding OFF does not recover SMS later from the inbox. Already in-flight HTTP requests cannot be recalled. Pending jobs are not guaranteed to survive reboot; open the app and retry pending records after restarting the phone.
-
-`POST /api/mobile-receipt`: body <4096 bytes; `X-Timestamp` Unix seconds ±300; lowercase `X-Signature` HMAC-SHA256 of exact UTF-8 `rawBody + timestamp`. Requires production `MOBILE_BRIDGE_SECRET` (32+ chars), `MOBILE_BRIDGE_DEVICE_ID` and D1 DB. Setup check body: `{version:1,type:"check",deviceId,bkashAccount,nagadAccount}`. Authenticated check reads receiving-account settings, performs no credit or receipt insertion, and returns `{connected:true,deviceId}` only on exact account matches.
-
-Receipt fields: `version:1,eventId,deviceId,method,account,trxId,amountMinor,receivedAt,paidAt`. Unknown fields are refused. Method is bkash/nagad only. Integer `amountMinor` is BDT poisha. SMS timestamp parsed as dd/MM/yyyy HH:mm in Asia/Dhaka. Capture within 24 hours; parsed payment within 24 hours before capture (up to 5 minutes ahead for skew). Signature/device/account validation precedes insert. Same event+body is idempotent; conflicting event or transaction reuse is refused. Successful receipt reply is `{accepted:true,eventId,status:"stored"}`. The phone deletes queued metadata only after this explicit acknowledgement. Rejected records may retry until expiry. The setup check never moves money. Receipt ingestion persists evidence then schedules pending invoice matching; user TrxID submissions also trigger matching. An atomic D1 claim+invoice+balance transaction ensures one-time deposit credit; orders are marked paid before delivery. Provider failure/insufficient stock remains paid_pending_delivery. Only new snapshotted invoices can auto-settle. Payment/submission deadline is 60 minutes; payment timestamps have one-minute precision, so the earliest accepted timestamp is the invoice creation minute. Pending, timely TrxID submissions can accept delayed SMS (up to 24-hour receipt age). Rocket remains manual. A compromised receiving device/signing key or spoofed company SMS can supply false evidence; no claim of provider-confirmed settlement is made.
+The server still requires device/account/method/TrxID/exact amount/time/invoice ownership and one-time atomic claim before credit/delivery. Mobile invoice/submission window: 60 minutes. A timely TrxID can wait for delayed SMS. Setup checking creates no order/credit. Delivery/provider/stock failures stay pending for review. See [mobile-wallets.md](../docs/mobile-wallets.md).
 
 ## Build and verification
 
-Android SDK platform 35/build-tools 35.0.0, JDK 17+ (or Java runtime + Eclipse ECJ 3.40.0), Python 3 and zip. Supply `ANDROID_SDK_ROOT`, `BRIDGE_KEYSTORE`, `BRIDGE_STORE_PASS` to `./build.sh`; optional `ECJ_JAR`. Alias: `bridge`. Output: `build/telibot-receipt-bridge.apk`. No Gradle or dependency download during build.
+SDK platform 35 / build-tools 35.0.0, JDK 17+ (or Java runtime + Eclipse ECJ 3.40), Python/zip. Set ANDROID_SDK_ROOT, BRIDGE_KEYSTORE, BRIDGE_STORE_PASS (alias bridge), optionally ECJ_JAR; run `./build.sh`. Private signing material stays outside Git in `/workspace/.bridge-signing`; back it up privately for future updates.
 
-Release keystore stays outside Git at `/workspace/.bridge-signing`; privately back it up to sign future updates. Never commit keystores/passwords or share them in chat. Run ParserTest.java with ReceiptParser for supplied receipt templates; `node ../tests/mobile-bridge.cjs` tests authenticated setup and receipt security/idempotency with real SQLite. Inspect permissions with aapt2; verify APK with apksigner. Build/signature/tests do not replace live Android installation, runtime permission, SMS reception and HTTPS delivery tests; these phone tests have not been performed here.
-
-
-## v0.4 — bKash reference-field fix
-
-Provided bKash SMS can contain `Ref 2.` between the sender number and `Fee Tk`. The earlier exact template rejected these receipts before queueing/uploading. v0.4 accepts an optional bounded reference field while retaining exact amount/TrxID/time extraction, full-message validation and OTP/outgoing exclusion. Fixtures use anonymized numbers/transaction IDs.
-
-Update the APK **over the installed app**, using the same signing certificate, to keep encrypted key/device ID/settings. No new permissions, Cloudflare secrets or server protocol changes are required. Reading/marking an SMS seen does not alter the SMS_RECEIVED broadcast. This app still does not read historical inbox messages: a receipt ignored by the previous parser cannot be recovered merely by updating or pressing Retry Pending. The existing paid invoice needs manual reconciliation; do not pay twice. The local SMS-format preview can test old text but does not upload or authorize a payment.
-
-
-## v0.5 — ignore reference contents; verify company sender
-
-Based on the supplied phone screenshots, bKash sender is `bKash` and Nagad is `NAGAD`. Defaults are shared between settings and the receiver; sender matching is case-insensitive. Empty sender settings use those defaults. Matching uses the actual originating address, not an address-book contact name: an ordinary 11-digit mobile sender does not become trusted by being saved as “bKash”.
-
-Both incoming-receipt templates accept the reference field being present or absent; reference content (numbers, names, Bangla text, N/A, punctuation, etc., up to the bounded receipt-template length) is ignored and never uploaded. Reference words like “payment”, “sent” or “OTP” no longer make an otherwise complete incoming receipt fail. Actual OTP-only/outgoing messages are still rejected by full-message incoming-receipt matching. No reference value is used to identify a payment: amount, transaction ID, paid time and receiving account are matched by the server as before. Company sender allowlisting is not independent provider settlement proof.
-
-Install v0.5 as an update; same signing key, settings, device ID, permissions and server protocol. No additional permissions/inbox reading. Historical SMS ignored before the update is not automatically recovered. Java tests cover default senders, case differences, ordinary-number/cross-provider rejection, optional/varied references, and unchanged receipt amount/transaction/date extraction. Real Android reception/forwarding still needs a live phone check.
-
-
-## v0.6 — diagnose missing SMS records
-
-The reported 26 Tk bKash receipt with Ref 2 matches the parser; a pending count of 0 alone does not distinguish missing capture, an old/stale status display or a completed/rejected upload. v0.6 adds local status timestamps (Asia/Dhaka), configured-method presence, actual permission status, current encrypted queue count, last matching-company SMS result and last upload outcome. It refreshes on resume and via **অ্যাপের রিপোর্ট দেখুন / Refresh**. **পরীক্ষার রিপোর্ট কপি** copies these diagnostics only: no signing key, device ID, account numbers, raw SMS, OTP or receipt content. No extra permissions or inbox access.
-
-Receiver statuses distinguish forwarding OFF, format mismatch, phone/SMS time mismatch, missing receiving number, queue capacity and storage failure. Status metadata contains only the known method and fixed explanatory strings; unmatched ordinary senders are not logged. Existing receipts from older versions do not acquire historical capture logs retrospectively.
-
-Uploader reports HTTP/signature/account/conflict/connection errors without logging payloads. A failed record stays encrypted in the queue; the batch continues to other records, preventing a bad earlier receipt from blocking all subsequent payments. Explicit server acknowledgement with the same event ID is still required before deletion. Queue expiry/capacity remain 24 hours / 200 records. `QueueTest.java` verifies continuation, retained failures and cancellation; `ParserTest.java` covers the reported format and existing sender/reference rules. Build/signature verification does not replace live Android reception testing.
-
-For this issue: update over the installed app; ensure the receiving bKash number is saved and forwarding ON. Do not edit/delete settings or clear pending records while diagnosing. Tap **অন্য সেটিং / পরীক্ষা → Pending রেকর্ড আবার পাঠান**, wait a few seconds, then **পরীক্ষার রিপোর্ট কপি**. After server deployment, `/diagnostics` shows the latest 5 signed SMS receipt records and last 3 waiting TrxID submissions. Compare the same transaction across phone and server reports before making any further payment. If an old SMS was never captured, updating still cannot read it from the inbox.
-
-Queue database v2 adds only an attempted-time column; existing encrypted bodies, IDs and creation/expiry times are retained. Retry batches prioritize unattempted/older attempts, so 20 bad records cannot permanently starve later valid receipts. The main screen has **অপেক্ষার রেকর্ড এখন পাঠান**; no new payment is needed to retry an existing queued record. `tests/android-queue-migration.cjs` verifies the migration/ordering with SQLite.
+ParserTest.java covers screenshot receipt formats, optional refs, sender/amount/TrxID/time validation and OTP/outgoing exclusion. QueueTest.java covers failures/continuation/cancellation. ConfigTest.java covers copied/Bangla phone numbers and pending endpoint-change protection. `tests/android-queue-migration.cjs` validates queue upgrade/ordering with SQLite; mobile bridge/payment suites validate server signature checks and atomic settlement. APK build and v2/v3 signatures verified. Actual Android permissions, reboot/background execution and live SMS reception/upload require a receiving-phone check; these tests do not certify those device-specific paths.
