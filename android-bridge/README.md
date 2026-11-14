@@ -1,6 +1,6 @@
-# TeliBot Receipt Bridge v0.4 — সহজ সেটআপ
+# TeliBot Receipt Bridge v0.5 — সহজ সেটআপ
 
-[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.4.apk)
+[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.5.apk)
 
 Android 8+। পুরোনো v0.1 ইনস্টল থাকলে তার ওপর Update করুন; Uninstall করার দরকার নেই। একই release certificate ব্যবহার করা হয়েছে; আগের Device ID ও encrypted secret রাখা হবে। Uninstall করলে বা Clear data করলে নতুন চাবি/ID তৈরি হবে এবং Cloudflare-এ আবার দিতে হবে।
 
@@ -90,3 +90,12 @@ Release keystore stays outside Git at `/workspace/.bridge-signing`; privately ba
 Provided bKash SMS can contain `Ref 2.` between the sender number and `Fee Tk`. The earlier exact template rejected these receipts before queueing/uploading. v0.4 accepts an optional bounded reference field while retaining exact amount/TrxID/time extraction, full-message validation and OTP/outgoing exclusion. Fixtures use anonymized numbers/transaction IDs.
 
 Update the APK **over the installed app**, using the same signing certificate, to keep encrypted key/device ID/settings. No new permissions, Cloudflare secrets or server protocol changes are required. Reading/marking an SMS seen does not alter the SMS_RECEIVED broadcast. This app still does not read historical inbox messages: a receipt ignored by the previous parser cannot be recovered merely by updating or pressing Retry Pending. The existing paid invoice needs manual reconciliation; do not pay twice. The local SMS-format preview can test old text but does not upload or authorize a payment.
+
+
+## v0.5 — ignore reference contents; verify company sender
+
+Based on the supplied phone screenshots, bKash sender is `bKash` and Nagad is `NAGAD`. Defaults are shared between settings and the receiver; sender matching is case-insensitive. Empty sender settings use those defaults. Matching uses the actual originating address, not an address-book contact name: an ordinary 11-digit mobile sender does not become trusted by being saved as “bKash”.
+
+Both incoming-receipt templates accept the reference field being present or absent; reference content (numbers, names, Bangla text, N/A, punctuation, etc., up to the bounded receipt-template length) is ignored and never uploaded. Reference words like “payment”, “sent” or “OTP” no longer make an otherwise complete incoming receipt fail. Actual OTP-only/outgoing messages are still rejected by full-message incoming-receipt matching. No reference value is used to identify a payment: amount, transaction ID, paid time and receiving account are matched by the server as before. Company sender allowlisting is not independent provider settlement proof.
+
+Install v0.5 as an update; same signing key, settings, device ID, permissions and server protocol. No additional permissions/inbox reading. Historical SMS ignored before the update is not automatically recovered. Java tests cover default senders, case differences, ordinary-number/cross-provider rejection, optional/varied references, and unchanged receipt amount/transaction/date extraction. Real Android reception/forwarding still needs a live phone check.

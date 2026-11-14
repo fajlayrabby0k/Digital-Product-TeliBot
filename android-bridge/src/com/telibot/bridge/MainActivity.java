@@ -29,7 +29,7 @@ public final class MainActivity extends Activity {
   try{android.content.SharedPreferences.Editor init=p.edit();if(!p.contains("device"))init.putString("device",UUID.randomUUID().toString());if(!p.contains("secret")){byte[] bytes=new byte[32];new SecureRandom().nextBytes(bytes);StringBuilder key=new StringBuilder();for(byte b:bytes)key.append(String.format(Locale.ROOT,"%02x",b&255));init.putString("secret",Store.seal(key.toString()));}init.commit();}catch(Exception e){TextView error=new TextView(this);error.setText("ফোনের নিরাপদ storage চালু করা যায়নি। অ্যাপ বন্ধ করে আবার খুলুন।");setContentView(error);return;}
   ScrollView scroll=new ScrollView(this);box=new LinearLayout(this);box.setOrientation(1);box.setPadding(dp(20),dp(16),dp(20),dp(24));scroll.addView(box);setContentView(scroll);
   scroll.setOnApplyWindowInsetsListener((v,insets)->{if(android.os.Build.VERSION.SDK_INT>=30){android.graphics.Insets safe=insets.getInsets(android.view.WindowInsets.Type.systemBars()|android.view.WindowInsets.Type.displayCutout());v.setPadding(safe.left,safe.top,safe.right,safe.bottom);}else{applyLegacyInsets(v,insets);}return insets;});
-  text(box,"পেমেন্ট SMS সংযোগ",25);text(box,"সহজ সেটআপ · v0.4\nআপনার বটের ঠিকানা আগে থেকেই দেওয়া আছে।",16);
+  text(box,"পেমেন্ট SMS সংযোগ",25);text(box,"সহজ সেটআপ · v0.5\nআপনার বটের ঠিকানা আগে থেকেই দেওয়া আছে।",16);
   status=new TextView(this);status.setTextSize(16);status.setPadding(0,dp(12),0,dp(12));box.addView(status);
   text(box,"১. SMS-এর অনুমতি দিন",20);text(box,"শুধু নতুন SMS গ্রহণ করবে। পুরোনো ইনবক্স পড়বে না।",14);
   button(box,"SMS permission দিন",()->requestPermissions(new String[]{"android.permission.RECEIVE_SMS"},1));
@@ -45,7 +45,7 @@ public final class MainActivity extends Activity {
   button(box,"অন্য সেটিং / পরীক্ষা",()->advanced.setVisibility(advanced.getVisibility()==View.VISIBLE?View.GONE:View.VISIBLE));
   advanced=new LinearLayout(this);advanced.setOrientation(1);advanced.setVisibility(View.GONE);box.addView(advanced);
   text(advanced,"প্রয়োজন ছাড়া বদলাবেন না",18);text(advanced,"বটের ঠিকানা ও sender আগে থেকেই দেওয়া। Sender না মিললে SMS-এ দেখানো কোম্পানির হুবহু নাম দিন।",14);
-  field(advanced,"url","বটের ঠিকানা",ENDPOINT,false);field(advanced,"bkashSender","বিকাশ SMS sender","bKash",false);field(advanced,"nagadSender","নগদ SMS sender","NAGAD",false);
+  field(advanced,"url","বটের ঠিকানা",ENDPOINT,false);field(advanced,"bkashSender","বিকাশ SMS sender",ReceiptParser.BKASH_SENDER,false);field(advanced,"nagadSender","নগদ SMS sender",ReceiptParser.NAGAD_SENDER,false);
   // Old versions saved blank senders. Restore defaults without replacing explicit custom values.
   if(value("bkashSender").isEmpty())fields.get("bkashSender").setText("bKash");if(value("nagadSender").isEmpty())fields.get("nagadSender").setText("NAGAD");
   button(advanced,"SMS format ফোনেই পরীক্ষা",()->preview());button(advanced,"Pending রেকর্ড আবার পাঠান",()->{UploadJob.schedule(this);say("আবার পাঠানোর চেষ্টা হবে। ইন্টারনেট ও forwarding চালু থাকতে হবে।");});
