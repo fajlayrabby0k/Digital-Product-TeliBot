@@ -128,7 +128,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-mobile-auto-60m";
+const DB_SCHEMA_VERSION = "2026-11-provider-failure-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -181,6 +181,10 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE products ADD COLUMN api_stock INTEGER DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN provider_emoji_id TEXT DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN provider_request_id TEXT DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN provider_retry_at INTEGER DEFAULT 0;",
+      "ALTER TABLE orders ADD COLUMN provider_error TEXT DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN provider_order_id TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN delivery_data TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN bep20_wallet TEXT DEFAULT NULL;",
       "ALTER TABLE deposits ADD COLUMN bep20_wallet TEXT DEFAULT NULL;",
@@ -615,9 +619,15 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
   if (order.is_external === 1) {
     const apiRes = await dispatchExternalOrder(env, order, orderQty, orderId);
     if (!apiRes.success) {
-      await env.DB.prepare("UPDATE orders SET status='paid_pending_delivery' WHERE id=? AND status='delivering'").bind(orderId).run();
-      await sendMsg(env, chatId, `✅ Payment verified for Order #${orderId}. Delivery is pending; admin has been notified. Do not pay again.`);
-      await sendMsg(env, env.ADMIN_ID, `⚠️ Paid Order #${orderId} needs manual delivery. Provider delivery was not confirmed. Check provider order history before retrying.`);
+      await env.DB.prepare("UPDATE orders SET status='paid_pending_delivery',provider_error=?,provider_order_id=? WHERE id=? AND status='delivering'").bind(apiRes.message||'Delivery unconfirmed',apiRes.externalOrderId||null,orderId).run();
+      if(apiRes.rejected&&order.payment_method==='WALLET'){
+        await refundRejectedExternalWalletOrder(env,orderId,chatId);
+        await sendMsg(env,chatId,`Provider rejected Order #${orderId}. Your wallet payment has been refunded.`);
+        await sendMsg(env,env.ADMIN_ID,`⚠️ Wallet Order #${orderId} refunded: ${escapeHtml(apiRes.message||'Provider rejection')}`);
+        return;
+      }
+      await sendMsg(env, chatId, `✅ Payment verified for Order #${orderId}. Delivery is pending; admin has been notified. Do not pay again.`,[[{text:'Check Delivery',callback_data:`provider_retry_${orderId}`}]]);
+      await sendMsg(env, env.ADMIN_ID, `⚠️ Paid Order #${orderId}: ${escapeHtml(apiRes.message||'Delivery unconfirmed')}. Check provider history before retrying.`);
       return;
     }
     const creds = apiRes.credentials;
@@ -659,6 +669,7 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
 // Wallet Purchase Execution Helper
 // ====================================================================
 async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd, rate, messageId) {
+  if(!Number.isSafeInteger(qty)||qty<1||!Number.isFinite(totalUsd)||totalUsd<=0||!Number.isFinite(rate)||rate<=0){await sendMsg(env,chatId,'Invalid purchase quantity or amount. No money was deducted.');return;}
   const totalBdt = Math.round(totalUsd * rate);
 
   // External API Product Purchase
@@ -670,14 +681,25 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
       return;
     }
 
-    await env.DB.prepare("UPDATE users SET balance_usd = balance_usd - ?, balance_bdt = balance_bdt - ?, total_spent_usd = total_spent_usd + ? WHERE user_id = ?").bind(totalUsd, totalBdt, totalUsd, chatId).run();
-    const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, status) VALUES (?, ?, ?, ?, 'WALLET', 'AUTO_DISPATCH', ?, ?, 'paid_pending_delivery')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt).run();
-    const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
+    const token='WALLET:'+crypto.randomUUID();
+    const booked=await env.DB.batch([
+      env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,status) SELECT user_id,?,?,?,'WALLET',?,?,?,'paid_pending_delivery' FROM users WHERE user_id=? AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,chatId,totalUsd),
+      env.DB.prepare("UPDATE users SET balance_usd=balance_usd-?,balance_bdt=balance_bdt-?,total_spent_usd=total_spent_usd+? WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='paid_pending_delivery')").bind(totalUsd,totalBdt,totalUsd,chatId,token,chatId)
+    ]);
+    if(!booked[0].meta?.changes){await sendMsg(env,chatId,'Insufficient wallet balance. No money was deducted.');return;}
+    const orderId=booked[0].meta.last_row_id;
 
     const apiResult = await dispatchExternalOrder(env, prod, qty, orderId);
     if(!apiResult.success){
-      await sendMsg(env,chatId,`Payment recorded for Order #${orderId}. Provider delivery is pending; admin has been notified. Do not pay again.`);
-      await sendMsg(env,env.ADMIN_ID,`⚠️ Wallet Order #${orderId} needs delivery review. Check provider history before retrying.`);
+      await env.DB.prepare('UPDATE orders SET provider_error=?,provider_order_id=? WHERE id=?').bind(apiResult.message||'Delivery unconfirmed',apiResult.externalOrderId||null,orderId).run();
+      if(apiResult.rejected){
+        await refundRejectedExternalWalletOrder(env,orderId,chatId);
+        await sendMsg(env,chatId,`Order #${orderId} was rejected by the provider. Your wallet payment has been refunded. Please contact admin before retrying.`);
+        await sendMsg(env,env.ADMIN_ID,`⚠️ Provider rejected wallet Order #${orderId}: ${escapeHtml(apiResult.message)}. Customer wallet refunded. Check the provider API configuration.`);
+      }else{
+        await sendMsg(env,chatId,`Payment recorded for Order #${orderId}. Provider delivery is unconfirmed; admin has been notified. Do not pay again.`,[[{text:'Check Delivery',callback_data:`provider_retry_${orderId}`}]]);
+        await sendMsg(env,env.ADMIN_ID,`⚠️ Wallet Order #${orderId}: ${escapeHtml(apiResult.message||'Delivery unconfirmed')}. Check provider history before retrying; no automatic refund because the provider may have accepted the order.`);
+      }
       return;
     }
     const creds=apiResult.credentials;
@@ -1350,6 +1372,17 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (data === "binance_cancel") {
       await clearBinanceInput(env, chatId);
       await sendDeposit(env, chatId, messageId);
+      return;
+    }
+    const providerRetry=data.match(/^provider_retry_(\d+)$/);
+    if(providerRetry){
+      const order=await env.DB.prepare('SELECT o.*,p.name AS product_name,p.is_external,p.external_id FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?').bind(providerRetry[1]).first();
+      if(!order||(String(order.user_id)!==String(chatId)&&String(chatId)!==String(env.ADMIN_ID)))return;
+      if(order.status!=='paid_pending_delivery'){await sendMsg(env,chatId,'This order is already delivered, closed or processing.');return;}
+      if(!order.provider_request_id){await sendMsg(env,chatId,'This older order needs admin review. Check provider history first; do not pay or order again.');return;}
+      const retry=await env.DB.prepare("UPDATE orders SET provider_retry_at=? WHERE id=? AND status='paid_pending_delivery' AND COALESCE(provider_retry_at,0)<?").bind(Date.now()+30000,order.id,Date.now()).run();
+      if(!retry.meta?.changes){await sendMsg(env,chatId,'Please wait 30 seconds before checking again.');return;}
+      await completeSuccessfulOrder(env,order,order.trx_id,order.user_id);
       return;
     }
     const mobileAction=data.match(/^mobile_(enter|retry)_(order|deposit)_(\d+)$/);
@@ -2425,33 +2458,61 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
   }
 }
 
-async function dispatchExternalOrder(env, prod, quantity, orderId) {
-  try {
-    let baseUrl = (await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io")).trim().replace(/\/+$/, "");
-    if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
-    const apiKey = await getSetting(env, "external_api_key", "");
-    if (!apiKey) return { success: false, message: "External API Key is not set." };
-
-    const vexorixOrderUrl = `${baseUrl}/api/reseller/orders`;
-    const vResp = await fetchWithTimeout(vexorixOrderUrl, {
-      method: "POST",
-      headers: { "X-Reseller-Key": apiKey, "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify({ product_id: String(prod.external_id), quantity, external_order_id: `shop-${orderId}-${Date.now().toString(36)}` })
-    }, 8000);
-
-    if (vResp.ok || vResp.status === 201 || vResp.status === 200) {
-      const resData = await vResp.json();
-      providerCatalogCache.delete(env.DB);
-      const items = Array.isArray(resData.items) ? resData.items : [];
-      const delivered = items.filter(item => typeof item.content === "string" && item.content.trim());
-      if (delivered.length < quantity || (resData.status && !["completed", "success", "delivered"].includes(String(resData.status).toLowerCase()))) {
-        return { success: false, externalOrderId: String(resData.order_id || ""), message: "Provider order accepted but product delivery is not confirmed." };
-      }
-      const credentials = delivered.map(item => item.content).join("\n\n");
-      return { success: true, externalOrderId: String(resData.order_id || ""), credentials, message: "Delivered via Provider API." };
-    }
-    return { success: false, message: `API status ${vResp.status}` };
-  } catch (err) { return { success: false, message: err.message }; }
+async function dispatchExternalOrder(env,prod,quantity,orderId){
+  let apiKey='',baseUrl='',requestId='';
+  const clean=value=>String(value||'').split(apiKey||'\u0000').join('[redacted]').split(env.BOT_TOKEN||'\u0000').join('[redacted]').slice(0,300);
+  const decode=body=>{
+    if(!body||!Array.isArray(body.items))return null;
+    if(body.external_order_id!=null&&String(body.external_order_id)!==requestId)return null;
+    if(body.product_id!=null&&String(body.product_id)!==String(prod.external_id))return null;
+    if(['failed','cancelled','rejected','error'].includes(String(body.status||'').toLowerCase()))return null;
+    const items=body.items.filter(x=>typeof x.content==='string'&&x.content.trim());
+    if(items.length<quantity)return null;
+    return {success:true,externalOrderId:String(body.order_id||body.id||''),credentials:items.map(x=>x.content).join('\n\n'),message:'Provider delivery confirmed'};
+  };
+  const backoff=async(response,body)=>{
+    if(![429,503].includes(response.status))return;
+    const requested=Number(body?.error?.retry_after_seconds||body?.retry_after_seconds||response.headers?.get('Retry-After')||30);
+    const delay=Number.isFinite(requested)?Math.max(30,Math.min(3600,requested)):30;
+    await env.DB.prepare('UPDATE orders SET provider_retry_at=MAX(COALESCE(provider_retry_at,0),?) WHERE id=?').bind(Date.now()+delay*1000,orderId).run();
+  };
+  const lookup=async()=>{
+    try{
+      const response=await fetchWithTimeout(`${baseUrl}/api/reseller/orders?external_order_id=${encodeURIComponent(requestId)}`,{headers:{'X-Reseller-Key':apiKey,'Accept':'application/json'}},4000);
+      const body=await response.json().catch(()=>null);
+      await backoff(response,body);
+      if(response.status===404&&body?.error?.code==='order_not_found')return {missing:true};
+      if(!response.ok)return {message:`Order lookup HTTP ${response.status}`};
+      const candidates=Array.isArray(body?.orders)?body.orders:Array.isArray(body)?body:body?.order?[body.order]:[body];
+      const match=candidates.find(x=>x?.external_order_id===requestId);
+      if(!match)return {message:'Provider lookup did not return the matching external_order_id'};
+      return decode(match)||{externalOrderId:String(match.order_id||match.id||''),message:'Provider order exists; codes are not ready yet'};
+    }catch{return {message:'Provider order lookup unavailable'};}
+  };
+  try{
+    baseUrl=String(await getSetting(env,'external_api_url','')).trim().replace(/\/+$/,'');
+    if(baseUrl.includes('/api/reseller'))baseUrl=baseUrl.split('/api/reseller')[0];
+    apiKey=await getSetting(env,'external_api_key','');
+    if(!apiKey)return {success:false,rejected:true,message:'External API Key is not set'};
+    if(!Number.isSafeInteger(quantity)||quantity<1||quantity>100||!String(prod.external_id||'').trim())return {success:false,rejected:true,message:'Provider product ID or quantity is invalid (allowed 1–100)'};
+    const existing=await env.DB.prepare('SELECT provider_request_id FROM orders WHERE id=?').bind(orderId).first();
+    if(!existing)return {success:false,rejected:true,message:'Local order is missing'};
+    await env.DB.prepare('UPDATE orders SET provider_request_id=COALESCE(provider_request_id,?) WHERE id=?').bind('shop-'+crypto.randomUUID(),orderId).run();
+    requestId=(await env.DB.prepare('SELECT provider_request_id FROM orders WHERE id=?').bind(orderId).first()).provider_request_id;
+    if(existing.provider_request_id){const found=await lookup();if(found.success)return found;if(!found.missing)return {success:false,...found};}
+    const response=await fetchWithTimeout(`${baseUrl}/api/reseller/orders`,{method:'POST',headers:{'X-Reseller-Key':apiKey,'Content-Type':'application/json','Accept':'application/json','Idempotency-Key':requestId},body:JSON.stringify({product_id:String(prod.external_id),quantity,external_order_id:requestId})},8000);
+    const body=await response.json().catch(()=>null);
+    await backoff(response,body);
+    if(response.ok){providerCatalogCache.delete(env.DB);return decode(body)||{success:false,externalOrderId:String(body?.order_id||body?.id||''),message:'Provider accepted the order but complete codes were not returned'};}
+    const code=body?.error?.code;
+    const terminal=['invalid_request','invalid_external_order_id','invalid_json','product_not_available','invalid_api_key','insufficient_funds','wallet_frozen','account_disabled','product_not_found','out_of_stock','insufficient_stock','payload_too_large'];
+    const result={success:false,rejected:terminal.includes(code),message:`Provider HTTP ${response.status}${code?' '+clean(code):''}: ${clean(body?.error?.message||body?.message||'Request failed')}`};
+    if(code==='duplicate_external_order_id'||response.status>=500){const found=await lookup();if(found.success)return found;return {...result,rejected:false,externalOrderId:found.externalOrderId||'',message:result.message+'; '+found.message};}
+    return result;
+  }catch{
+    if(requestId){const found=await lookup();if(found.success)return found;return {success:false,externalOrderId:found.externalOrderId||'',message:'Provider request interrupted; '+(found.message||'No confirmed provider order found')};}
+    return {success:false,message:'Provider request configuration is unavailable'};
+  }
 }
 
 async function processReferralCommission(env, buyerChatId, orderAmountUsd, productName) {
@@ -2845,14 +2906,21 @@ async function sendUserPreorders(env, chatId, editMessageId = null) {
   else await sendMsg(env, chatId, text, buttons);
 }
 
-async function sendOrders(env, chatId, editMessageId = null) {
-  const { results } = await env.DB.prepare("SELECT o.*, p.name as product_name, i.item_data FROM orders o JOIN products p ON o.product_id = p.id LEFT JOIN inventory i ON o.id = i.order_id WHERE o.user_id = ? AND o.status = 'completed' ORDER BY o.id DESC LIMIT 5").bind(chatId).all();
-  let orderText = `📦 <b>Your Completed Orders:</b>\n\n`;
-  if (!results || results.length === 0) orderText += `You have not completed any purchases yet.`;
-  else results.forEach(o => { orderText += `🔹 <b>${o.product_name}</b>\nOrder: #${o.id} | Quantity: ${o.quantity || 1} | Amount: $${o.amount_usd} USD\nCredentials: <code>${escapeHtml(o.delivery_data || o.item_data || o.trx_id || "Delivered")}</code>\n\n`; });
-  const buttons = [[{ text: "◀️ Main Menu", callback_data: "home" }]];
-  if (editMessageId) await editMsg(env, chatId, editMessageId, orderText, buttons);
-  else await sendMsg(env, chatId, orderText, buttons);
+async function sendOrders(env,chatId,editMessageId=null){
+  const {results}=await env.DB.prepare("SELECT o.*,p.name AS product_name,(SELECT GROUP_CONCAT(item_data,char(10)||char(10)) FROM inventory WHERE order_id=o.id) AS item_data FROM orders o JOIN products p ON p.id=o.product_id WHERE o.user_id=? AND o.status IN ('completed','paid_pending_delivery','delivering','refunded') ORDER BY o.id DESC LIMIT 5").bind(chatId).all();
+  let orderText='📦 <b>Your Orders:</b>\n\n';const buttons=[];
+  if(!results?.length)orderText+='You have no paid orders yet.';
+  for(const order of results||[]){
+    orderText+=`<b>${escapeHtml(order.product_name)}</b>\nOrder: #${order.id} | Quantity: ${order.quantity||1} | Amount: $${Number(order.amount_usd).toFixed(2)}\n`;
+    if(order.status==='completed')orderText+=`Credentials: <code>${escapeHtml(order.delivery_data||order.item_data||'Delivery details unavailable. Contact admin.')}</code>\n\n`;
+    else if(order.status==='refunded')orderText+='Status: Wallet payment refunded.\n\n';
+    else{
+      orderText+='Status: Payment recorded; delivery pending. Do not pay again.\n\n';
+      if(order.provider_request_id&&order.status==='paid_pending_delivery')buttons.push([{text:`Check Delivery #${order.id}`,callback_data:`provider_retry_${order.id}`}]);
+    }
+  }
+  buttons.push([{text:'◀️ Main Menu',callback_data:'home'}]);
+  if(editMessageId)await editMsg(env,chatId,editMessageId,orderText,buttons);else await sendMsg(env,chatId,orderText,buttons);
 }
 
 async function sendRefer(env, chatId, user, editMessageId = null) {
@@ -3046,4 +3114,11 @@ async function resumeMobilePayments(env,method,trx) {
   if(!exists)return;
   const {results}=await env.DB.prepare("SELECT invoice_type,invoice_id FROM mobile_payment_invoices WHERE method=? AND trx_id=? AND status='pending' AND submitted_at IS NOT NULL ORDER BY submitted_at,invoice_id LIMIT 20").bind(method,trx).all();
   for(const row of results)await settleMobileInvoice(env,row.invoice_type,row.invoice_id);
+}
+
+async function refundRejectedExternalWalletOrder(env,orderId,chatId){
+  await env.DB.batch([
+    env.DB.prepare("UPDATE users SET balance_usd=balance_usd+(SELECT amount_usd FROM orders WHERE id=?),balance_bdt=balance_bdt+(SELECT amount_bdt FROM orders WHERE id=?),total_spent_usd=MAX(0,total_spent_usd-(SELECT amount_usd FROM orders WHERE id=?)) WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE id=? AND user_id=? AND payment_method='WALLET' AND status='paid_pending_delivery')").bind(orderId,orderId,orderId,chatId,orderId,chatId),
+    env.DB.prepare("UPDATE orders SET status='refunded' WHERE id=? AND user_id=? AND payment_method='WALLET' AND status='paid_pending_delivery'").bind(orderId,chatId)
+  ]);
 }
