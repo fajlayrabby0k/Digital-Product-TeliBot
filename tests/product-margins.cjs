@@ -43,5 +43,7 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  // Even a stale state from the removed bulk flow must preserve individual rules.
  await c.api.handlePricingText(env,1,'25',{state:'awaiting_api_margin',data:'apply_all'});assert.equal(row('a').profit_margin_type,'percent');assert.equal(row('b').profit_margin_type,'fixed');assert.equal(price('b'),7.5);assert.equal(price('c'),8.75);
  await cb('adm_pricing_default_fixed',99);assert.equal(db.prepare('SELECT * FROM admin_states WHERE user_id=99').get(),undefined);
+ const validCatalog=catalog.map(x=>({...x})),savedCost=row('a').cost_price_usd;
+ catalog=catalog.map((p,i)=>({...p,price:[0,undefined,-1,'5oops'][i]}));catalog.push({id:'missing-price',name:'Invalid',stock:10});await sync();assert.equal(row('a').api_stock,0);assert.equal(row('a').cost_price_usd,savedCost);assert.equal(row('b').api_stock,0);assert.equal(row('c').api_stock,0);assert.equal(row('d').api_stock,0);assert.equal(row('missing-price'),undefined);catalog=validCatalog;await sync();assert.equal(row('a').api_stock,10);
  console.log('PASS: default 20%, per-product percentage/fixed-profit/legacy price, provider cost changes, zero/custom/Bangla inputs, default reset/global updates, sync/restart persistence, invalid values, local price and admin authorization');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

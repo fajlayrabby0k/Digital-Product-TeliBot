@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-wallet-history-1";
+const BOT_BUILD="2026-11-15-audit-fixes-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-wallet-history-1";
+const DB_SCHEMA_VERSION = "2026-11-audit-fixes-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -153,6 +153,9 @@ async function initializeDatabase(db, force) {
       } catch (_) { /* First installation has no settings table yet. */ }
     }
     const schema = [
+      `CREATE TABLE IF NOT EXISTS checkout_quotes(user_id INTEGER NOT NULL,product_id INTEGER NOT NULL,quantity INTEGER NOT NULL,total_usd REAL NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(user_id,product_id,quantity));`,
+      `CREATE TABLE IF NOT EXISTS broadcast_jobs(id TEXT PRIMARY KEY,body TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'ready',sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0);`,
+      `CREATE TABLE IF NOT EXISTS manual_deposit_credits(deposit_id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_usd REAL NOT NULL,amount_bdt REAL NOT NULL,token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS wallet_history(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,reason TEXT NOT NULL,reference TEXT,usd_delta_cents INTEGER NOT NULL,bdt_delta_minor INTEGER NOT NULL,usd_before_cents INTEGER NOT NULL,usd_after_cents INTEGER NOT NULL,bdt_before_minor INTEGER NOT NULL,bdt_after_minor INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS support_tickets(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL,user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS support_ticket_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,ticket_id INTEGER NOT NULL,sender_id INTEGER NOT NULL,is_admin INTEGER NOT NULL,body TEXT NOT NULL,submission_token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
@@ -795,15 +798,16 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     return;
   }
 
-  await env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd = balance_usd - ?, balance_bdt = balance_bdt - ?, total_spent_usd = total_spent_usd + ? WHERE user_id = ?",'purchase','product:'+prod.id)).bind(totalUsd, totalBdt, totalUsd, chatId).run();
-  const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, amount, product_name, currency, created_at, status) VALUES (?, ?, ?, ?, 'WALLET', 'LOCAL_STOCK', ?, ?, ?, ?, 'USD', CURRENT_TIMESTAMP, 'completed')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt,totalUsd,prod.name).run();
-  const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
-
-  const itemStrings = [];
-  for (const it of items) {
-    await env.DB.prepare("UPDATE inventory SET is_sold = 1, order_id = ? WHERE id = ?").bind(orderId, it.id).run();
-    itemStrings.push(it.item_data);
-  }
+  const token='WALLET:'+crypto.randomUUID();
+  const localBooking=await env.DB.batch([
+    env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,currency,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,'USD',CURRENT_TIMESTAMP,'completed' FROM users WHERE user_id=? AND balance_usd>=? AND (SELECT COUNT(*) FROM inventory WHERE product_id=? AND is_sold=0)>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd,prod.id,qty),
+    env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd=balance_usd-?,balance_bdt=balance_bdt-?,total_spent_usd=total_spent_usd+? WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='completed')",'purchase','wallet:'+token)).bind(totalUsd,totalBdt,totalUsd,chatId,token,chatId),
+    env.DB.prepare("UPDATE inventory SET is_sold=1,order_id=(SELECT id FROM orders WHERE trx_id=?) WHERE id IN (SELECT id FROM inventory WHERE product_id=? AND is_sold=0 ORDER BY id LIMIT ?) AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='completed')").bind(token,prod.id,qty,token,chatId)
+  ]);
+  if(!localBooking[0].meta?.changes){await sendMsg(env,chatId,'Stock or wallet balance changed. No money was deducted. Refresh the product before trying again.');return;}
+  const orderId=localBooking[0].meta.last_row_id;
+  const {results:allocated}=await env.DB.prepare('SELECT item_data FROM inventory WHERE order_id=? AND is_sold=1 ORDER BY id').bind(orderId).all();
+  const itemStrings=allocated.map(it=>escapeHtml(it.item_data));
 
   await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${itemStrings.join("\n\n")}</code></blockquote>`, [
     [{ text: "📦 View Orders", callback_data: "my_orders" }],
@@ -1047,10 +1051,11 @@ async function submitBinancePayment(env, chatId, type, invoice, receiptId) {
   } else {
     const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
     const bdt = Math.round(result.paidAmount * rate);
-    await env.DB.batch([
-      env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ?").bind(result.paidAmount, bdt, result.orderId, invoice.id),
-      env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?",'deposit','deposit:'+invoice.id)).bind(result.paidAmount, bdt, chatId)
+    const settled=await env.DB.batch([
+      env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ? AND EXISTS(SELECT 1 FROM deposits WHERE id=? AND user_id=? AND status='pending')",'deposit','deposit:'+invoice.id)).bind(result.paidAmount,bdt,chatId,invoice.id,chatId),
+      env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ? AND user_id=? AND status='pending'").bind(result.paidAmount,bdt,result.orderId,invoice.id,chatId)
     ]);
+    if(!settled[0].meta?.changes){await sendMsg(env,chatId,'This deposit was already processed. No extra balance was added.');return;}
     await sendMsg(env, chatId, `✅ <b>Binance deposit verified!</b>\n\nWallet credited: <b>$${result.paidAmount.toFixed(2)} USDT</b>`, [[{ text: "🛍️ Open Shop", callback_data: "shop" }]]);
     await notifyAdminForUser(env,chatId, `✅ Binance deposit #${invoice.id} credited: $${result.paidAmount.toFixed(2)} USDT. User: ${chatId}`);
   }
@@ -1282,6 +1287,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
+        if (await handleAdminCoreText(env,chatId,text,adminState))return;
         if (await handleOrderSearchText(env,chatId,text,adminState))return;
         if (await handleTicketText(env,chatId,text,adminState,true))return;
         if (await handleLocalProductText(env,chatId,text,adminState))return;
@@ -1311,7 +1317,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     // Customer Custom Quantity State
     if (userState && userState.state === "awaiting_custom_qty") {
       const prodId = userState.data;
-      const parsedQty = parseInt(text.replace(/[^0-9]/g, "")) || 1;
+      const qtyText=String(text).trim().replace(/[০-৯]/g,c=>String(c.charCodeAt(0)-'০'.charCodeAt(0)));
+      const parsedQty=/^\d{1,4}$/.test(qtyText)?Number(qtyText):NaN;
+      if(!Number.isSafeInteger(parsedQty)||parsedQty<1||parsedQty>1000){await sendMsg(env,chatId,'Enter a whole quantity from 1 to 1000.');return;}
       await env.DB.prepare("DELETE FROM user_states WHERE user_id = ?").bind(chatId).run();
       await sendOrderPreview(env, chatId, prodId, parsedQty > 0 ? parsedQty : 1);
       return;
@@ -1458,6 +1466,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await env.DB.prepare('UPDATE users SET username=?,first_name=? WHERE user_id=?').bind(username,firstName,chatId).run();
       user={...user,username,first_name:firstName};
     }
+    const broadcastAction=data.match(/^adm_broadcast_send_([a-f0-9-]{36})$/);
+    if(broadcastAction){await sendBroadcastBatch(env,chatId,broadcastAction[1]);return;}
     if(data==='adm_order_find'){
       if(!adminUserAccess(env,chatId))return;
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_order_search','')").bind(chatId).run();
@@ -1629,12 +1639,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (data.startsWith("prod_")) { await sendProductDetailView(env, chatId, data.replace("prod_", ""), messageId); return; }
     if (data.startsWith("buynow_")) {
       const parts = data.replace("buynow_", "").split("_");
-      await sendOrderPreview(env, chatId, parts[0], parseInt(parts[1]) || 1);
+      await sendOrderPreview(env, chatId, parts[0], Number(parts[1]));
       return;
     }
     if (data.startsWith("qty_")) {
       const parts = data.replace("qty_", "").split("_");
-      await sendOrderPreview(env, chatId, parts[0], parseInt(parts[1]) || 1, messageId);
+      await sendOrderPreview(env, chatId, parts[0], Number(parts[1]), messageId);
       return;
     }
     if (data.startsWith("custom_qty_")) {
@@ -1652,7 +1662,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (data.startsWith("wallet_pay_check_")) {
       const parts = data.replace("wallet_pay_check_", "").split("_");
       const prodId = parts[0];
-      const qty = parseInt(parts[1]) || 1;
+      const qty = Number(parts[1]);
       orderStage(env,'wallet.product');
       let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (!prod){await sendMsg(env,chatId,'This product is no longer available. Open /shop again.');return;}
@@ -1661,6 +1671,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       if (!await checkExternalStock(env, chatId, prod, qty)) return;
 
       const totalPrice = Number((prod.price_usd * qty).toFixed(2));
+      if(!await guardCheckoutQuote(env,chatId,prod,qty,totalPrice))return;
       const userBal = user ? (user.balance_usd || 0) : 0;
       const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
 
@@ -1696,7 +1707,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const paymentButton=await loadPaymentIcons(env);
       const parts = data.replace("direct_pay_", "").split("_");
       const prodId = parts[0];
-      const qty = parseInt(parts[1]) || 1;
+      const qty = Number(parts[1]);
       let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (!prod) return;
       if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
@@ -1704,6 +1715,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
       const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
       const totalUsd = Number((prod.price_usd * qty).toFixed(2));
+      await saveCheckoutQuote(env,chatId,prod.id,qty,totalUsd);
       const totalBdt = Math.round(totalUsd * rate);
       const userBal = user ? (user.balance_usd || 0) : 0;
 
@@ -1730,14 +1742,17 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (data.startsWith("pay_") && !data.startsWith("pay_balance_")) {
       const parts = data.split("_");
       const method = parts[1];
+      if(!['bkash','nagad','rocket','binance','bep20'].includes(method)){await sendMsg(env,chatId,'Choose a supported payment method.');return;}
       const prodId = parts[2];
-      const qty = parseInt(parts[3]) || 1;
+      const qty = Number(parts[3]);
       let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (!prod) return;
       if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
       if (!await checkExternalStock(env, chatId, prod, qty)) return;
       const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
       const totalUsd = Number((prod.price_usd * qty).toFixed(2));
+      if(!await guardCheckoutQuote(env,chatId,prod,qty,totalUsd))return;
+      if(!Number.isFinite(rate)||rate<=0||!Number.isFinite(totalUsd)||totalUsd<=0){await sendMsg(env,chatId,'Payment amount is unavailable. Contact admin.');return;}
       const totalBdt = Math.round(totalUsd * rate);
 
       orderStage(env,'order.schema');
@@ -2404,6 +2419,8 @@ async function fetchLiveProductStock(env, prod, forceFresh = true) {
 }
 
 async function checkExternalStock(env, chatId, prod, quantity) {
+  if(!Number.isSafeInteger(quantity)||quantity<1||quantity>(prod.is_external?100:1000)){await sendMsg(env,chatId,`Enter a whole quantity from 1 to ${prod.is_external?100:1000}.`);return false;}
+  if(prod.is_active===0||(prod.price_usd!=null&&(!Number.isFinite(Number(prod.price_usd))||Number(prod.price_usd)<=0))){await sendMsg(env,chatId,'This product is unavailable or has an invalid price.');return false;}
   if (prod.is_external !== 1) return true;
   if (!prod.stock_verified) {
     await sendMsg(env, chatId, "⚠️ Live stock could not be verified. Please refresh and try again.");
@@ -2518,17 +2535,20 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
     for (const item of items) {
       const extId = String(item.id ?? item.service ?? item.product_id ?? "");
       if (!extId) continue;
-      seenIds.add(extId);
       if (targetExternalId !== null && extId !== targetExternalId) continue;
 
       const name = providerProductName(item);
       const emojiId = providerEmojiId(item);
       const desc = item.desc || item.description || `Automated digital product delivered via API. (ID: ${extId})`;
-      const baseCostPrice = parseFloat(item.rate || item.price || item.cost || 1.0);
+      const rawCost=item.rate ?? item.price ?? item.cost;
+      const baseCostPrice=(typeof rawCost==='number'||typeof rawCost==='string'&&/^\d+(?:\.\d+)?$/.test(rawCost.trim()))?Number(rawCost):NaN;
+      if(!Number.isFinite(baseCostPrice)||baseCostPrice<=0)continue;
       const apiStock = providerStock(item);
 
       const existing = existingByExternalId.get(extId);
       const finalPrice=externalSellingPrice(baseCostPrice,existing,margin,configuredMarginType);
+      if(finalPrice<=0)continue;
+      seenIds.add(extId);
       const priceBdt = Math.round(finalPrice * rate);
 
       let targetId = null;
@@ -2864,6 +2884,7 @@ async function sendOrderPreview(env, chatId, prodId, quantity = 1, editMessageId
     const qty = quantity > 0 ? quantity : 1;
     const unitPrice = Number(prod.price_usd);
     const totalPrice = Number((unitPrice * qty).toFixed(2));
+    await saveCheckoutQuote(env,chatId,prod.id,qty,totalPrice);
     const totalBdt = Math.round(totalPrice * rate);
 
     const diff = Number((totalPrice - userBal).toFixed(2));
@@ -3076,7 +3097,7 @@ async function sendSupport(env, chatId, editMessageId = null) {
   const buttons = [
     [{text:"🎫 My Support Tickets",callback_data:"tickets_mine_0"}],
     [{text:"📦 Get Help with an Order",callback_data:"my_orders"}],
-    [{ text: "💬 Chat with Support Admin", url: `https://t.me/${cleanUsername}` }],
+    [{ text: "💬 Chat with Support Admin", url: /^\d+$/.test(supContact)?`tg://user?id=${supContact}`:`https://t.me/${cleanUsername}` }],
     [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, supText, buttons);
@@ -3580,7 +3601,7 @@ async function showAdminSalesReport(env,chatId,period='today',messageId=null){
     COALESCE(SUM(CASE WHEN sale_origin='local' AND purchase_unit_cost_usd IS NOT NULL THEN ROUND(amount_usd*100)-ROUND(purchase_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS local_profit,
     SUM(CASE WHEN sale_origin IS NULL OR (sale_origin='api' AND provider_unit_cost_usd IS NULL) OR (sale_origin='local' AND purchase_unit_cost_usd IS NULL) THEN 1 ELSE 0 END) AS unknown
     FROM orders WHERE status='completed'${filter} AND julianday(created_at)<=julianday(?)`).bind(...args).first();
-  const text=`📊 <b>Sales & Profit · ${range.label}</b>\nTimezone: Asia/Dhaka\nBy order creation date · completed orders only\n\n<b>Sales</b>\nCompleted orders: <b>${row?.completed||0}</b> · Items: <b>${row?.items||0}</b>\nTotal sales: <b>$${adminMoney(row?.revenue)}</b>\nAPI sales: $${adminMoney(row?.api_revenue)}\nLocal product sales: $${adminMoney(row?.local_revenue)}\n\n<b>API gross profit estimate</b>\nRecorded provider cost: <b>$${adminMoney(row?.known_cost)}</b>\nGross profit: <b>$${adminMoney(row?.gross_profit)}</b>\nCost recorded for ${row?.costed||0} completed API orders.\nProfit = saved selling total − saved provider cost × quantity.\n\n<b>Local product profit</b>\nPurchase cost: <b>$${adminMoney(row?.local_cost)}</b>\nGross profit: <b>$${adminMoney(row?.local_profit)}</b>\n\n<b>Combined gross profit: $${adminMoney(Number(row?.gross_profit||0)+Number(row?.local_profit||0))}</b>\n\nOrders without origin/cost history: <b>${row?.unknown||0}</b> (profit excluded). Orders with missing cost are excluded from profit.\n\nCost is the supplier price saved when the order was created, not a confirmed supplier wallet debit. Payment fees, referral commissions and other expenses are excluded. Deposits are not sales.`;
+  const text=`📊 <b>Sales & Profit · ${range.label}</b>\nTimezone: Asia/Dhaka\nBy order creation date · completed orders only\n\n<b>Sales</b>\nCompleted orders: <b>${row?.completed||0}</b> · Items: <b>${row?.items||0}</b>\nTotal sales: <b>$${adminMoney(row?.revenue)}</b>\nAPI sales: $${adminMoney(row?.api_revenue)}\nLocal product sales: $${adminMoney(row?.local_revenue)}\n\n<b>API product gross profit</b>\nRecorded provider cost: <b>$${adminMoney(row?.known_cost)}</b>\nGross profit: <b>$${adminMoney(row?.gross_profit)}</b>\nCost recorded for ${row?.costed||0} completed API orders.\nProfit = saved selling total − saved provider cost × quantity.\n\n<b>Local product profit</b>\nPurchase cost: <b>$${adminMoney(row?.local_cost)}</b>\nGross profit: <b>$${adminMoney(row?.local_profit)}</b>\n\n<b>Combined gross profit: $${adminMoney(Number(row?.gross_profit||0)+Number(row?.local_profit||0))}</b>\n\nOrders without origin/cost history: <b>${row?.unknown||0}</b> (profit excluded). Orders with missing cost are excluded from profit.\n\nAPI profit uses the API price saved when the order was created. Payment fees, referral commissions and other expenses are excluded. Deposits are not sales.`;
   const buttons=[[{text:'Today',callback_data:'adm_sales_today'},{text:'7 Days',callback_data:'adm_sales_week'},{text:'30 Days',callback_data:'adm_sales_days30'}],[{text:'This Month',callback_data:'adm_sales_month'},{text:'All Time',callback_data:'adm_sales_all'}],[{text:'🔄 Refresh',callback_data:`adm_sales_${period}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
@@ -3849,4 +3870,92 @@ async function handleOrderSearchText(env,chatId,text,state){
   const order=await env.DB.prepare('SELECT id FROM orders WHERE id=?').bind(match[1]).first();
   if(!order){await sendMsg(env,chatId,'No order found with this ID. Check the number and try again.');return true;}
   await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,order.id);return true;
+}
+
+
+async function handleAdminCoreText(env,chatId,text,state){
+  if(!adminUserAccess(env,chatId))return false;
+  const settingMap={awaiting_rate:'usd_to_bdt_rate',awaiting_ref_comm:'referral_commission_percent',awaiting_support_contact:'support_admin',awaiting_force_channel:'force_channel_username',awaiting_force_group:'force_group_username',awaiting_api_url:'external_api_url',awaiting_api_key:'external_api_key'};
+  if(state.state==='awaiting_broadcast'){
+    const body=String(text).trim();if(!body||body.length>500){await sendMsg(env,chatId,'Enter a broadcast text of 1–500 characters.');return true;}
+    const id=crypto.randomUUID();
+    const created=await env.DB.batch([env.DB.prepare("INSERT INTO broadcast_jobs(id,body,max_user_id) SELECT ?,?,COALESCE((SELECT MAX(user_id) FROM users),0) WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)").bind(id,body,chatId,state.state,state.data),env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data)]);
+    if(created[0].meta?.changes)await sendMsg(env,chatId,`<b>Broadcast Preview</b>\n\n${escapeHtml(body)}\n\nSend to registered users in batches of 10. Nothing has been sent yet.`,[[{text:'Send First 10',callback_data:`adm_broadcast_send_${id}`}],[{text:'Cancel',callback_data:'admin_panel'}]]);return true;
+  }
+  const key=settingMap[state.state];
+  if(key){
+    let value=String(text).trim();
+    if(['usd_to_bdt_rate','referral_commission_percent'].includes(key)){
+      const n=parseMarginInput(value);if(!Number.isFinite(n)||n<0||(key==='usd_to_bdt_rate'?n===0||n>100000:n>100)||value.endsWith('%')&&key==='usd_to_bdt_rate'){await sendMsg(env,chatId,'Enter a valid number. Exchange rate must be positive; referral percentage must be 0–100.');return true;}value=String(n);
+    }else if(key==='external_api_url'){
+      try{const url=new URL(value);if(url.protocol!=='https:'||url.username||url.password||url.search||url.hash)throw Error();value=url.origin+url.pathname.replace(/\/+$/,'');}catch{await sendMsg(env,chatId,'Enter a valid HTTPS provider URL without credentials or query parameters.');return true;}
+    }else if(key==='external_api_key'){
+      if(!/^[A-Za-z0-9_.:-]{8,250}$/.test(value)){await sendMsg(env,chatId,'Enter a valid API key without spaces.');return true;}
+    }else{
+      const numeric=key==='support_admin'&&/^\d{5,16}$/.test(value);
+      if(!numeric){value=value.replace(/^https?:\/\/t\.me\//i,'').replace(/^@/,'').replace(/\/$/,'');if(!/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(value)){await sendMsg(env,chatId,'Enter a public Telegram @username or t.me/username link. Support contact also accepts a numeric user ID.');return true;}value='@'+value;}
+    }
+    const writes=[env.DB.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(key,value)];
+    if(key==='usd_to_bdt_rate')writes.push(env.DB.prepare('UPDATE products SET price_bdt=ROUND(price_usd*?)').bind(Number(value)));
+    writes.push(env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data));await env.DB.batch(writes);providerCatalogCache.delete(env.DB);
+    await sendMsg(env,chatId,key==='external_api_key'?'API key saved.':'Setting saved.',[[{text:key.startsWith('external_')?'API Center':'Admin Panel',callback_data:key.startsWith('external_')?'adm_api_menu':'admin_panel'}]]);return true;
+  }
+  if(state.state==='awaiting_stock'){
+    const product=await env.DB.prepare('SELECT * FROM products WHERE id=? AND is_active=1').bind(state.data).first();
+    if(!product||product.is_external){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Choose an active local product to add stock.');return true;}
+    const items=String(text).split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    if(!items.length||items.length>50||items.some(x=>x.length>1500)){await sendMsg(env,chatId,'Send 1–50 stock items, one per line (up to 1500 characters each).');return true;}
+    const writes=items.map(item=>env.DB.prepare('INSERT INTO inventory(product_id,item_data) SELECT ?,? WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)').bind(product.id,item,chatId,state.state,state.data));
+    writes.push(env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data));const saved=await env.DB.batch(writes);
+    const added=saved.slice(0,-1).reduce((n,r)=>n+Number(r.meta?.changes||0),0);await sendMsg(env,chatId,`Stock added: ${added} item(s).`,[[{text:'Product',callback_data:`adm_prod_details_${product.id}`}]]);
+    if(added)await notifyPreorders(env,product.id,escapeHtml(productDisplayName(product)),added);return true;
+  }
+  if(state.state==='awaiting_deposit_amount'){
+    const amount=parseMarginInput(text);if(!Number.isFinite(amount)||amount<=0||amount>1000000||String(text).trim().endsWith('%')){await sendMsg(env,chatId,'Enter a positive USD amount with up to 2 decimal places.');return true;}
+    const deposit=await env.DB.prepare("SELECT * FROM deposits WHERE id=? AND status='pending'").bind(state.data).first();
+    if(!deposit){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Deposit unavailable or already processed.');return true;}
+    const rate=Number(await getSetting(env,'usd_to_bdt_rate','125'));if(!Number.isFinite(rate)||rate<=0){await sendMsg(env,chatId,'Set a valid exchange rate first.');return true;}
+    const bdt=Math.round(amount*rate),token=crypto.randomUUID();
+    const proof="EXISTS(SELECT 1 FROM manual_deposit_credits WHERE deposit_id=? AND token=?)";
+    const writes=[
+      env.DB.prepare(`INSERT OR IGNORE INTO manual_deposit_credits(deposit_id,user_id,amount_usd,amount_bdt,token) SELECT id,user_id,?,?,? FROM deposits WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM users WHERE user_id=deposits.user_id) AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?) AND NOT EXISTS(SELECT 1 FROM mobile_payment_claims WHERE invoice_type='deposit' AND invoice_id=deposits.id) AND NOT EXISTS(SELECT 1 FROM binance_payment_claims WHERE invoice_type='deposit' AND invoice_id=deposits.id) AND NOT EXISTS(SELECT 1 FROM bep20_payment_claims WHERE invoice_type='deposit' AND invoice_id=deposits.id)`).bind(amount,bdt,token,deposit.id,chatId,state.state,state.data),
+      env.DB.prepare(walletChangeSql(`UPDATE users SET balance_usd=COALESCE(balance_usd,0)+?,balance_bdt=COALESCE(balance_bdt,0)+? WHERE user_id=? AND ${proof}`,'deposit','deposit:'+deposit.id)).bind(amount,bdt,deposit.user_id,deposit.id,token),
+      env.DB.prepare(`UPDATE deposits SET amount_usd=?,amount_bdt=?,status='completed' WHERE id=? AND status='pending' AND ${proof}`).bind(amount,bdt,deposit.id,deposit.id,token),
+      env.DB.prepare(`UPDATE mobile_payment_invoices SET status='manual_paid' WHERE invoice_type='deposit' AND invoice_id=? AND status='pending' AND ${proof}`).bind(deposit.id,deposit.id,token),
+      env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data)
+    ];
+    const result=await env.DB.batch(writes);if(!result[0].meta?.changes){await sendMsg(env,chatId,'Deposit is already processed or reserved by automatic verification. No extra balance was added.');return true;}
+    await sendMsg(env,deposit.user_id,`✅ Deposit #${deposit.id} approved by admin. Wallet credited: $${amount.toFixed(2)}.`);await sendMsg(env,chatId,`Deposit #${deposit.id}: $${amount.toFixed(2)} credited.`,[[adminUserProfileButton(deposit.user_id)]]);return true;
+  }
+  return false;
+}
+
+
+async function sendBroadcastBatch(env,chatId,id){
+  if(!adminUserAccess(env,chatId))return;
+  const claim=await env.DB.prepare("UPDATE broadcast_jobs SET lease_until=? WHERE id=? AND status='ready' AND lease_until<?").bind(Date.now()+120000,id,Date.now()).run();
+  if(!claim.meta?.changes){await sendMsg(env,chatId,'Broadcast is already finished or a batch is still sending.');return;}
+  const job=await env.DB.prepare('SELECT * FROM broadcast_jobs WHERE id=?').bind(id).first();
+  const {results}=await env.DB.prepare('SELECT user_id FROM users WHERE user_id>? AND user_id<=? ORDER BY user_id LIMIT 10').bind(job.cursor,job.max_user_id).all();
+  let cursor=job.cursor;
+  for(const user of results){
+    const sent=await sendMsg(env,user.user_id,escapeHtml(job.body));cursor=user.user_id;
+    await env.DB.prepare('UPDATE broadcast_jobs SET cursor=?,sent=sent+?,failed=failed+? WHERE id=?').bind(cursor,sent?.ok?1:0,sent?.ok?0:1,id).run();
+  }
+  const done=results.length<10||cursor>=job.max_user_id;
+  await env.DB.prepare('UPDATE broadcast_jobs SET status=?,lease_until=0 WHERE id=?').bind(done?'done':'ready',id).run();
+  const latest=await env.DB.prepare('SELECT sent,failed FROM broadcast_jobs WHERE id=?').bind(id).first();
+  await sendMsg(env,chatId,`Broadcast ${done?'finished':'batch finished'}.\nSent: ${latest.sent} · Failed: ${latest.failed}`,done?[[{text:'Admin Panel',callback_data:'admin_panel'}]]:[[{text:'Send Next 10',callback_data:`adm_broadcast_send_${id}`}],[{text:'Pause / Admin Panel',callback_data:'admin_panel'}]]);
+}
+
+
+async function saveCheckoutQuote(env,userId,productId,quantity,total){
+  await env.DB.prepare('INSERT OR REPLACE INTO checkout_quotes(user_id,product_id,quantity,total_usd,created_ms) VALUES(?,?,?,?,?)').bind(userId,productId,quantity,total,Date.now()).run();
+}
+async function guardCheckoutQuote(env,chatId,product,quantity,total){
+  const quote=await env.DB.prepare('SELECT * FROM checkout_quotes WHERE user_id=? AND product_id=? AND quantity=?').bind(chatId,product.id,quantity).first();
+  if(quote&&(Math.round(Number(quote.total_usd)*100)!==Math.round(total*100)||Date.now()-quote.created_ms>15*60000)){
+    await sendMsg(env,chatId,'The price changed or this preview expired. Review the updated total and confirm again. No payment was taken.');await sendOrderPreview(env,chatId,product.id,quantity);return false;
+  }
+  return true;
 }
