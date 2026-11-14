@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-pricing-default-3";
+const BOT_BUILD="2026-11-14-preorder-details-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-product-margins-1";
+const DB_SCHEMA_VERSION = "2026-11-preorder-details-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -175,6 +175,7 @@ async function initializeDatabase(db, force) {
     const alters = [
       // Historical preorder tables stored product names without a numeric product_id.
       // Keep those rows intact and unlinked; never guess a product/account for an old request.
+      "ALTER TABLE preorders ADD COLUMN details TEXT DEFAULT '';",
       "ALTER TABLE preorders ADD COLUMN username TEXT DEFAULT NULL;",
       "ALTER TABLE preorders ADD COLUMN product_name TEXT DEFAULT NULL;",
       "ALTER TABLE preorders ADD COLUMN created_at TEXT DEFAULT NULL;",
@@ -703,7 +704,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   if (prod.is_external === 1) {
     if ((prod.api_stock || 0) < qty) {
       await sendMsg(env, chatId, `📦 Available Stock: <b>0</b>\nYou can pre-order and you will be notified the instant it's restocked!`, [
-        [{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]
+        [{ text: "🔔 Notify When Available", callback_data: `preorder_${prod.id}` }]
       ]);
       return;
     }
@@ -749,7 +750,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   const { results: items } = await env.DB.prepare("SELECT * FROM inventory WHERE product_id = ? AND is_sold = 0 LIMIT ?").bind(prod.id, qty).all();
   if (!items || items.length < qty) {
     await sendMsg(env, chatId, `❌ <b>Insufficient Stock!</b>\nOnly ${items ? items.length : 0} item(s) available. You can pre-order!`, [
-      [{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]
+      [{ text: "🔔 Notify When Available", callback_data: `preorder_${prod.id}` }]
     ]);
     return;
   }
@@ -1543,12 +1544,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (prod) {
         const existingPo = await env.DB.prepare("SELECT id FROM preorders WHERE user_id = ? AND product_id = ? AND status = 'pending'").bind(chatId, prodId).first();
-        if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, product_name, status, created_at) VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)").bind(chatId, username, prodId, prod.name).run();
-        await editMsg(env, chatId, messageId, `⏳ <b>Pre-Order Confirmed!</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your pre-order is registered! As soon as new stock is added or synced via API, you will receive an instant notification with a direct purchase link. ❤️`, [
+        if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, product_name, details, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)").bind(chatId, username, prodId, prod.name, JSON.stringify({product_name:prod.name,external_id:prod.is_external?String(prod.external_id):null,type:'stock_notification'})).run();
+        await editMsg(env, chatId, messageId, `⏳ <b>Stock Alert Registered</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your stock alert is registered in this store. No payment was taken and no supplier pre-order was placed. When stock is added or synced, you will receive a purchase link.`, [
           [{ text: "🛒 Continue Shopping", callback_data: "shop" }],
           [{ text: "🏠 Main Menu", callback_data: "home" }]
         ]);
-        await sendMsg(env, env.ADMIN_ID, `🚨 <b>New Pre-Order Placed!</b>\n\nCustomer: ${username} (ID: <code>${chatId}</code>)\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: $${prod.price_usd} USD\n\n⚠️ Please restock this product using Admin Panel or Provider API!`, [
+        await sendMsg(env, env.ADMIN_ID, `🔔 <b>New Stock Alert Request</b>\n\nCustomer: ${username} (ID: <code>${chatId}</code>)\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: $${prod.price_usd} USD\n\n⚠️ Please restock this product using Admin Panel or Provider API!`, [
           [{ text: `➕ Add Stock for ${productDisplayName(prod)}`, callback_data: `adm_addstock_${prod.id}` }]
         ]);
       }
@@ -2762,7 +2763,7 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null, 
     } else if (stockCount > 0) {
       buttons.push([{ text: "🛍️ Buy Now", callback_data: `buynow_${prod.id}_1` }]);
     } else {
-      buttons.push([{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]);
+      buttons.push([{ text: "🔔 Notify When Available", callback_data: `preorder_${prod.id}` }]);
     }
     buttons.push([
       { text: "🔄 Refresh Stock", callback_data: `prod_refresh_${prod.id}` },

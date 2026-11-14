@@ -54,3 +54,10 @@ Production next reported `wallet.reserve — NOT NULL constraint failed: orders.
 Build `2026-11-14-legacy-orders-amount-1` contains the fix. After deployment, `/start` runs the migration. `tests/legacy-orders-migration.cjs` reproduces the exact NOT NULL failure on a populated old table, verifies historical rows, and exercises real wallet/provider, direct-payment and local-wallet writes against the same strict schema. Live provider delivery still requires a genuine confirmed order; mocks do not certify it.
 
 Production also required `orders.currency` with no default. Build `2026-11-14-legacy-order-currency-1` explicitly writes `USD` in every new order path (amount/amount_usd are USD; amount_bdt remains the BDT snapshot). Existing currencies/amounts are preserved. The strict legacy-schema regression now reproduces both missing amount and missing currency errors and checks all three order writers. Before wallet debit/provider dispatch, schema metadata is checked for all unsupported NOT NULL columns without a usable default; these are reported together instead of inventing values or debiting first. Diagnostics lists required/unmapped order fields. Tests cover unknown required columns, no financial/provider side effects, and preserved historical BDT records.
+
+
+## Legacy preorder details and supplier preorders
+
+The historical `preorders.details NOT NULL` field is now explicitly supplied on new stock-alert registrations. Migration adds the field for databases that lack it and preserves existing details and requests. The regression test uses a populated NOT NULL legacy table.
+
+The current preorder callback registers a local restock notification; it does not purchase or reserve stock at the supplier and takes no payment. Buttons and confirmation messages now describe this accurately. Supplier preorder placement needs its documented endpoint, eligibility, payment, idempotency and fulfillment contract; the provided standard reseller `/orders` documentation does not establish those rules.
