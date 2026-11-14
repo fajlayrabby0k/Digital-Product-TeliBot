@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-sms-diagnostics-1";
+const BOT_BUILD="2026-11-14-product-margins-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-user-management-1";
+const DB_SCHEMA_VERSION = "2026-11-product-margins-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -195,6 +195,8 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE products ADD COLUMN external_id TEXT DEFAULT '';",
       "ALTER TABLE products ADD COLUMN cost_price_usd REAL DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN custom_price_usd REAL DEFAULT 0;",
+      "ALTER TABLE products ADD COLUMN profit_margin_type TEXT DEFAULT 'global';",
+      "ALTER TABLE products ADD COLUMN profit_margin_value REAL DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN api_stock INTEGER DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN provider_emoji_id TEXT DEFAULT NULL;",
@@ -261,6 +263,7 @@ async function initializeDatabase(db, force) {
       ['external_api_url', 'https://207-148-64-141.sslip.io'],
       ['external_api_key', ''],
       ['external_profit_margin', '20'],
+      ['external_profit_margin_type', 'percent'],
       ['auto_order_enabled', '1'],
       ['force_channel_username', ''],
       ['force_group_username', ''],
@@ -1236,6 +1239,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
+        if (await handlePricingText(env,chatId,text,adminState))return;
         if (await handleAdminUserSearch(env,chatId,text,adminState))return;
         if (await handlePaymentIconText(env,chatId,text,adminState,msg)) return;
         if (await handleRedeemAdminText(env,chatId,text,adminState)) return;
@@ -1407,6 +1411,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await env.DB.prepare('UPDATE users SET username=?,first_name=? WHERE user_id=?').bind(username,firstName,chatId).run();
       user={...user,username,first_name:firstName};
     }
+    if(await handlePricingCallback(env,chatId,data,messageId))return;
     if(await handleAdminUserCallback(env,chatId,data,messageId))return;
 
     if (["home", "deposit", "shop", "shop_refresh"].includes(data) || /^(?:shop_|prod_|dep_|pay_|direct_pay_|custom_qty_|buynow_)/.test(data)) await clearBinanceInput(env, chatId);
@@ -1825,13 +1830,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       return;
     }
 
-    if (data === "adm_price_menu") {
-      const { results: prods } = await env.DB.prepare("SELECT p.*, CASE WHEN p.is_external = 1 THEN COALESCE(p.api_stock, 0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id = p.id AND i.is_sold = 0) END as stock_qty FROM products p WHERE p.is_active = 1").all();
-      const buttons = prods.map(p => [productListButton(p, `adm_setprice_${p.id}`)]);
-      buttons.push([{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]);
-      await editMsg(env, chatId, messageId, `💰 <b>Select Product to Set Custom Price or Profit Margin:</b>\n\nClick any product below:`, buttons);
-      return;
-    }
+    if(data==='adm_price_menu'){await showPricingProducts(env,chatId,0,messageId);return;}
 
     if (data.startsWith("adm_setprice_")) {
       const prodId = data.replace("adm_setprice_", "");
@@ -2062,6 +2061,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const apiUrl = await getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io");
       const apiKey = await getSetting(env, "external_api_key", "");
       const margin = await getSetting(env, "external_profit_margin", "20");
+      const marginType=await getSetting(env,'external_profit_margin_type','percent');
+      const marginLabel=marginType==='fixed'?`+$${Number(margin).toFixed(2)} USD`:`${margin}%`;
       const autoOrder = await getSetting(env, "auto_order_enabled", "1") === "1";
       const apiProds = await env.DB.prepare("SELECT COUNT(*) as c FROM products WHERE is_external = 1 AND is_active = 1").first();
       const count = apiProds ? apiProds.c : 0;
@@ -2074,11 +2075,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         else { statusText = "✅ Key Set (Live Sync Ready)"; balanceText = "Active"; }
       }
 
-      const apiText = `🔌 <b>Live External API Center</b>\n━━━━━━━━━━━━━━━━━━━━\n• <b>API Status:</b> ${statusText}\n• <b>Wallet:</b> <b>${balanceText}</b>\n• <b>Base URL:</b> <code>${apiUrl}</code>\n• <b>API Key:</b> <code>${apiKey ? apiKey.slice(0, 10) + "••••••••" : "Not Set"}</code>\n• <b>Profit Margin:</b> <b>${margin}%</b>\n• <b>Auto-Order:</b> <b>${autoOrder ? "✅ Enabled" : "⏸️ Disabled"}</b>\n• <b>Active Synced Products:</b> <b>${count} products (Live Stock Sync Enabled)</b>`;
+      const apiText = `🔌 <b>Live External API Center</b>\n━━━━━━━━━━━━━━━━━━━━\n• <b>API Status:</b> ${statusText}\n• <b>Wallet:</b> <b>${balanceText}</b>\n• <b>Base URL:</b> <code>${apiUrl}</code>\n• <b>API Key:</b> <code>${apiKey ? apiKey.slice(0, 10) + "••••••••" : "Not Set"}</code>\n• <b>Profit Margin:</b> <b>${marginLabel}</b>\n• <b>Auto-Order:</b> <b>${autoOrder ? "✅ Enabled" : "⏸️ Disabled"}</b>\n• <b>Active Synced Products:</b> <b>${count} products (Live Stock Sync Enabled)</b>`;
       await editMsg(env, chatId, messageId, apiText, [
         [{ text: "🔄 Sync Products Now", callback_data: "adm_sync_api" }],
         [{ text: "🔑 Set API Key", callback_data: "adm_set_api_key" }, { text: "🔗 Set Base URL", callback_data: "adm_set_api_url" }],
-        [{ text: `📈 Profit Margin (${margin}%)`, callback_data: "adm_set_api_margin" }, { text: `🤖 Auto-Order: ${autoOrder ? "ON" : "OFF"}`, callback_data: "adm_toggle_auto_order" }],
+        [{ text: "Default Percentage %", callback_data: "adm_set_api_margin" }, { text: `🤖 Auto-Order: ${autoOrder ? "ON" : "OFF"}`, callback_data: "adm_toggle_auto_order" }],
+        [{text:'Default Fixed Profit +USD',callback_data:'adm_set_api_fixed_margin'}],
         [{ text: "💰 Set Custom Prices", callback_data: "adm_price_menu" }],
         [{ text: "🧪 Test Demo API", callback_data: "adm_setup_demo_api" }],
         [{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]
@@ -2416,11 +2418,12 @@ async function fetchProviderCatalog(baseUrl, key) {
 // Full live sync for all external products
 async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual = false, targetExternalId = null, forceFresh = true) {
   try {
-    const [configuredUrl, configuredKey, configuredRate, configuredMargin] = await Promise.all([
+    const [configuredUrl, configuredKey, configuredRate, configuredMargin, configuredMarginType] = await Promise.all([
       apiUrl ?? getSetting(env, "external_api_url", "https://207-148-64-141.sslip.io"),
       apiKey ?? getSetting(env, "external_api_key", ""),
       getSetting(env, "usd_to_bdt_rate", "125"),
-      getSetting(env, "external_profit_margin", "20")
+      getSetting(env, "external_profit_margin", "20"),
+      getSetting(env,"external_profit_margin_type","percent")
     ]);
     let baseUrl = configuredUrl.trim().replace(/\/+$/, "");
     if (baseUrl.includes("/api/reseller")) baseUrl = baseUrl.split("/api/reseller")[0];
@@ -2429,7 +2432,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
 
     const items = await readProviderCatalog(env.DB, baseUrl, key, forceFresh);
     const snapshot = providerCatalogCache.get(env.DB);
-    if (!forceFresh && targetExternalId === null && snapshot?.items === items && snapshot.appliedRate === configuredRate && snapshot.appliedMargin === configuredMargin) {
+    if (!forceFresh && targetExternalId === null && snapshot?.items === items && snapshot.appliedRate === configuredRate && snapshot.appliedMargin === configuredMargin && snapshot.appliedMarginType === configuredMarginType) {
       return { success: true, message: "Recent stock snapshot reused." };
     }
 
@@ -2455,9 +2458,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       const apiStock = providerStock(item);
 
       const existing = existingByExternalId.get(extId);
-      let finalPrice = (existing && existing.custom_price_usd && existing.custom_price_usd > 0)
-        ? existing.custom_price_usd
-        : Number((baseCostPrice * (1 + margin / 100)).toFixed(2));
+      const finalPrice=externalSellingPrice(baseCostPrice,existing,margin,configuredMarginType);
       const priceBdt = Math.round(finalPrice * rate);
 
       let targetId = null;
@@ -2495,7 +2496,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
 
     if (targetExternalId === null) {
       await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
-      if (snapshot?.items === items) { snapshot.appliedRate = configuredRate; snapshot.appliedMargin = configuredMargin; }
+      if (snapshot?.items === items) { snapshot.appliedRate = configuredRate; snapshot.appliedMargin = configuredMargin; snapshot.appliedMarginType=configuredMarginType; }
     }
     return { success: true, message: `Successfully connected! Imported & updated <b>${importedCount} products</b> with live stock and pricing.` };
   } catch (err) {
@@ -3354,4 +3355,113 @@ async function handleAdminUserCallback(env,chatId,data,messageId){
   match=data.match(/^adm_user_view_(\d+)$/);if(match){await clearAdminState(env,chatId);await showAdminUserProfile(env,chatId,match[1],messageId);return true;}
   match=data.match(/^adm_user_history_(orders|deposits)_(\d+)_(\d+)$/);if(match){await showAdminUserHistory(env,chatId,match[2],match[1],match[3],messageId);return true;}
   return false;
+}
+
+// Markup is measured against the current provider cost, not against the previous selling price.
+function externalSellingPrice(cost,product,globalMargin=20,globalType="percent"){
+  const mode=product?.profit_margin_type||'global',value=Number(product?.profit_margin_value||0),base=Number(cost);
+  let price;
+  if(mode==='percent')price=base*(1+value/100);
+  else if(mode==='fixed')price=base+value;
+  else if(mode==='price')price=value;
+  else if(Number(product?.custom_price_usd)>0)price=Number(product.custom_price_usd); // Preserve existing fixed-price overrides.
+  else {const inherited=Number.isFinite(Number(globalMargin))?Number(globalMargin):20;price=globalType==='fixed'?base+inherited:base*(1+inherited/100);}
+  if(!Number.isFinite(price)||price<0)throw new Error('Provider price or margin is invalid');
+  return Number(price.toFixed(2));
+}
+function pricingModeLabel(product,globalMargin,globalType="percent"){
+  if(product.profit_margin_type==='percent')return `Custom ${Number(product.profit_margin_value)}%`;
+  if(product.profit_margin_type==='fixed')return `Fixed profit +$${Number(product.profit_margin_value).toFixed(2)}`;
+  if(product.profit_margin_type==='price')return `Fixed selling price $${Number(product.profit_margin_value).toFixed(2)}`;
+  if(Number(product.custom_price_usd)>0)return `Existing fixed selling price $${Number(product.custom_price_usd).toFixed(2)}`;
+  return globalType==='fixed'?`Default fixed profit +$${Number(globalMargin).toFixed(2)}`:`Default ${globalMargin}%`;
+}
+async function showProductMargin(env,chatId,id,messageId=null){
+  if(String(chatId)!==String(env.ADMIN_ID))return;
+  const product=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(id).first();if(!product||product.is_external!==1){await sendMsg(env,chatId,'API product not found.');return;}
+  await clearAdminState(env,chatId);
+  const [margin,globalType]=await Promise.all([getSetting(env,'external_profit_margin','20'),getSetting(env,'external_profit_margin_type','percent')]);
+  const text=`📈 <b>Product Profit Margin</b>\n\n${escapeHtml(productDisplayName(product))}\nProvider cost: <b>$${Number(product.cost_price_usd).toFixed(2)}</b>\nSelling price: <b>$${Number(product.price_usd).toFixed(2)}</b>\nRule: <b>${escapeHtml(pricingModeLabel(product,margin,globalType))}</b>\n\nPercentage: $5 cost + 20% = $6\nFixed profit: $5 cost + $0.50 = $5.50\n\nPercentage/fixed-profit rules follow provider cost changes. A fixed selling price stays constant. All rules remain saved after sync.`;
+  const buttons=[[{text:'Custom Percentage %',callback_data:`adm_margin_percent_${id}`}],[{text:'Fixed Profit +USD',callback_data:`adm_margin_fixed_${id}`}],[{text:`Use Default (${globalType==='fixed'?'+$'+Number(margin).toFixed(2):margin+'%'})`,callback_data:`adm_margin_global_${id}`}],[{text:'+10%',callback_data:`adm_quickmargin_${id}_10`},{text:'+20%',callback_data:`adm_quickmargin_${id}_20`},{text:'+30%',callback_data:`adm_quickmargin_${id}_30`}],[{text:'Fixed Selling Price (USD)',callback_data:`adm_margin_price_${id}`}],[{text:'Products',callback_data:'adm_price_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]];
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function saveProductMargin(env,chatId,id,mode,value){
+  if(String(chatId)!==String(env.ADMIN_ID))throw new Error('Admin access required');
+  if(!['global','percent','fixed','price'].includes(mode)||!Number.isFinite(value)||value<0||value>(mode==='percent'?10000:1000000)||(mode==='price'&&value<=0))throw new Error('Invalid margin value');
+  const product=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(id).first();if(!product||product.is_external!==1)throw new Error('API product not found');
+  const [margin,globalType,rateText]=await Promise.all([getSetting(env,'external_profit_margin','20'),getSetting(env,'external_profit_margin_type','percent'),getSetting(env,'usd_to_bdt_rate','125')]);
+  const rate=Number(rateText);if(!Number.isFinite(rate)||rate<=0)throw new Error('Exchange rate is invalid');
+  const updated={...product,profit_margin_type:mode,profit_margin_value:value,custom_price_usd:mode==='price'?value:0};
+  const price=externalSellingPrice(product.cost_price_usd,updated,margin,globalType);
+  if(price<=0)throw new Error('Provider cost is unavailable or selling price is zero');
+  await env.DB.prepare('UPDATE products SET profit_margin_type=?,profit_margin_value=?,custom_price_usd=?,price_usd=?,price_bdt=? WHERE id=? AND is_external=1').bind(mode,value,updated.custom_price_usd,price,Math.round(price*rate),id).run();
+  providerCatalogCache.delete(env.DB);
+}
+async function handlePricingCallback(env,chatId,data,messageId){
+  if(String(chatId)!==String(env.ADMIN_ID))return false;
+  if(data==='adm_set_api_fixed_margin'){
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_api_fixed_margin','')").bind(chatId).run();
+    await editMsg(env,chatId,messageId,'Enter default profit in USD to add to each API product cost, e.g. 0.50. Product-specific overrides stay unchanged.',[[{text:'Cancel',callback_data:'adm_api_menu'}]]);return true;
+  }
+  const page=data.match(/^adm_price_page_(\d+)$/);if(page){await showPricingProducts(env,chatId,Number(page[1]),messageId);return true;}
+  let match=data.match(/^adm_setprice_(\d+)$/);
+  if(match){const product=await env.DB.prepare('SELECT is_external FROM products WHERE id=?').bind(match[1]).first();if(product?.is_external===1){await showProductMargin(env,chatId,match[1],messageId);return true;}return false;}
+  match=data.match(/^adm_margin_(global|percent|fixed|price)_(\d+)$/);
+  if(match){
+    const [,mode,id]=match;
+    if(mode==='global'){await saveProductMargin(env,chatId,id,'global',0);await showProductMargin(env,chatId,id,messageId);return true;}
+    const product=await env.DB.prepare('SELECT is_external FROM products WHERE id=?').bind(id).first();if(product?.is_external!==1){await sendMsg(env,chatId,'API product not found.');return true;}
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_product_margin',?)").bind(chatId,JSON.stringify({id:Number(id),mode})).run();
+    const prompt=mode==='percent'?'Enter profit percentage, e.g. 20 or 12.50. 0% is allowed.':mode==='fixed'?'Enter profit in USD to add to provider cost, e.g. 0.50. This is profit, not the final selling price.':'Enter the final fixed selling price in USD, e.g. 5.50.';
+    await editMsg(env,chatId,messageId,prompt,[[{text:'Cancel',callback_data:`adm_setprice_${id}`}]]);return true;
+  }
+  match=data.match(/^adm_quickmargin_(\d+)_(\d+(?:\.\d+)?)$/);
+  if(match){const product=await env.DB.prepare('SELECT is_external FROM products WHERE id=?').bind(match[1]).first();if(product?.is_external===1){await saveProductMargin(env,chatId,match[1],'percent',Number(match[2]));await showProductMargin(env,chatId,match[1],messageId);return true;}}
+  return false;
+}
+function parseMarginInput(text){const value=String(text).trim().replace(/[০-৯]/g,c=>String(c.charCodeAt(0)-'০'.charCodeAt(0))).replace(/^\+\s*/,'').replace(/^\$\s*/,'').replace(/\s*%$/,'');return /^\d{1,7}(?:\.\d{1,2})?$/.test(value)?Number(value):NaN;}
+async function handlePricingText(env,chatId,text,state){
+  if(String(chatId)!==String(env.ADMIN_ID)||!['awaiting_product_margin','awaiting_api_margin','awaiting_api_fixed_margin','awaiting_new_price'].includes(state.state))return false;
+  let value=parseMarginInput(text);
+  if(!Number.isFinite(value)||value<0){await sendMsg(env,chatId,'Enter a non-negative number with up to 2 decimal places.');return true;}
+  try{
+    if(['awaiting_api_margin','awaiting_api_fixed_margin'].includes(state.state)){
+      const globalType=state.state==='awaiting_api_fixed_margin'?'fixed':'percent';
+      if(globalType==='fixed'&&String(text).trim().endsWith('%'))throw new Error('Enter a USD profit amount; choose percentage mode for %');
+      if(globalType==='percent'&&String(text).trim().replace(/^\+\s*/,'').startsWith('$'))throw new Error('Enter a percentage, not a USD amount');
+      if(value>(globalType==='fixed'?1000000:10000))throw new Error('Margin value is too large');
+      const rate=Number(await getSetting(env,'usd_to_bdt_rate','125'));if(!Number.isFinite(rate)||rate<=0)throw new Error('Exchange rate is invalid');
+      const {results}=await env.DB.prepare('SELECT * FROM products WHERE is_external=1').all();
+      const statements=[env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('external_profit_margin',?)").bind(String(value)),env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('external_profit_margin_type',?)").bind(globalType)];
+      const repriced=[];
+      for(const product of results){const price=externalSellingPrice(product.cost_price_usd,product,value,globalType),bdt=Math.round(price*rate);if(Number(product.price_usd)!==price||Number(product.price_bdt)!==bdt)repriced.push({id:product.id,usd:price,bdt});}
+      if(repriced.length)statements.push(env.DB.prepare(`WITH repriced AS (SELECT json_extract(value,'$.id') AS id,json_extract(value,'$.usd') AS usd,json_extract(value,'$.bdt') AS bdt FROM json_each(?)) UPDATE products SET price_usd=(SELECT r.usd FROM repriced r WHERE r.id=products.id),price_bdt=(SELECT r.bdt FROM repriced r WHERE r.id=products.id) WHERE is_external=1 AND id IN (SELECT id FROM repriced)`).bind(JSON.stringify(repriced)));
+      await env.DB.batch(statements);providerCatalogCache.delete(env.DB);await clearAdminState(env,chatId);
+      await sendMsg(env,chatId,`Default API profit margin saved: <b>${globalType==='fixed'?'+$'+value.toFixed(2):value+'%'}</b>. Product-specific overrides are retained.`,[[{text:'API Center',callback_data:'adm_api_menu'},{text:'Products',callback_data:'adm_price_menu'}]]);return true;
+    }
+    let id,mode;
+    if(state.state==='awaiting_new_price'){
+      id=Number(state.data);mode=String(text).trim().endsWith('%')?'percent':'price';
+      const product=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(id).first();
+      if(product?.is_external!==1){
+        if(!product||value<=0||mode!=='price')throw new Error('Enter a positive fixed selling price for this local product');
+        const rate=Number(await getSetting(env,'usd_to_bdt_rate','125'));if(!Number.isFinite(rate)||rate<=0)throw new Error('Exchange rate is invalid');
+        await env.DB.prepare('UPDATE products SET price_usd=?,price_bdt=?,custom_price_usd=? WHERE id=?').bind(value,Math.round(value*rate),value,id).run();await clearAdminState(env,chatId);await sendMsg(env,chatId,'Local product price saved.',[[{text:'Products',callback_data:'adm_price_menu'}]]);return true;
+      }
+    }else{const data=JSON.parse(state.data);id=data.id;mode=data.mode;}
+    if(mode!=='percent'&&String(text).trim().endsWith('%'))throw new Error('This field expects USD; choose Custom Percentage for %');
+    if(mode==='percent'&&String(text).trim().replace(/^\+\s*/,'').startsWith('$'))throw new Error('This field expects a percentage, not USD');
+    await saveProductMargin(env,chatId,id,mode,value);await showProductMargin(env,chatId,id);return true;
+  }catch(error){await sendMsg(env,chatId,`Price was not saved: ${escapeHtml(error.message)}. Please check and retry.`);return true;}
+}
+
+async function showPricingProducts(env,chatId,page=0,messageId=null){
+  if(String(chatId)!==String(env.ADMIN_ID))return;
+  await clearAdminState(env,chatId);page=adminUserPage(page);
+  const {results}=await env.DB.prepare("SELECT p.*,CASE WHEN p.is_external=1 THEN COALESCE(p.api_stock,0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id=p.id AND i.is_sold=0) END AS stock_qty FROM products p WHERE p.is_active=1 ORDER BY p.id LIMIT 11 OFFSET ?").bind(page*10).all();
+  const buttons=results.slice(0,10).map(product=>[productListButton(product,`adm_setprice_${product.id}`)]),pager=[];
+  if(page>0)pager.push({text:'Previous',callback_data:`adm_price_page_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_price_page_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'API Center',callback_data:'adm_api_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  const text=`📈 <b>Prices / Profit Margins</b> · Page ${page+1}\n\nSelect a product to set a custom percentage or fixed profit in USD.`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
