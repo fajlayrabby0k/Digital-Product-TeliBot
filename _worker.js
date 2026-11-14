@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-sales-periods-2";
+const BOT_BUILD="2026-11-14-local-costs-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-sales-reports-1";
+const DB_SCHEMA_VERSION = "2026-11-local-costs-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -182,6 +182,8 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE preorders ADD COLUMN product_id INTEGER DEFAULT NULL;",
       "ALTER TABLE preorders ADD COLUMN user_id INTEGER DEFAULT NULL;",
       "ALTER TABLE preorders ADD COLUMN status TEXT DEFAULT 'pending';",
+      "ALTER TABLE products ADD COLUMN purchase_cost_usd REAL DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN purchase_unit_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN sale_origin TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN provider_unit_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN product_id INTEGER DEFAULT NULL;",
@@ -232,6 +234,8 @@ async function initializeDatabase(db, force) {
       UPDATE orders SET sale_origin=(SELECT CASE WHEN is_external=1 THEN 'api' ELSE 'local' END FROM products WHERE id=NEW.product_id),
       provider_unit_cost_usd=(SELECT CASE WHEN is_external=1 AND cost_price_usd>0 THEN cost_price_usd ELSE NULL END FROM products WHERE id=NEW.product_id)
       WHERE id=NEW.id; END`).run();
+    await db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_local_cost AFTER INSERT ON orders BEGIN
+      UPDATE orders SET purchase_unit_cost_usd=(SELECT purchase_cost_usd FROM products WHERE id=NEW.product_id AND COALESCE(is_external,0)=0) WHERE id=NEW.id; END`).run();
     orderWriteSchemaCache.delete(db);
     await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
@@ -1246,6 +1250,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
+        if (await handleLocalProductText(env,chatId,text,adminState))return;
         if (await handlePricingText(env,chatId,text,adminState))return;
         if (await handleAdminUserSearch(env,chatId,text,adminState))return;
         if (await handlePaymentIconText(env,chatId,text,adminState,msg)) return;
@@ -1419,6 +1424,14 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       user={...user,username,first_name:firstName};
     }
     if(/^adm_sales_(today|week|days30|month|all)$/.test(data)){await showAdminSalesReport(env,chatId,data.slice(10),messageId);return;}
+    const localCostAction=data.match(/^adm_local_cost_(\d+)$/);
+    if(localCostAction){
+      if(!adminUserAccess(env,chatId))return;
+      const product=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(localCostAction[1]).first();
+      if(!product||product.is_external){await sendMsg(env,chatId,'Purchase cost can be edited for local products only.');return;}
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_local_cost',?)").bind(chatId,String(product.id)).run();
+      await editMsg(env,chatId,messageId,'Enter the purchase cost per item in USD, e.g. 4.00. Zero is allowed for free stock. This changes future orders only.',[[{text:'Cancel',callback_data:`adm_prod_details_${product.id}`}]]);return;
+    }
     if(await handlePricingCallback(env,chatId,data,messageId))return;
     if(await handleAdminUserCallback(env,chatId,data,messageId))return;
 
@@ -1848,7 +1861,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const liveStock = prod.is_external ? (prod.api_stock || 0) : (stock ? stock.count : 0);
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_new_price', ?)").bind(chatId, prodId).run();
 
-      const costInfo = (prod.is_external && prod.cost_price_usd > 0) ? `\n• Provider Cost: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>` : "";
+      const costInfo = prod.is_external ? `\n• Provider Cost: <b>$${adminMoney(prod.cost_price_usd)} USD</b>` : prod.purchase_cost_usd==null?"\n• Purchase Cost: Not set":`\n• Purchase Cost: <b>$${adminMoney(prod.purchase_cost_usd)}</b>\n• Gross Profit / Item: <b>$${localProfitInfo(prod.purchase_cost_usd,prod.price_usd).profit}</b>`;
       await editMsg(env, chatId, messageId, `💰 <b>Set Custom Price for: ${prod ? prod.name : "Product"}</b>\n${costInfo}\n• Current Price: <b>$${prod.price_usd.toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n• Live Stock: <b>${liveStock} items</b>\n\n👉 <b>Tap a Profit Margin % button below</b> OR <b>type a custom price / margin in chat</b>:`, [
         [
           { text: "+10% Profit", callback_data: `adm_quickmargin_${prod.id}_10` },
@@ -1875,7 +1888,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const marginPct = parseFloat(parts[1]) || 20;
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (!prod) return;
-      const baseCost = (prod.is_external && prod.cost_price_usd > 0) ? prod.cost_price_usd : prod.price_usd;
+      const baseCost = prod.is_external ? prod.cost_price_usd : (prod.purchase_cost_usd ?? prod.price_usd);
       const newUsd = Number((baseCost * (1 + marginPct / 100)).toFixed(2));
       const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
       const newBdt = Math.round(newUsd * rate);
@@ -1892,7 +1905,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
 
     if (data === "adm_add_product") {
-      await editMsg(env, chatId, messageId, `➕ <b>Add New Product — Step 1/4: Choose an Icon</b>\n\nSelect an attractive icon for this product from the presets below, or choose 'Skip' to type your own:`, [
+      await editMsg(env, chatId, messageId, `➕ <b>Add New Product — Step 1/5: Choose an Icon</b>\n\nSelect an attractive icon for this product from the presets below, or choose 'Skip' to type your own:`, [
         [
           { text: "🤖 AI Tool", callback_data: "adm_newicon_🤖" },
           { text: "🍿 Streaming", callback_data: "adm_newicon_🍿" },
@@ -1922,7 +1935,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const icon = data.replace("adm_newicon_", "");
       const iconData = { icon: icon === "NONE" ? "" : icon };
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_prod_name', ?)").bind(chatId, JSON.stringify(iconData)).run();
-      await editMsg(env, chatId, messageId, `➕ <b>Add Product — Step 2/4: Product Name</b>\n\nSelected Icon: <b>${icon === "NONE" ? "None / Custom" : icon}</b>\n\nPlease enter the <b>Name</b> of the product:\n<i>(Example: Amazon Prime 6 Months)</i>`, [
+      await editMsg(env, chatId, messageId, `➕ <b>Add Product — Step 2/5: Product Name</b>\n\nSelected Icon: <b>${icon === "NONE" ? "None / Custom" : icon}</b>\n\nPlease enter the <b>Name</b> of the product:\n<i>(Example: Amazon Prime 6 Months)</i>`, [
         [{ text: "❌ Cancel", callback_data: "admin_panel" }]
       ]);
       return;
@@ -1978,11 +1991,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const liveStock = prod.is_external ? (prod.api_stock || 0) : (stock ? stock.count : 0);
 
       const text = `📦 <b>${productDisplayName(prod)}</b>\n\n• Selling Price: <b>$${prod.price_usd.toFixed(2)} USD (≈ ৳${prod.price_bdt} BDT)</b>\n` +
-        (prod.is_external ? `• Provider Cost: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>\n• Origin: <b>External Bot API (Live Synced)</b>\n` : `• Origin: <b>Manual Store Stock</b>\n`) +
+        (prod.is_external ? `• Provider Cost: <b>$${prod.cost_price_usd.toFixed(2)} USD</b>\n• Origin: <b>External Bot API (Live Synced)</b>\n` : `• Purchase Cost: <b>${prod.purchase_cost_usd==null?'Not set':'$'+adminMoney(prod.purchase_cost_usd)}</b>\n• Gross Profit / Item: <b>${prod.purchase_cost_usd==null?'Unknown':'$'+localProfitInfo(prod.purchase_cost_usd,prod.price_usd).profit}</b>\n• Markup on Cost: <b>${prod.purchase_cost_usd==null?'Unknown':localProfitInfo(prod.purchase_cost_usd,prod.price_usd).markup}</b>\n• Origin: <b>Manual Store Stock</b>\n`) +
         `• Live Stock: <b>${liveStock} items</b>\n\n📝 <b>Description:</b>\n${renderProductDescription(prod.description)}`;
 
       const buttons = [
         [{ text: "💰 Set Custom Price", callback_data: `adm_setprice_${prod.id}` }],
+        prod.is_external?[]:[{text:"💵 Set Purchase Cost",callback_data:`adm_local_cost_${prod.id}`}],
         [{ text: "🎨 Set Product Icon", callback_data: `adm_icon_${prod.id}` }],
         prod.is_external ? [] : [{ text: "➕ Add Stock", callback_data: `adm_addstock_${prod.id}` }],
         [{ text: "🗑️ Delete Product", callback_data: `adm_del_prod_${prod.id}` }],
@@ -3505,9 +3519,56 @@ async function showAdminSalesReport(env,chatId,period='today',messageId=null){
     COALESCE(SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN ROUND(provider_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS known_cost,
     COALESCE(SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN ROUND(amount_usd*100)-ROUND(provider_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS gross_profit,
     SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN 1 ELSE 0 END) AS costed,
-    SUM(CASE WHEN sale_origin IS NULL OR (sale_origin='api' AND provider_unit_cost_usd IS NULL) THEN 1 ELSE 0 END) AS unknown
+    COALESCE(SUM(CASE WHEN sale_origin='local' AND purchase_unit_cost_usd IS NOT NULL THEN ROUND(purchase_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS local_cost,
+    COALESCE(SUM(CASE WHEN sale_origin='local' AND purchase_unit_cost_usd IS NOT NULL THEN ROUND(amount_usd*100)-ROUND(purchase_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS local_profit,
+    SUM(CASE WHEN sale_origin IS NULL OR (sale_origin='api' AND provider_unit_cost_usd IS NULL) OR (sale_origin='local' AND purchase_unit_cost_usd IS NULL) THEN 1 ELSE 0 END) AS unknown
     FROM orders WHERE status='completed'${filter} AND julianday(created_at)<=julianday(?)`).bind(...args).first();
-  const text=`📊 <b>Sales & Profit · ${range.label}</b>\nTimezone: Asia/Dhaka\nBy order creation date · completed orders only\n\n<b>Sales</b>\nCompleted orders: <b>${row?.completed||0}</b> · Items: <b>${row?.items||0}</b>\nTotal sales: <b>$${adminMoney(row?.revenue)}</b>\nAPI sales: $${adminMoney(row?.api_revenue)}\nLocal product sales: $${adminMoney(row?.local_revenue)}\n\n<b>API gross profit estimate</b>\nRecorded provider cost: <b>$${adminMoney(row?.known_cost)}</b>\nGross profit: <b>$${adminMoney(row?.gross_profit)}</b>\nCost recorded for ${row?.costed||0} completed API orders.\nProfit = saved selling total − saved provider cost × quantity.\n\nOrders without origin/API cost history: <b>${row?.unknown||0}</b> (profit excluded). Local product costs are not recorded; local profit is excluded.\n\nCost is the supplier price saved when the order was created, not a confirmed supplier wallet debit. Payment fees, referral commissions and other expenses are excluded. Deposits are not sales.`;
+  const text=`📊 <b>Sales & Profit · ${range.label}</b>\nTimezone: Asia/Dhaka\nBy order creation date · completed orders only\n\n<b>Sales</b>\nCompleted orders: <b>${row?.completed||0}</b> · Items: <b>${row?.items||0}</b>\nTotal sales: <b>$${adminMoney(row?.revenue)}</b>\nAPI sales: $${adminMoney(row?.api_revenue)}\nLocal product sales: $${adminMoney(row?.local_revenue)}\n\n<b>API gross profit estimate</b>\nRecorded provider cost: <b>$${adminMoney(row?.known_cost)}</b>\nGross profit: <b>$${adminMoney(row?.gross_profit)}</b>\nCost recorded for ${row?.costed||0} completed API orders.\nProfit = saved selling total − saved provider cost × quantity.\n\n<b>Local product profit</b>\nPurchase cost: <b>$${adminMoney(row?.local_cost)}</b>\nGross profit: <b>$${adminMoney(row?.local_profit)}</b>\n\n<b>Combined gross profit: $${adminMoney(Number(row?.gross_profit||0)+Number(row?.local_profit||0))}</b>\n\nOrders without origin/cost history: <b>${row?.unknown||0}</b> (profit excluded). Orders with missing cost are excluded from profit.\n\nCost is the supplier price saved when the order was created, not a confirmed supplier wallet debit. Payment fees, referral commissions and other expenses are excluded. Deposits are not sales.`;
   const buttons=[[{text:'Today',callback_data:'adm_sales_today'},{text:'7 Days',callback_data:'adm_sales_week'},{text:'30 Days',callback_data:'adm_sales_days30'}],[{text:'This Month',callback_data:'adm_sales_month'},{text:'All Time',callback_data:'adm_sales_all'}],[{text:'🔄 Refresh',callback_data:`adm_sales_${period}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+
+
+function localProfitInfo(cost,price){
+  const costCents=Math.round(Number(cost)*100),priceCents=Math.round(Number(price)*100),profit=priceCents-costCents;
+  return {profit:(profit/100).toFixed(2),markup:costCents>0?(profit/costCents*100).toFixed(2)+'%':'N/A (zero cost)'};
+}
+async function handleLocalProductText(env,chatId,text,state){
+  const steps=['awaiting_prod_name','awaiting_prod_desc','awaiting_prod_cost','awaiting_prod_sale','awaiting_local_cost'];
+  if(!adminUserAccess(env,chatId)||!steps.includes(state.state))return false;
+  const cancel=[[{text:'Cancel',callback_data:'admin_panel'}]];
+  if(state.state==='awaiting_local_cost'){
+    const value=parseMarginInput(text);
+    if(!Number.isFinite(value)||value<0||value>1000000||String(text).trim().endsWith('%')){await sendMsg(env,chatId,'Enter purchase cost in USD with up to 2 decimal places, e.g. 4.00.',cancel);return true;}
+    const product=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(state.data).first();
+    if(!product||product.is_external){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Local product not found.');return true;}
+    await env.DB.prepare('UPDATE products SET purchase_cost_usd=? WHERE id=? AND COALESCE(is_external,0)=0').bind(value,product.id).run();
+    await clearAdminState(env,chatId);
+    const info=localProfitInfo(value,product.price_usd);
+    await sendMsg(env,chatId,`Purchase cost saved: <b>$${value.toFixed(2)}</b> per item.\nSelling price: $${adminMoney(product.price_usd)}\nGross profit: <b>$${info.profit}</b> per item\nMarkup on cost: ${info.markup}\nExisting orders keep their recorded costs.`,[[{text:'Product',callback_data:`adm_prod_details_${product.id}`}]]);return true;
+  }
+  let draft;try{draft=JSON.parse(state.data||'{}');}catch{await clearAdminState(env,chatId);await sendMsg(env,chatId,'Please restart Add New Product.');return true;}
+  const next=async(step,prompt)=>{await env.DB.prepare('UPDATE admin_states SET state=?,data=? WHERE user_id=?').bind(step,JSON.stringify(draft),chatId).run();await sendMsg(env,chatId,prompt,cancel);};
+  if(state.state==='awaiting_prod_name'){
+    if(!text.trim()||text.length>150){await sendMsg(env,chatId,'Enter a product name up to 150 characters.',cancel);return true;}
+    draft.name=text.trim();await next('awaiting_prod_desc','<b>Add Product · Step 3/5</b>\nSend the product description.');return true;
+  }
+  if(state.state==='awaiting_prod_desc'){
+    if(!text.trim()||text.length>2000){await sendMsg(env,chatId,'Enter a description up to 2000 characters.',cancel);return true;}
+    draft.description=text.trim();await next('awaiting_prod_cost','<b>Add Product · Step 4/5: Purchase Cost</b>\nEnter purchase cost per item in USD, e.g. 4.00. Zero is allowed.');return true;
+  }
+  const value=parseMarginInput(text);
+  if(!Number.isFinite(value)||value<0||value>1000000||String(text).trim().endsWith('%')||(state.state==='awaiting_prod_sale'&&value===0)){await sendMsg(env,chatId,'Enter a valid USD amount with up to 2 decimal places. Selling price must be greater than zero.',cancel);return true;}
+  if(state.state==='awaiting_prod_cost'){draft.cost=value;await next('awaiting_prod_sale',`<b>Add Product · Step 5/5: Selling Price</b>\nPurchase cost: $${value.toFixed(2)} per item.\nEnter selling price in USD, e.g. 5.00.`);return true;}
+  if(!Number.isFinite(draft.cost)||!draft.name||!draft.description){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Product draft is incomplete. Please restart Add New Product.');return true;}
+  const rate=Number(await getSetting(env,'usd_to_bdt_rate','125'));
+  if(!Number.isFinite(rate)||rate<=0){await sendMsg(env,chatId,'Set a valid USD to BDT exchange rate first.');return true;}
+  const name=(draft.icon?draft.icon+' ':'')+draft.name;
+  const result=await env.DB.batch([
+    env.DB.prepare("INSERT INTO products(name,description,price_usd,price_bdt,purchase_cost_usd,is_external,is_active) SELECT ?,?,?,?,?,0,1 WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='awaiting_prod_sale' AND data=?)").bind(name,draft.description,value,Math.round(value*rate),draft.cost,chatId,state.data),
+    env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='awaiting_prod_sale' AND data=?").bind(chatId,state.data)
+  ]);
+  if(!result[0].meta?.changes){await sendMsg(env,chatId,'Product draft was already saved or cancelled.');return true;}
+  const info=localProfitInfo(draft.cost,value),id=result[0].meta.last_row_id;
+  await sendMsg(env,chatId,`✅ <b>Product Added</b>\n${escapeHtml(name)}\n\nPurchase cost: <b>$${draft.cost.toFixed(2)}</b>\nSelling price: <b>$${value.toFixed(2)}</b>\nGross profit per item: <b>$${info.profit}</b>\nMarkup on cost: <b>${info.markup}</b>\n\nCompleted sales will appear in Sales & Profit Reports.`,[[{text:'Add Stock',callback_data:`adm_addstock_${id}`}],[{text:'Product',callback_data:`adm_prod_details_${id}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]]);return true;
 }
