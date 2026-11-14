@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-legacy-orders-amount-1";
+const BOT_BUILD="2026-11-14-legacy-order-currency-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-legacy-orders-amount-1";
+const DB_SCHEMA_VERSION = "2026-11-legacy-order-currency-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -183,6 +183,7 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE preorders ADD COLUMN status TEXT DEFAULT 'pending';",
       "ALTER TABLE orders ADD COLUMN product_id INTEGER DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN amount REAL DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN currency TEXT DEFAULT 'USD';",
       "ALTER TABLE orders ADD COLUMN product_name TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN created_at TEXT DEFAULT NULL;",
       "ALTER TABLE users ADD COLUMN balance_usd REAL DEFAULT 0;",
@@ -220,6 +221,7 @@ async function initializeDatabase(db, force) {
       if (typeof db.batch === "function") await db.batch(missing.map(sql => db.prepare(sql)));
       else for (const sql of missing) await db.prepare(sql).run();
     }
+    orderWriteSchemaCache.delete(db);
     await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
       "CREATE UNIQUE INDEX IF NOT EXISTS deposits_redeem_once ON deposits(trx_id) WHERE method = 'REDEEM'",
@@ -685,6 +687,8 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
 // ====================================================================
 async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd, rate, messageId) {
   if(!Number.isSafeInteger(qty)||qty<1||!Number.isFinite(totalUsd)||totalUsd<=0||!Number.isFinite(rate)||rate<=0){await sendMsg(env,chatId,'Invalid purchase quantity or amount. No money was deducted.');return;}
+  orderStage(env,'wallet.schema');
+  await assertOrderWriteCompatible(env);
   const totalBdt = Math.round(totalUsd * rate);
 
   // External API Product Purchase
@@ -699,7 +703,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     orderStage(env,'wallet.reserve');
     const token='WALLET:'+crypto.randomUUID();
     const booked=await env.DB.batch([
-      env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,CURRENT_TIMESTAMP,'paid_pending_delivery' FROM users WHERE user_id=? AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd),
+      env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,currency,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,'USD',CURRENT_TIMESTAMP,'paid_pending_delivery' FROM users WHERE user_id=? AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd),
       env.DB.prepare("UPDATE users SET balance_usd=balance_usd-?,balance_bdt=balance_bdt-?,total_spent_usd=total_spent_usd+? WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='paid_pending_delivery')").bind(totalUsd,totalBdt,totalUsd,chatId,token,chatId)
     ]);
     if(!booked[0].meta?.changes){await sendMsg(env,chatId,'Insufficient wallet balance. No money was deducted.');return;}
@@ -742,7 +746,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   }
 
   await env.DB.prepare("UPDATE users SET balance_usd = balance_usd - ?, balance_bdt = balance_bdt - ?, total_spent_usd = total_spent_usd + ? WHERE user_id = ?").bind(totalUsd, totalBdt, totalUsd, chatId).run();
-  const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, amount, product_name, created_at, status) VALUES (?, ?, ?, ?, 'WALLET', 'LOCAL_STOCK', ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt,totalUsd,prod.name).run();
+  const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, amount, product_name, currency, created_at, status) VALUES (?, ?, ?, ?, 'WALLET', 'LOCAL_STOCK', ?, ?, ?, ?, 'USD', CURRENT_TIMESTAMP, 'completed')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt,totalUsd,prod.name).run();
   const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
 
   const itemStrings = [];
@@ -1643,7 +1647,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const totalUsd = Number((prod.price_usd * qty).toFixed(2));
       const totalBdt = Math.round(totalUsd * rate);
 
-      const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, amount_usd, amount_bdt, amount, product_name, trx_id, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', CURRENT_TIMESTAMP, 'pending')").bind(chatId, username, prodId, qty, method.toUpperCase(), totalUsd, totalBdt,totalUsd,prod.name).run();
+      orderStage(env,'order.schema');
+      await assertOrderWriteCompatible(env);
+      const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, amount_usd, amount_bdt, amount, product_name, trx_id, currency, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 'USD', CURRENT_TIMESTAMP, 'pending')").bind(chatId, username, prodId, qty, method.toUpperCase(), totalUsd, totalBdt,totalUsd,prod.name).run();
       const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
       if (method === "bep20") {
         await showBep20Instructions(env, chatId, "order", { id: orderId, product_id: prod.id, amount_usd: totalUsd }, messageId);
@@ -3185,6 +3191,9 @@ async function sendOrderDiagnostics(env,chatId){
     const names=new Set(columns.map(x=>x.name));const needed=['provider_request_id','provider_error','provider_order_id','provider_retry_at','delivery_data'];
     const missing=needed.filter(x=>!names.has(x));
     report+='Database: '+(missing.length?'missing columns: '+missing.join(', '):'order columns OK')+'\n';
+    const required=columns.filter(c=>c.notnull&&(c.dflt_value==null||/^\(*\s*NULL\s*\)*$/i.test(String(c.dflt_value)))&&!(c.name==='id'&&String(c.type).toUpperCase()==='INTEGER'&&c.pk));
+    report+='Required order fields: '+escapeHtml(required.map(c=>c.name).join(', ').slice(0,250)||'none')+'\n';
+    const unsupported=unsupportedOrderColumns(columns);if(unsupported.length)report+='Unsupported required order fields: '+escapeHtml(unsupported.join(', ').slice(0,250))+'\n';
     for(const [table,required] of [['preorders',['id','user_id','product_id','status']],['inventory',['id','product_id','order_id','is_sold']]]){const {results:info}=await env.DB.prepare(`PRAGMA table_info(${table})`).all();const have=new Set(info.map(c=>c.name));const absent=required.filter(c=>!have.has(c));report+=table+': '+(absent.length?'missing '+absent.join(', '):'columns OK')+'\n';}
     const localWallet=await env.DB.prepare('SELECT balance_usd FROM users WHERE user_id=?').bind(chatId).first();
     report+='This bot wallet (your account): '+(localWallet?Number(localWallet.balance_usd||0).toFixed(2)+' USD':'not registered; send /start')+'\n';
@@ -3209,4 +3218,17 @@ async function sendOrderDiagnostics(env,chatId){
     if(errors.length){report+='\n<b>Recent runtime errors</b>\n';for(const error of errors)report+=`${error.reference}: ${escapeHtml(error.stage)} — ${escapeHtml(await safeDiagnostic(env,error.detail))}\n`;}
   }catch(error){report+='\nDatabase/configuration failure: '+escapeHtml(await safeDiagnostic(env,error?.message));}
   return await sendMsg(env,chatId,report,[[{text:'Refresh diagnostics',callback_data:'adm_diagnostics'}],[{text:'Admin Panel',callback_data:'admin_panel'}]]);
+}
+
+// Validate legacy NOT NULL constraints before any wallet debit or provider request.
+const orderWriteSchemaCache=new WeakMap();
+function unsupportedOrderColumns(columns){
+  const supplied=new Set(['user_id','username','product_id','product_name','quantity','payment_method','trx_id','amount','amount_usd','amount_bdt','currency','status','created_at']);
+  return columns.filter(c=>c.notnull&&(c.dflt_value==null||/^\(*\s*NULL\s*\)*$/i.test(String(c.dflt_value)))&&!supplied.has(c.name)&&!(c.name==='id'&&String(c.type).toUpperCase()==='INTEGER'&&c.pk)).map(c=>c.name);
+}
+async function assertOrderWriteCompatible(env){
+  let columns=orderWriteSchemaCache.get(env.DB);
+  if(!columns){const result=await env.DB.prepare('PRAGMA table_info(orders)').all();columns=result.results;orderWriteSchemaCache.set(env.DB,columns);}
+  const missing=unsupportedOrderColumns(columns);
+  if(missing.length)throw new Error('Unsupported required orders columns: '+missing.join(', ')+'. Wallet was not debited; review the legacy schema.');
 }
