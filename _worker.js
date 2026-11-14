@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-diagnostic-command-2";
+const BOT_BUILD="2026-11-14-legacy-orders-amount-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-legacy-preorders-1";
+const DB_SCHEMA_VERSION = "2026-11-legacy-orders-amount-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -182,6 +182,9 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE preorders ADD COLUMN user_id INTEGER DEFAULT NULL;",
       "ALTER TABLE preorders ADD COLUMN status TEXT DEFAULT 'pending';",
       "ALTER TABLE orders ADD COLUMN product_id INTEGER DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN amount REAL DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN product_name TEXT DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN created_at TEXT DEFAULT NULL;",
       "ALTER TABLE users ADD COLUMN balance_usd REAL DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN balance_bdt REAL DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN total_spent_usd REAL DEFAULT 0;",
@@ -696,7 +699,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     orderStage(env,'wallet.reserve');
     const token='WALLET:'+crypto.randomUUID();
     const booked=await env.DB.batch([
-      env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,status) SELECT user_id,?,?,?,'WALLET',?,?,?,'paid_pending_delivery' FROM users WHERE user_id=? AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,chatId,totalUsd),
+      env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,CURRENT_TIMESTAMP,'paid_pending_delivery' FROM users WHERE user_id=? AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd),
       env.DB.prepare("UPDATE users SET balance_usd=balance_usd-?,balance_bdt=balance_bdt-?,total_spent_usd=total_spent_usd+? WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='paid_pending_delivery')").bind(totalUsd,totalBdt,totalUsd,chatId,token,chatId)
     ]);
     if(!booked[0].meta?.changes){await sendMsg(env,chatId,'Insufficient wallet balance. No money was deducted.');return;}
@@ -739,7 +742,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   }
 
   await env.DB.prepare("UPDATE users SET balance_usd = balance_usd - ?, balance_bdt = balance_bdt - ?, total_spent_usd = total_spent_usd + ? WHERE user_id = ?").bind(totalUsd, totalBdt, totalUsd, chatId).run();
-  const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, status) VALUES (?, ?, ?, ?, 'WALLET', 'LOCAL_STOCK', ?, ?, 'completed')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt).run();
+  const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, amount, product_name, created_at, status) VALUES (?, ?, ?, ?, 'WALLET', 'LOCAL_STOCK', ?, ?, ?, ?, CURRENT_TIMESTAMP, 'completed')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt,totalUsd,prod.name).run();
   const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
 
   const itemStrings = [];
@@ -1640,7 +1643,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const totalUsd = Number((prod.price_usd * qty).toFixed(2));
       const totalBdt = Math.round(totalUsd * rate);
 
-      const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, amount_usd, amount_bdt, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')").bind(chatId, username, prodId, qty, method.toUpperCase(), totalUsd, totalBdt).run();
+      const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, amount_usd, amount_bdt, amount, product_name, trx_id, created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', CURRENT_TIMESTAMP, 'pending')").bind(chatId, username, prodId, qty, method.toUpperCase(), totalUsd, totalBdt,totalUsd,prod.name).run();
       const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
       if (method === "bep20") {
         await showBep20Instructions(env, chatId, "order", { id: orderId, product_id: prod.id, amount_usd: totalUsd }, messageId);
