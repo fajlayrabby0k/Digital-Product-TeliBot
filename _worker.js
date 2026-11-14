@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-payment-dashboard-1";
+const BOT_BUILD="2026-11-15-delivery-management-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -664,7 +664,7 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
         return;
       }
       await sendMsg(env, chatId, `✅ Payment verified for Order #${orderId}. Delivery is pending; admin has been notified. Do not pay again.`,[[{text:'Check Delivery',callback_data:`provider_retry_${orderId}`}]]);
-      await notifyAdminForUser(env,chatId, `⚠️ Paid Order #${orderId}: ${escapeHtml(apiRes.message||'Delivery unconfirmed')}. Check provider history before retrying.`);
+      await notifyAdminForUser(env,chatId, `⚠️ Paid Order #${orderId}: ${escapeHtml(apiRes.message||'Delivery unconfirmed')}. Check provider history before retrying.`,[[{text:'Delivery Details',callback_data:`adm_delivery_view_${orderId}`}]]);
       return;
     }
     const creds = apiRes.credentials;
@@ -698,7 +698,7 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
   } else {
     await env.DB.prepare("UPDATE orders SET status = 'paid_pending_delivery', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     await sendMsg(env, chatId, `✅ <b>Payment Verified!</b>\n\nOrder ID: #${orderId}\n⚠️ Local stock is being restocked. Admin has been notified to deliver your order immediately!`);
-    await notifyAdminForUser(env,chatId, `🚨 <b>Order #${orderId} Verified but Local Stock Insufficient!</b> Please deliver manually.`);
+    await notifyAdminForUser(env,chatId, `🚨 <b>Order #${orderId} Verified but Local Stock Insufficient!</b> Please deliver manually.`,[[{text:'Delivery Details',callback_data:`adm_delivery_view_${orderId}`}]]);
   }
 }
 
@@ -1426,6 +1426,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await env.DB.prepare('UPDATE users SET username=?,first_name=? WHERE user_id=?').bind(username,firstName,chatId).run();
       user={...user,username,first_name:firstName};
     }
+    if(await handleDeliveryAdminCallback(env,chatId,data,messageId))return;
     if(await handlePaymentDashboardCallback(env,chatId,data,messageId))return;
     if(/^adm_sales_(today|week|days30|month|all)$/.test(data)){await showAdminSalesReport(env,chatId,data.slice(10),messageId);return;}
     const localCostAction=data.match(/^adm_local_cost_(\d+)$/);
@@ -2936,6 +2937,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{text:'👥 Users / Find Customer',callback_data:'adm_users'}],
     [{text:'📊 Sales & Profit Reports',callback_data:'adm_sales_today'}],
     [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
+    [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
     [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'}],
     [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
     [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
@@ -3615,7 +3617,7 @@ async function showPaymentDashboardDetail(env,chatId,type,id,messageId=null){
   let result=invoice.status==='completed'?'Completed.':['paid_pending_delivery','delivering'].includes(invoice.status)?'Payment recorded; product delivery is pending.':event?paymentDashboardReason(event.reason):mobile?.trx_id?'Transaction ID saved; no verification result was recorded.':'No verification attempt recorded. Older attempts may predate this dashboard.';
   if(mobile?.status==='paid'&&invoice.status==='pending')result='Payment matched by SMS; invoice processing needs review.';
   const text=`💳 <b>${type==='order'?'Order':'Deposit'} #${invoice.id}</b>\n\nCustomer: <code>${invoice.user_id}</code>\nMethod: ${escapeHtml(invoice.method)}\nAmount: <b>$${adminMoney(invoice.amount_usd)}</b> · ${adminMoney(invoice.amount_bdt)} BDT\nStatus: <b>${escapeHtml(invoice.status)}</b>\nCreated: ${paymentDashboardTime(invoice.created_at)} (Dhaka)\n\nSubmitted ID: <code>${adminSnippet(receipt,100)}</code>\n\n<b>Last verification</b>\n${escapeHtml(result)}\nAttempts recorded: ${event?.attempts||0}\nLast attempt: ${paymentDashboardTime(event?.updated_at)} (Dhaka)${mobile?`\nSMS invoice: ${adminSnippet(mobile.status,20)}\nPayment window: ${Date.now()>mobile.expires_ms?'Ended (not proof of payment failure)':'Open'}`:''}`;
-  const buttons=[[adminUserProfileButton(invoice.user_id)],[{text:'🔄 Refresh',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'Payment Dashboard',callback_data:'adm_paydash_pending_0'}]];
+  const buttons=[[adminUserProfileButton(invoice.user_id)],...(type==='order'&&['paid_pending_delivery','delivering','completed'].includes(invoice.status)?[[{text:'Delivery Details',callback_data:`adm_delivery_view_${id}`}]]:[]),[{text:'🔄 Refresh',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'Payment Dashboard',callback_data:'adm_paydash_pending_0'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handlePaymentDashboardCallback(env,chatId,data,messageId){
@@ -3623,4 +3625,64 @@ async function handlePaymentDashboardCallback(env,chatId,data,messageId){
   let match=data.match(/^adm_paydash_(pending|submitted|issues|delivery|completed)_(\d+)$/);
   if(match){await showPaymentDashboard(env,chatId,match[1],match[2],messageId);return true;}
   match=data.match(/^adm_paydetail_(order|deposit)_(\d+)$/);if(match){await showPaymentDashboardDetail(env,chatId,match[1],match[2],messageId);return true;}return false;
+}
+
+
+async function showDeliveryAdminList(env,chatId,filter='pending',page=0,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  await clearAdminState(env,chatId);page=adminUserPage(page);
+  const status=filter==='processing'?'delivering':filter==='completed'?'completed':'paid_pending_delivery';
+  const {results}=await env.DB.prepare('SELECT o.id,o.user_id,o.amount_usd,o.product_name,p.name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.status=? ORDER BY o.id DESC LIMIT 11 OFFSET ?').bind(status,page*10).all();
+  const title=filter==='processing'?'Processing':filter==='completed'?'Completed':'Paid / Delivery Pending';
+  const text=`📦 <b>Delivery Management</b>\n\n<b>${title}</b> · Page ${page+1}\n\n${results.length?'Choose an order to see its latest delivery status.':'No orders in this list.'}\n\nCheck Delivery resumes the existing paid order. It does not charge the customer again. Processing orders are shown for review and cannot be restarted here.`;
+  const buttons=results.slice(0,10).map(o=>[{text:`#${o.id} · ${String(o.product_name||o.name||'Product').slice(0,28)} · $${adminMoney(o.amount_usd)} · ${o.user_id}`,callback_data:`adm_delivery_view_${o.id}`}]);
+  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_delivery_list_${filter}_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_delivery_list_${filter}_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'Pending Delivery',callback_data:'adm_delivery_list_pending_0'},{text:'Processing',callback_data:'adm_delivery_list_processing_0'}],[{text:'Completed',callback_data:'adm_delivery_list_completed_0'},{text:'🔄 Refresh',callback_data:`adm_delivery_list_${filter}_${page}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function showDeliveryAdminOrder(env,chatId,id,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  const order=await env.DB.prepare('SELECT o.*,p.name,p.is_external,p.external_id FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=?').bind(id).first();
+  if(!order){await sendMsg(env,chatId,'Order not found.');return;}
+  const error=order.provider_error?await safeDiagnostic(env,order.provider_error):'No provider error recorded.';
+  const canRetry=order.status==='paid_pending_delivery'&&order.is_external!=null&&(!order.is_external||order.provider_request_id);
+  let help=order.status==='completed'?'Delivered. No further purchase or stock allocation will be performed.':order.status==='delivering'?'Processing or interrupted during delivery. Check supplier history and refresh; automatic restart is blocked to avoid duplicate fulfillment.':order.status==='paid_pending_delivery'?(order.is_external&&!order.provider_request_id?'This older API order has no supplier request ID. Reconcile supplier history before taking further action.':order.is_external?'Check Delivery looks up the existing supplier request and resumes it safely. A provider rejection can refund a wallet order through the existing refund rules.':'Restock this local product, then Check Delivery. Previously allocated items are reused; only missing items are allocated.'):'This order is unpaid or closed; delivery cannot be started here.';
+  if(order.is_external==null&&order.status==='paid_pending_delivery')help='Product record is missing. Admin reconciliation is required.';
+  const text=`📦 <b>Delivery · Order #${order.id}</b>\n\nCustomer: <code>${order.user_id}</code>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nPaid total: <b>$${adminMoney(order.amount_usd)}</b>\nMethod: ${adminSnippet(order.payment_method,30)}\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
+  const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
+  if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
+  buttons.push([adminUserProfileButton(order.user_id)],[{text:'🔄 Refresh',callback_data:`adm_delivery_view_${order.id}`}],[{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function retryDeliveryAdmin(env,chatId,id,messageId){
+  if(!adminUserAccess(env,chatId))return;
+  const order=await env.DB.prepare('SELECT o.*,p.name AS product_name,p.is_external,p.external_id FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?').bind(id).first();
+  if(!order||order.status!=='paid_pending_delivery'||(order.is_external&&!order.provider_request_id)){await showDeliveryAdminOrder(env,chatId,id,messageId);return;}
+  const claimed=await env.DB.prepare("UPDATE orders SET provider_retry_at=? WHERE id=? AND status='paid_pending_delivery' AND COALESCE(provider_retry_at,0)<?").bind(Date.now()+30000,id,Date.now()).run();
+  if(!claimed.meta?.changes){await sendMsg(env,chatId,'Delivery is being checked or is in cooldown. Please wait before retrying.');return;}
+  await sendMsg(env,chatId,`Checking delivery for Order #${id}…`);
+  await completeSuccessfulOrder(env,order,order.trx_id,order.user_id);
+  await showDeliveryAdminOrder(env,chatId,id,messageId);
+}
+async function resendSavedDelivery(env,chatId,id,messageId){
+  if(!adminUserAccess(env,chatId))return;
+  const order=await env.DB.prepare("SELECT * FROM orders WHERE id=? AND status='completed'").bind(id).first();
+  if(!order){await sendMsg(env,chatId,'Only completed orders can resend saved delivery.');return;}
+  let content=order.delivery_data;
+  if(!content){const {results}=await env.DB.prepare('SELECT item_data FROM inventory WHERE order_id=? AND is_sold=1 ORDER BY id').bind(id).all();content=results.map(x=>x.item_data).join('\n\n');}
+  if(!content){await sendMsg(env,chatId,'No saved delivery content found. Check the original order and supplier history.');return;}
+  const claim=await env.DB.prepare("UPDATE orders SET provider_retry_at=? WHERE id=? AND status='completed' AND COALESCE(provider_retry_at,0)<?").bind(Date.now()+30000,id,Date.now()).run();
+  if(!claim.meta?.changes){await sendMsg(env,chatId,'Please wait 30 seconds before resending.');return;}
+  const chunks=[];let chunk='';for(const char of String(content)){const escaped=escapeHtml(char);if(chunk.length+escaped.length>2800){chunks.push(chunk);chunk='';}chunk+=escaped;}if(chunk)chunks.push(chunk);
+  for(let i=0;i<chunks.length;i++){
+    const sent=await sendMsg(env,order.user_id,`📦 <b>Saved delivery · Order #${id}</b> (${i+1}/${chunks.length})\n\n<code>${chunks[i]}</code>`);
+    if(!sent?.ok){await sendMsg(env,chatId,'Telegram did not confirm the delivery message. Saved order data is unchanged; retry after cooldown.');return;}
+  }
+  await sendMsg(env,chatId,`Saved delivery for Order #${id} sent to customer ${order.user_id}. No new purchase or wallet charge was made.`);
+}
+async function handleDeliveryAdminCallback(env,chatId,data,messageId){
+  if(!adminUserAccess(env,chatId))return false;
+  let match=data.match(/^adm_delivery_list_(pending|processing|completed)_(\d+)$/);if(match){await showDeliveryAdminList(env,chatId,match[1],match[2],messageId);return true;}
+  match=data.match(/^adm_delivery_(view|retry|resend)_(\d+)$/);if(!match)return false;
+  if(match[1]==='retry')await retryDeliveryAdmin(env,chatId,match[2],messageId);else if(match[1]==='resend')await resendSavedDelivery(env,chatId,match[2],messageId);else await showDeliveryAdminOrder(env,chatId,match[2],messageId);return true;
 }

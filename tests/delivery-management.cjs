@@ -1,0 +1,39 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:');let http=401,fail=false,calls=[],messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const remote=new Map();let loseResponse=false,pending=false;
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push(payload);return {ok:true};},fetch:async(url,options)=>{
+ if(options.method!=='POST'){calls.push({url,method:'GET'});const key=new URL(url).searchParams.get('external_order_id');const found=remote.get(key);return {ok:!!found,status:found?200:404,json:async()=>found||{error:{code:'order_not_found',message:'No order'}}};}
+ const body=JSON.parse(options.body);calls.push({url,method:'POST',body});if(fail)throw Error('offline');
+ const response={order_id:'remote-'+remote.size,external_order_id:body.external_order_id,status:pending?'processing':'paid',items:pending?[]:[{content:'TEST-KEY'}]};
+ if(http===200)remote.set(body.external_order_id,response);
+ if(loseResponse){loseResponse=false;throw Error('response lost');}
+ return {ok:http===200,status:http,json:async()=>http===200?response:{error:{code:http===402?'insufficient_funds':http===409?'out_of_stock':'invalid_api_key',message:'Bad credentials '+ 'fixture-provider-key'}}};
+}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,executeWalletPurchase,refundRejectedExternalWalletOrder,handleUpdate,showDeliveryAdminOrder,retryDeliveryAdmin,resendSavedDelivery};',c);
+const env={DB,ADMIN_ID:1},balance=()=>db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,last=()=>db.prepare('SELECT * FROM orders ORDER BY id DESC LIMIT 1').get();
+(async()=>{
+ await c.api.ensureDbReady(DB);for(const id of [1,99])db.prepare('INSERT INTO users(user_id,balance_usd,balance_bdt) VALUES(?,20,2500)').run(id);
+ for(const[k,v]of [['external_api_url','https://provider.test'],['external_api_key','fixture-provider-key']])db.prepare('UPDATE settings SET value=? WHERE key=?').run(v,k);
+ db.prepare("UPDATE products SET is_external=1,external_id='remote-product',api_stock=20 WHERE id=1").run();
+ const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin'},message:{chat:{id},message_id:1}}},env),latest=()=>messages.filter(m=>m.text).at(-1),buttons=()=>latest().reply_markup.inline_keyboard.flat();
+ const add=(status='paid_pending_delivery',product=1,request='shop-fixture-request',qty=1)=>db.prepare("INSERT INTO orders(user_id,product_id,quantity,payment_method,trx_id,amount_usd,status,provider_request_id) VALUES(99,?,?,'WALLET','PAID',5,?,?)").run(product,qty,status,request).lastInsertRowid;
+ const pendingOrder=add();remote.set('shop-fixture-request',{order_id:'provider-order',external_order_id:'shop-fixture-request',items:[{content:'SAVED-KEY'}]});
+ await cb('admin_panel');assert(buttons().some(b=>b.callback_data==='adm_delivery_list_pending_0'));await cb('adm_delivery_list_pending_0');assert(buttons().some(b=>b.callback_data==='adm_delivery_view_'+pendingOrder));
+ await cb('adm_delivery_view_'+pendingOrder);assert(buttons().some(b=>b.callback_data==='adm_delivery_retry_'+pendingOrder));await cb('adm_delivery_retry_'+pendingOrder);assert.equal(db.prepare('SELECT status FROM orders WHERE id=?').get(pendingOrder).status,'completed');assert.equal(balance(),20);assert.equal(calls.filter(x=>x.method==='POST').length,0);assert(messages.some(m=>m.chat_id===99&&m.text.includes('SAVED-KEY')));
+ await cb('adm_delivery_retry_'+pendingOrder);assert.equal(calls.filter(x=>x.method==='POST').length,0);
+ const legacy=add('paid_pending_delivery',1,null);await cb('adm_delivery_view_'+legacy);assert(latest().text.includes('no supplier request ID'));assert(!buttons().some(b=>b.callback_data==='adm_delivery_retry_'+legacy));await cb('adm_delivery_retry_'+legacy);assert.equal(calls.filter(x=>x.method==='POST').length,0);
+ const processing=add('delivering');await cb('adm_delivery_retry_'+processing);assert.equal(db.prepare('SELECT status FROM orders WHERE id=?').get(processing).status,'delivering');
+ const unpaid=add('pending');await cb('adm_delivery_retry_'+unpaid);assert.equal(db.prepare('SELECT status FROM orders WHERE id=?').get(unpaid).status,'pending');
+ const local=add('paid_pending_delivery',2,null,2);db.prepare('DELETE FROM inventory WHERE product_id=2').run();db.prepare("INSERT INTO inventory(product_id,item_data,is_sold,order_id) VALUES(2,'ALLOCATED',1,?)").run(local);
+ await cb('adm_delivery_retry_'+local);assert.equal(db.prepare('SELECT status FROM orders WHERE id=?').get(local).status,'paid_pending_delivery');assert.equal(balance(),20);
+ db.prepare("INSERT INTO inventory(product_id,item_data,is_sold) VALUES(2,'NEW-ITEM',0)").run();db.prepare('UPDATE orders SET provider_retry_at=0 WHERE id=?').run(local);await cb('adm_delivery_retry_'+local);assert.equal(db.prepare('SELECT status FROM orders WHERE id=?').get(local).status,'completed');assert.equal(db.prepare('SELECT COUNT(*) n FROM inventory WHERE order_id=? AND is_sold=1').get(local).n,2);
+ db.prepare('UPDATE orders SET provider_retry_at=0 WHERE id=?').run(local);let before=messages.length;await cb('adm_delivery_resend_'+local);assert(messages.slice(before).some(m=>m.chat_id===99&&m.text.includes('ALLOCATED')&&m.text.includes('NEW-ITEM')));assert.equal(balance(),20);
+ before=messages.length;await cb('adm_delivery_resend_'+local);assert(!messages.slice(before).some(m=>m.chat_id===99));
+ db.prepare('UPDATE orders SET provider_retry_at=0,delivery_data=? WHERE id=?').run('<&>'.repeat(2500),pendingOrder);before=messages.length;await cb('adm_delivery_resend_'+pendingOrder);const parts=messages.slice(before).filter(m=>m.chat_id===99);assert(parts.length>1);assert(parts.every(m=>m.text.length<4096));assert(parts.every(m=>!m.text.includes('<&>')));
+ db.prepare('UPDATE orders SET provider_error=? WHERE id=?').run('Secret fixture-provider-key <problem>',legacy);await cb('adm_delivery_view_'+legacy);assert(!latest().text.includes('fixture-provider-key'));assert(latest().text.includes('&lt;problem&gt;'));
+ const cooldown=add();db.prepare('UPDATE orders SET provider_retry_at=? WHERE id=?').run(Date.now()+60000,cooldown);const callsBefore=calls.length;await cb('adm_delivery_retry_'+cooldown);assert.equal(calls.length,callsBefore);
+ for(let i=0;i<12;i++)add();await cb('adm_delivery_list_pending_0');assert.equal(buttons().filter(b=>b.callback_data?.startsWith('adm_delivery_view_')).length,10);assert(buttons().some(b=>b.callback_data==='adm_delivery_list_pending_1'));
+ before=messages.length;await cb('adm_delivery_resend_'+pendingOrder,100);await c.api.retryDeliveryAdmin(env,100,cooldown,1);assert(!messages.slice(before).some(m=>m.chat_id===99));assert.equal(balance(),20);
+ console.log('PASS: admin delivery lists/details, supplier lookup without repeat purchase/debit, local partial-stock recovery, closed/processing/legacy guards, cooldown, saved delivery resend/chunking, authorization and redaction');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
