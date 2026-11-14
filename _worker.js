@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-product-margins-1";
+const BOT_BUILD="2026-11-14-pricing-menu-2";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3381,8 +3381,8 @@ async function showProductMargin(env,chatId,id,messageId=null){
   const product=await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(id).first();if(!product||product.is_external!==1){await sendMsg(env,chatId,'API product not found.');return;}
   await clearAdminState(env,chatId);
   const [margin,globalType]=await Promise.all([getSetting(env,'external_profit_margin','20'),getSetting(env,'external_profit_margin_type','percent')]);
-  const text=`📈 <b>Product Profit Margin</b>\n\n${escapeHtml(productDisplayName(product))}\nProvider cost: <b>$${Number(product.cost_price_usd).toFixed(2)}</b>\nSelling price: <b>$${Number(product.price_usd).toFixed(2)}</b>\nRule: <b>${escapeHtml(pricingModeLabel(product,margin,globalType))}</b>\n\nPercentage: $5 cost + 20% = $6\nFixed profit: $5 cost + $0.50 = $5.50\n\nPercentage/fixed-profit rules follow provider cost changes. A fixed selling price stays constant. All rules remain saved after sync.`;
-  const buttons=[[{text:'Custom Percentage %',callback_data:`adm_margin_percent_${id}`}],[{text:'Fixed Profit +USD',callback_data:`adm_margin_fixed_${id}`}],[{text:`Use Default (${globalType==='fixed'?'+$'+Number(margin).toFixed(2):margin+'%'})`,callback_data:`adm_margin_global_${id}`}],[{text:'+10%',callback_data:`adm_quickmargin_${id}_10`},{text:'+20%',callback_data:`adm_quickmargin_${id}_20`},{text:'+30%',callback_data:`adm_quickmargin_${id}_30`}],[{text:'Fixed Selling Price (USD)',callback_data:`adm_margin_price_${id}`}],[{text:'Products',callback_data:'adm_price_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]];
+  const text=`📈 <b>Product Profit Margin</b>\n\n${escapeHtml(productDisplayName(product))}\nProvider cost: <b>$${Number(product.cost_price_usd).toFixed(2)}</b>\nSelling price: <b>$${Number(product.price_usd).toFixed(2)}</b>\nRule: <b>${escapeHtml(pricingModeLabel(product,margin,globalType))}</b>\n\nPercentage: $5 cost + 20% = $6\nFixed profit: $5 cost + $0.50 = $5.50\n\nPercentage/fixed-profit rules follow provider cost changes. A fixed selling price stays constant. Use Default removes this product’s custom rule. Other products keep their own settings.`;
+  const buttons=[[{text:'Set Profit %',callback_data:`adm_margin_percent_${id}`}],[{text:'Set Profit +USD',callback_data:`adm_margin_fixed_${id}`}],[{text:`Use Default (${globalType==='fixed'?'+$'+Number(margin).toFixed(2):margin+'%'})`,callback_data:`adm_margin_global_${id}`}],[{text:'+10%',callback_data:`adm_quickmargin_${id}_10`},{text:'+20%',callback_data:`adm_quickmargin_${id}_20`},{text:'+30%',callback_data:`adm_quickmargin_${id}_30`}],[{text:'Fixed Selling Price (USD)',callback_data:`adm_margin_price_${id}`}],[{text:'Products',callback_data:'adm_price_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function saveProductMargin(env,chatId,id,mode,value){
@@ -3399,6 +3399,13 @@ async function saveProductMargin(env,chatId,id,mode,value){
 }
 async function handlePricingCallback(env,chatId,data,messageId){
   if(String(chatId)!==String(env.ADMIN_ID))return false;
+  const globalAction=data.match(/^adm_pricing_(default|all)_(percent|fixed)$/);
+  if(globalAction){
+    const [,scope,type]=globalAction;
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,?,?)").bind(chatId,type==='fixed'?'awaiting_api_fixed_margin':'awaiting_api_margin',scope==='all'?'apply_all':'').run();
+    const scopeText=scope==='all'?'All API products will use this rule, replacing their individual overrides. New API products will also inherit it.':'Only products using the default will change. Individual custom margins stay saved.';
+    await editMsg(env,chatId,messageId,`<b>${scope==='all'?'Set margin for all API products':'Set default margin'}</b>\n\n${scopeText}\n\n${type==='percent'?'Enter a percentage, e.g. 20. A $5 product will sell for $6.':'Enter profit in USD, e.g. 0.50. A $5 product will sell for $5.50.'}`,[[{text:'Back to Custom Prices',callback_data:'adm_price_menu'}]]);return true;
+  }
   if(data==='adm_set_api_fixed_margin'){
     await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_api_fixed_margin','')").bind(chatId).run();
     await editMsg(env,chatId,messageId,'Enter default profit in USD to add to each API product cost, e.g. 0.50. Product-specific overrides stay unchanged.',[[{text:'Cancel',callback_data:'adm_api_menu'}]]);return true;
@@ -3433,11 +3440,13 @@ async function handlePricingText(env,chatId,text,state){
       const rate=Number(await getSetting(env,'usd_to_bdt_rate','125'));if(!Number.isFinite(rate)||rate<=0)throw new Error('Exchange rate is invalid');
       const {results}=await env.DB.prepare('SELECT * FROM products WHERE is_external=1').all();
       const statements=[env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('external_profit_margin',?)").bind(String(value)),env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('external_profit_margin_type',?)").bind(globalType)];
+      const applyAll=state.data==='apply_all';
+      if(applyAll)statements.push(env.DB.prepare("UPDATE products SET profit_margin_type='global',profit_margin_value=0,custom_price_usd=0 WHERE is_external=1"));
       const repriced=[];
-      for(const product of results){const price=externalSellingPrice(product.cost_price_usd,product,value,globalType),bdt=Math.round(price*rate);if(Number(product.price_usd)!==price||Number(product.price_bdt)!==bdt)repriced.push({id:product.id,usd:price,bdt});}
+      for(const product of results){const rule=applyAll?{profit_margin_type:'global',custom_price_usd:0}:product;const price=externalSellingPrice(product.cost_price_usd,rule,value,globalType),bdt=Math.round(price*rate);if(Number(product.price_usd)!==price||Number(product.price_bdt)!==bdt)repriced.push({id:product.id,usd:price,bdt});}
       if(repriced.length)statements.push(env.DB.prepare(`WITH repriced AS (SELECT json_extract(value,'$.id') AS id,json_extract(value,'$.usd') AS usd,json_extract(value,'$.bdt') AS bdt FROM json_each(?)) UPDATE products SET price_usd=(SELECT r.usd FROM repriced r WHERE r.id=products.id),price_bdt=(SELECT r.bdt FROM repriced r WHERE r.id=products.id) WHERE is_external=1 AND id IN (SELECT id FROM repriced)`).bind(JSON.stringify(repriced)));
       await env.DB.batch(statements);providerCatalogCache.delete(env.DB);await clearAdminState(env,chatId);
-      await sendMsg(env,chatId,`Default API profit margin saved: <b>${globalType==='fixed'?'+$'+value.toFixed(2):value+'%'}</b>. Product-specific overrides are retained.`,[[{text:'API Center',callback_data:'adm_api_menu'},{text:'Products',callback_data:'adm_price_menu'}]]);return true;
+      await sendMsg(env,chatId,`Default API profit margin saved: <b>${globalType==='fixed'?'+$'+value.toFixed(2):value+'%'}</b>. ${applyAll?'Applied to all API products; previous individual overrides were replaced.':'Individual custom margins are unchanged.'}`,[[{text:'Custom Prices',callback_data:'adm_price_menu'}]]);return true;
     }
     let id,mode;
     if(state.state==='awaiting_new_price'){
@@ -3461,7 +3470,11 @@ async function showPricingProducts(env,chatId,page=0,messageId=null){
   const {results}=await env.DB.prepare("SELECT p.*,CASE WHEN p.is_external=1 THEN COALESCE(p.api_stock,0) ELSE (SELECT COUNT(*) FROM inventory i WHERE i.product_id=p.id AND i.is_sold=0) END AS stock_qty FROM products p WHERE p.is_active=1 ORDER BY p.id LIMIT 11 OFFSET ?").bind(page*10).all();
   const buttons=results.slice(0,10).map(product=>[productListButton(product,`adm_setprice_${product.id}`)]),pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:`adm_price_page_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_price_page_${page+1}`});if(pager.length)buttons.push(pager);
-  buttons.push([{text:'API Center',callback_data:'adm_api_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]);
-  const text=`📈 <b>Prices / Profit Margins</b> · Page ${page+1}\n\nSelect a product to set a custom percentage or fixed profit in USD.`;
+  const [margin,type]=await Promise.all([getSetting(env,'external_profit_margin','20'),getSetting(env,'external_profit_margin_type','percent')]);
+  const label=type==='fixed'?`+$${Number(margin).toFixed(2)}`:`${margin}%`;
+  buttons.push([{text:`Default: ${label} · Change %`,callback_data:'adm_pricing_default_percent'},{text:'Default: Fixed +USD',callback_data:'adm_pricing_default_fixed'}]);
+  buttons.push([{text:'All Products: %',callback_data:'adm_pricing_all_percent'},{text:'All Products: Fixed +USD',callback_data:'adm_pricing_all_fixed'}]);
+  buttons.push([{text:'Admin Panel',callback_data:'admin_panel'}]);
+  const text=`📈 <b>Custom Prices & Profit</b> · Page ${page+1}\n\nChoose a product to set its own percentage or fixed dollar profit.\n\n<b>Default margin: ${label}</b>\nProducts without a custom rule use this default (initially 20%).\n\n<b>Change Default</b> keeps individual custom rules.\n<b>All Products</b> replaces every API product’s custom rule with the new default.\n\nAPI cost changes automatically update selling prices on sync using the saved margin.`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }

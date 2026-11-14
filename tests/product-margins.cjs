@@ -34,5 +34,14 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  await cb('adm_setprice_1');await text('12.50');assert.equal(db.prepare('SELECT price_usd FROM products WHERE id=1').get().price_usd,12.5);
  for(let i=0;i<130;i++)db.prepare("INSERT INTO products(name,description,price_usd,price_bdt,cost_price_usd,is_external,external_id) VALUES(?,'test',2,250,2,1,?)").run('Bulk '+i,'bulk-'+i);
  const originalBatch=DB.batch.bind(DB);let writeCount=0;DB.batch=async statements=>{writeCount=statements.length;return originalBatch(statements);};await cb('adm_set_api_margin');await text('20');assert.equal(writeCount,3);assert.equal(db.prepare("SELECT COUNT(*) AS n FROM products WHERE external_id LIKE 'bulk-%' AND price_usd=2.4").get().n,130);
+ await cb('adm_price_menu');for(const action of ['default_percent','default_fixed','all_percent','all_fixed'])assert(buttons().some(b=>b.callback_data==='adm_pricing_'+action));
+ await cb('adm_pricing_default_percent');await text('20');assert.equal(row('b').profit_margin_type,'fixed');assert.equal(price('b'),10.5);
+ await cb('adm_pricing_all_fixed');assert(last().text.includes('replacing their individual overrides'));await text('0.80');assert.equal(price('a'),10.8);assert.equal(price('b'),10.8);assert.equal(row('a').profit_margin_type,'global');assert.equal(row('d').custom_price_usd,0);
+ catalog=catalog.map(p=>({...p,price:7}));await sync();assert.equal(price('a'),7.8);assert.equal(price('b'),7.8);
+ await cb('adm_margin_percent_'+a);await text('30');assert.equal(price('a'),9.1);assert.equal(price('b'),7.8);
+ await cb('adm_pricing_default_percent');await text('20');assert.equal(price('a'),9.1);assert.equal(price('b'),8.4);
+ await cb('adm_pricing_all_percent');await text('25');assert.equal(price('a'),8.75);assert.equal(price('b'),8.75);assert.equal(row('a').profit_margin_type,'global');
+ catalog=catalog.map(p=>({...p,price:8}));await sync();assert.equal(price('a'),10);assert.equal(price('b'),10);
+ await cb('adm_pricing_all_fixed',99);assert.equal(db.prepare('SELECT * FROM admin_states WHERE user_id=99').get(),undefined);
  console.log('PASS: default 20%, per-product percentage/fixed-profit/legacy price, provider cost changes, zero/custom/Bangla inputs, default reset/global updates, sync/restart persistence, invalid values, local price and admin authorization');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

@@ -4,12 +4,18 @@ New installations use a default **20% markup on provider cost**. Existing config
 
 ## Set the default
 
-Open **Admin Panel → API Center**:
+Open **Admin Panel → Custom Prices**. Below the product list, the current default margin is displayed:
 
-- **Default Percentage %**: enter `20` for a 20% profit on provider cost.
-- **Default Fixed Profit +USD**: enter `0.50` to add $0.50 to provider cost.
+- **Default: … · Change %**: enter `20` for a 20% profit on provider cost.
+- **Default: Fixed +USD**: enter `0.50` to add $0.50 to provider cost.
 
 The default applies to API products that have no individual override. Changing it immediately recalculates those products using their stored provider costs. Settings and recalculated prices are saved in one database batch.
+
+## Apply one rule to all API products
+
+Below the list, choose **All Products: %** or **All Products: Fixed +USD**, then enter the value. The prompt explains that this replaces existing individual overrides. The new rule becomes the default for current and newly imported API products. Override removal, default settings and recalculated prices are saved atomically. Local products are unaffected.
+
+To keep individual rules, use the **Default** buttons instead.
 
 ## Set one product
 
