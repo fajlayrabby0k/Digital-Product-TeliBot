@@ -19,7 +19,8 @@ const DB={prepare(sql){let args=[];const statement={bind(...a){args=a;return sta
   const id=nextId++;deposits.set(id,{id,user_id:args[0],username:args[1],amount_usd:args[2],method:'BINANCE',status:'pending',created_at:new Date().toISOString()});return {meta:{last_row_id:id}};
  }
  if(sql.startsWith('UPDATE deposits'))Object.assign(deposits.get(Number(args[3])),{amount_usd:args[0],amount_bdt:args[1],trx_id:args[2],status:'completed'});
- if(sql.startsWith('UPDATE users')){user.balance_usd+=args[0];user.balance_bdt+=args[1];}
+ if(sql.startsWith('UPDATE users SET username=')){if(Number(args[2])===user.user_id){user.username=args[0];user.first_name=args[1];}}
+ else if(sql.startsWith('UPDATE users')){user.balance_usd+=args[0];user.balance_bdt+=args[1];}
  return {success:true};
 }};return statement;},async batch(statements){return await Promise.all(statements.map(s=>s.run()));}};
 const context=vm.createContext({console,Intl,URL,TextEncoder,AbortController,setTimeout,clearTimeout,
