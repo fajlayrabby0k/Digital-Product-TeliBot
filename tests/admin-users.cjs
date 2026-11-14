@@ -14,7 +14,7 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const order=db.prepare("INSERT INTO orders(user_id,product_id,payment_method,amount_usd,trx_id,status) VALUES(120,1,'WALLET',10,'ORDER-TX','completed')").run().lastInsertRowid;
  const balances=()=>JSON.stringify(db.prepare('SELECT user_id,balance_usd,balance_bdt FROM users ORDER BY user_id').all());const before=balances();
  await cb('admin_panel');assert(buttons().some(b=>b.callback_data==='adm_users'));
- await cb('adm_users');assert(last().text.includes('Find Customer'));
+ await cb('adm_users');assert(last().text.includes('Find Customer'));assert(last().text.includes('All users: <b>27</b>'));assert(last().text.includes('Depositors: <b>1</b>'));await cb('adm_user_view_120');assert(last().text.includes('Latest deposit:'));assert(last().text.includes('Latest order:'));assert(buttons().some(b=>b.text==='🔄 Refresh Customer'));await cb('adm_user_view_121');assert(last().text.includes('NAGAD · pending'));assert(!last().text.includes('Latest order:'));
  await cb('adm_user_list_all_0');assert.equal(buttons().filter(b=>b.callback_data?.startsWith('adm_user_view_')).length,10);assert(buttons().some(b=>b.callback_data==='adm_user_list_all_1'));
  await cb('adm_user_list_all_1');assert(buttons().some(b=>b.callback_data==='adm_user_list_all_0'));
  await cb('adm_user_list_deposits_0');assert(buttons().some(b=>b.callback_data==='adm_user_view_120'));assert(!buttons().some(b=>b.callback_data==='adm_user_view_121'));

@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-local-preorders-1";
+const BOT_BUILD="2026-11-14-user-management-2";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3278,7 +3278,8 @@ function adminMoney(value){const n=Number(value);return Number.isFinite(n)?n.toF
 async function showAdminUsersMenu(env,chatId,messageId=null){
   if(!adminUserAccess(env,chatId))return;
   await clearAdminState(env,chatId);
-  const text='👥 <b>Users / Find Customer</b>\n\nFind by User ID, @username, name or Transaction ID.\nFor an invoice use <code>order:123</code> or <code>deposit:123</code>.\n\nOpen a customer to see wallet balance, deposits and orders.';
+  const overview=await env.DB.prepare("SELECT (SELECT COUNT(*) FROM users) AS users,(SELECT COUNT(DISTINCT user_id) FROM deposits WHERE status='completed') AS depositors,(SELECT COUNT(DISTINCT user_id) FROM orders) AS buyers").first();
+  const text=`👥 <b>Users / Find Customer</b>\n\nAll users: <b>${overview?.users||0}</b> · Depositors: <b>${overview?.depositors||0}</b> · Customers with orders: <b>${overview?.buyers||0}</b>`+'\n\nFind by User ID, @username, name or Transaction ID.\nFor an invoice use <code>order:123</code> or <code>deposit:123</code>.\n\nOpen a customer to see wallet balance, deposits and orders.';
   const buttons=[[{text:'🔎 Search Customer',callback_data:'adm_user_search'}],[{text:'All Users',callback_data:'adm_user_list_all_0'}],[{text:'Recent Deposits',callback_data:'adm_user_list_deposits_0'},{text:'Recent Orders',callback_data:'adm_user_list_orders_0'}],[{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
@@ -3313,14 +3314,18 @@ async function showAdminUserProfile(env,chatId,userId,messageId=null){
   if(!adminUserAccess(env,chatId))return;
   const user=await env.DB.prepare('SELECT * FROM users WHERE user_id=?').bind(userId).first();
   if(!user){await sendMsg(env,chatId,'Customer not found.');return;}
-  const [dep,orders]=await Promise.all([
+  const [dep,orders,latestDeposit,latestOrder]=await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS count,COALESCE(SUM(amount_usd),0) AS total FROM deposits WHERE user_id=? AND status='completed'").bind(userId).first(),
-    env.DB.prepare("SELECT COUNT(*) AS count,COALESCE(SUM(CASE WHEN status='completed' THEN amount_usd ELSE 0 END),0) AS total FROM orders WHERE user_id=?").bind(userId).first()
+    env.DB.prepare("SELECT COUNT(*) AS count,COALESCE(SUM(CASE WHEN status='completed' THEN amount_usd ELSE 0 END),0) AS total FROM orders WHERE user_id=?").bind(userId).first(),
+    env.DB.prepare('SELECT id,amount_usd,method,status FROM deposits WHERE user_id=? ORDER BY id DESC LIMIT 1').bind(userId).first(),
+    env.DB.prepare('SELECT id,amount_usd,status FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 1').bind(userId).first()
   ]);
   const name=String(user.first_name||'Customer').slice(0,80),username=String(user.username||'Not set').slice(0,80);
-  const text=`👤 <b>Customer Profile</b>\n\nName: ${escapeHtml(name)}\nUsername: ${escapeHtml(username)}\nUser ID: <code>${user.user_id}</code>\n\nWallet: <b>$${adminMoney(user.balance_usd)} USD</b>\nCompleted deposits: ${dep?.count||0} · $${adminMoney(dep?.total)}\nOrders: ${orders?.count||0}\nCompleted purchases: $${adminMoney(orders?.total)}\nJoined: ${escapeHtml(String(user.created_at||'Unknown').slice(0,35))}`;
+  let text=`👤 <b>Customer Profile</b>\n\nName: ${escapeHtml(name)}\nUsername: ${escapeHtml(username)}\nUser ID: <code>${user.user_id}</code>\n\nWallet: <b>$${adminMoney(user.balance_usd)} USD</b>\nCompleted deposits: ${dep?.count||0} · $${adminMoney(dep?.total)}\nOrders: ${orders?.count||0}\nCompleted purchases: $${adminMoney(orders?.total)}\nJoined: ${escapeHtml(String(user.created_at||'Unknown').slice(0,35))}`;
+  if(latestDeposit)text+=`\n\nLatest deposit: #${latestDeposit.id} · $${adminMoney(latestDeposit.amount_usd)}\n${adminSnippet(latestDeposit.method,20)} · ${adminSnippet(latestDeposit.status,30)}`;
+  if(latestOrder)text+=`\n\nLatest order: #${latestOrder.id} · $${adminMoney(latestOrder.amount_usd)} · ${adminSnippet(latestOrder.status,30)}`;
   const cleanUsername=String(user.username||'').replace(/^@/,'');
-  const buttons=[[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
+  const buttons=[[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showAdminUserHistory(env,chatId,userId,type,page=0,messageId=null){

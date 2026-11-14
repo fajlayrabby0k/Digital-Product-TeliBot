@@ -15,3 +15,5 @@ Only the configured `ADMIN_ID` can search/list/open profiles/history. Customers 
 No new credentials, Android configuration or Cloudflare bindings are needed. Migration adds optional username/first_name fields only if missing and non-unique transaction/user-history indexes; old balances, records and legacy order constraints are preserved.
 
 `node tests/admin-users.cjs` checks real SQLite searches by identity/transaction/invoice, list/search/history pagination, profile totals, legacy user schema, HTML escaping/long receipts, authorization, notification buttons, safe identity links, cancellation and unchanged finances. Payment/provider/legacy-schema suites verify existing checkout behavior.
+
+The Users menu also shows total users, customers with completed deposits and customers with orders. Customer profiles show the latest deposit and order (including pending status) alongside totals and history buttons. Refresh Customer reloads the profile without changing any funds.
