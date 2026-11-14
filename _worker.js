@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-delivery-management-1";
+const BOT_BUILD="2026-11-15-support-tickets-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-payment-dashboard-1";
+const DB_SCHEMA_VERSION = "2026-11-support-tickets-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -153,6 +153,8 @@ async function initializeDatabase(db, force) {
       } catch (_) { /* First installation has no settings table yet. */ }
     }
     const schema = [
+      `CREATE TABLE IF NOT EXISTS support_tickets(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL,user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
+      `CREATE TABLE IF NOT EXISTS support_ticket_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,ticket_id INTEGER NOT NULL,sender_id INTEGER NOT NULL,is_admin INTEGER NOT NULL,body TEXT NOT NULL,submission_token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS payment_verification_events(invoice_type TEXT NOT NULL,invoice_id INTEGER NOT NULL,user_id INTEGER NOT NULL,method TEXT NOT NULL,trx_id TEXT,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 1,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(invoice_type,invoice_id));`,
       `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE NOT NULL, username TEXT, first_name TEXT, balance_usd REAL DEFAULT 0, balance_bdt REAL DEFAULT 0, referred_by INTEGER DEFAULT 0, total_referrals INTEGER DEFAULT 0, total_spent_usd REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, price_usd REAL NOT NULL, price_bdt REAL NOT NULL, is_active INTEGER DEFAULT 1, is_external INTEGER DEFAULT 0, external_id TEXT DEFAULT '', cost_price_usd REAL DEFAULT 0, custom_price_usd REAL DEFAULT 0, api_stock INTEGER DEFAULT 0);`,
@@ -240,6 +242,9 @@ async function initializeDatabase(db, force) {
     orderWriteSchemaCache.delete(db);
     await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
+      "CREATE UNIQUE INDEX IF NOT EXISTS support_one_active_order ON support_tickets(order_id,user_id) WHERE status<>'closed'",
+      "CREATE INDEX IF NOT EXISTS support_user_list ON support_tickets(user_id,id DESC)",
+      "CREATE INDEX IF NOT EXISTS support_thread ON support_ticket_messages(ticket_id,id DESC)",
       "CREATE UNIQUE INDEX IF NOT EXISTS deposits_redeem_once ON deposits(trx_id) WHERE method = 'REDEEM'",
       "CREATE INDEX IF NOT EXISTS inventory_available ON inventory(product_id, is_sold, id)",
       "CREATE INDEX IF NOT EXISTS inventory_order ON inventory(order_id, is_sold)",
@@ -1253,6 +1258,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
+        if (await handleTicketText(env,chatId,text,adminState,true))return;
         if (await handleLocalProductText(env,chatId,text,adminState))return;
         if (await handlePricingText(env,chatId,text,adminState))return;
         if (await handleAdminUserSearch(env,chatId,text,adminState))return;
@@ -1294,6 +1300,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     const redeemStart=text.match(/^\/start(?:@\w+)?\s+redeem_(RDM-[A-Fa-f0-9]{32})$/i);
     if (redeemStart) {await clearBinanceInput(env,chatId);await submitRedeemCode(env,chatId,redeemStart[1]);return;}
+    if (await handleTicketText(env,chatId,text,userState,false))return;
     if (await handleRedeemInput(env,chatId,text,userState)) return;
     if (await handleManualDepositAmount(env,chatId,username,text,userState))return;
     if (await handleMobileReceiptInput(env,chatId,text,userState)) return;
@@ -1522,6 +1529,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       if (!forceCheck.passed) { await sendForceJoinScreen(env, chatId, forceCheck, messageId); return; }
     }
 
+    if(await handleTicketCallback(env,chatId,data,messageId))return;
     if (data === 'redeem_open') {
       await clearBinanceInput(env,chatId);
       if(String(chatId)===String(env.ADMIN_ID))await clearAdminState(env,chatId);
@@ -2938,6 +2946,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{text:'📊 Sales & Profit Reports',callback_data:'adm_sales_today'}],
     [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
     [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
+    [{text:'🎫 Support Tickets',callback_data:'adm_tickets_open_0'}],
     [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'}],
     [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
     [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
@@ -2993,6 +3002,7 @@ async function sendOrders(env,chatId,editMessageId=null){
   let orderText='📦 <b>Your Orders:</b>\n\n';const buttons=[];
   if(!results?.length)orderText+='You have no paid orders yet.';
   for(const order of results||[]){
+    buttons.push([{text:`🎫 Get Help · Order #${order.id}`,callback_data:`ticket_new_${order.id}`}]);
     orderText+=`<b>${escapeHtml(order.product_name)}</b>\nOrder: #${order.id} | Quantity: ${order.quantity||1} | Amount: $${Number(order.amount_usd).toFixed(2)}\n`;
     if(order.status==='completed')orderText+=`Credentials: <code>${escapeHtml(order.delivery_data||order.item_data||'Delivery details unavailable. Contact admin.')}</code>\n\n`;
     else if(order.status==='refunded')orderText+='Status: Wallet payment refunded.\n\n';
@@ -3001,7 +3011,7 @@ async function sendOrders(env,chatId,editMessageId=null){
       if(order.provider_request_id&&order.status==='paid_pending_delivery')buttons.push([{text:`Check Delivery #${order.id}`,callback_data:`provider_retry_${order.id}`}]);
     }
   }
-  buttons.push([{text:'◀️ Main Menu',callback_data:'home'}]);
+  buttons.push([{text:'🎫 My Support Tickets',callback_data:'tickets_mine_0'}],[{text:'◀️ Main Menu',callback_data:'home'}]);
   if(editMessageId)await editMsg(env,chatId,editMessageId,orderText,buttons);else await sendMsg(env,chatId,orderText,buttons);
 }
 
@@ -3029,6 +3039,8 @@ async function sendSupport(env, chatId, editMessageId = null) {
   const cleanUsername = supContact.replace("@", "");
   const supText = `🕒 <b>Customer Support & Helpdesk</b>\n\nNeed help with an order or deposit?\nOur customer service team is ready to assist you!\n\n📞 <b>Support Handle:</b> <code>${supContact}</code>`;
   const buttons = [
+    [{text:"🎫 My Support Tickets",callback_data:"tickets_mine_0"}],
+    [{text:"📦 Get Help with an Order",callback_data:"my_orders"}],
     [{ text: "💬 Chat with Support Admin", url: `https://t.me/${cleanUsername}` }],
     [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
@@ -3685,4 +3697,90 @@ async function handleDeliveryAdminCallback(env,chatId,data,messageId){
   let match=data.match(/^adm_delivery_list_(pending|processing|completed)_(\d+)$/);if(match){await showDeliveryAdminList(env,chatId,match[1],match[2],messageId);return true;}
   match=data.match(/^adm_delivery_(view|retry|resend)_(\d+)$/);if(!match)return false;
   if(match[1]==='retry')await retryDeliveryAdmin(env,chatId,match[2],messageId);else if(match[1]==='resend')await resendSavedDelivery(env,chatId,match[2],messageId);else await showDeliveryAdminOrder(env,chatId,match[2],messageId);return true;
+}
+
+
+async function showTickets(env,chatId,mode='mine',page=0,messageId=null){
+  await clearTicketInput(env,chatId);
+  const admin=adminUserAccess(env,chatId);if(mode!=='mine'&&!admin)return;
+  page=adminUserPage(page);
+  const where=mode==='mine'?'t.user_id=?':mode==='closed'?"t.status='closed'":"t.status<>'closed'",args=mode==='mine'?[chatId]:[];
+  const {results}=await env.DB.prepare(`SELECT t.*,o.product_name,p.name FROM support_tickets t LEFT JOIN orders o ON o.id=t.order_id LEFT JOIN products p ON p.id=o.product_id WHERE ${where} ORDER BY t.updated_at DESC,t.id DESC LIMIT 11 OFFSET ?`).bind(...args,page*10).all();
+  const prefix=mode==='mine'?'tickets_mine_':`adm_tickets_${mode}_`;
+  const text=`🎫 <b>${mode==='mine'?'My Support Tickets':mode==='closed'?'Closed Support Tickets':'Active Support Tickets'}</b> · Page ${page+1}\n\n${results.length?'Choose a ticket to read the conversation or reply.':'No tickets found. Open Your Orders and choose Get Help to create a ticket.'}`;
+  const buttons=results.slice(0,10).map(t=>[{text:`#${t.id} · Order #${t.order_id} · ${t.status} · ${String(t.product_name||t.name||'Product').slice(0,25)}`,callback_data:`ticket_view_${t.id}_0`}]);
+  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:prefix+(page-1)});if(results.length>10)pager.push({text:'Next',callback_data:prefix+(page+1)});if(pager.length)buttons.push(pager);
+  if(admin&&mode!=='mine')buttons.push([{text:'Active',callback_data:'adm_tickets_open_0'},{text:'Closed',callback_data:'adm_tickets_closed_0'},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  else buttons.push([{text:'Your Orders',callback_data:'my_orders'},{text:'Main Menu',callback_data:'home'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function showTicket(env,chatId,id,page=0,messageId=null){
+  const ticket=await env.DB.prepare('SELECT t.*,o.status AS order_status,o.amount_usd,o.product_name,p.name FROM support_tickets t LEFT JOIN orders o ON o.id=t.order_id LEFT JOIN products p ON p.id=o.product_id WHERE t.id=?').bind(id).first();
+  if(!ticket||(!adminUserAccess(env,chatId)&&String(ticket.user_id)!==String(chatId))){await sendMsg(env,chatId,'Ticket unavailable.');return;}
+  page=adminUserPage(page);
+  const {results}=await env.DB.prepare('SELECT * FROM support_ticket_messages WHERE ticket_id=? ORDER BY id DESC LIMIT 2 OFFSET ?').bind(id,page).all();
+  const msg=results[0];
+  const text=`🎫 <b>Ticket #${ticket.id} · ${escapeHtml(ticket.status)}</b>\nOrder #${ticket.order_id} · ${escapeHtml(ticket.order_status||'Unavailable')} · $${adminMoney(ticket.amount_usd)}\nProduct: ${adminSnippet(ticket.product_name||ticket.name||'Product unavailable',100)}\nCustomer: <code>${ticket.user_id}</code>\n\n${msg?`<b>${msg.is_admin?'Admin':'Customer'}</b> · ${paymentDashboardTime(msg.created_at)} (Dhaka)\n\n${escapeHtml(msg.body)}`:'No messages.'}`;
+  const buttons=[],pager=[];if(page>0)pager.push({text:'Newer Message',callback_data:`ticket_view_${id}_${page-1}`});if(results.length>1)pager.push({text:'Older Message',callback_data:`ticket_view_${id}_${page+1}`});if(pager.length)buttons.push(pager);
+  if(ticket.status!=='closed')buttons.push([{text:'✏️ Reply',callback_data:`ticket_reply_${id}`}],...(adminUserAccess(env,chatId)?[[{text:'✅ Close Ticket',callback_data:`adm_ticket_close_${id}`}]]:[]));
+  if(adminUserAccess(env,chatId))buttons.push([adminUserProfileButton(ticket.user_id),{text:'Order Details',callback_data:`adm_delivery_view_${ticket.order_id}`}]);
+  buttons.push([{text:'🔄 Refresh',callback_data:`ticket_view_${id}_0`},{text:'Tickets',callback_data:adminUserAccess(env,chatId)?'adm_tickets_open_0':'tickets_mine_0'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function clearTicketInput(env,chatId){
+  await env.DB.prepare("DELETE FROM user_states WHERE user_id=? AND state='awaiting_ticket_body'").bind(chatId).run();
+  if(adminUserAccess(env,chatId))await env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='awaiting_ticket_reply'").bind(chatId).run();
+}
+async function handleTicketCallback(env,chatId,data,messageId){
+  if(['home','my_orders','support','shop','deposit'].includes(data))await clearTicketInput(env,chatId);
+  let match=data.match(/^(?:tickets_mine|adm_tickets_(open|closed))_(\d+)$/);
+  if(match){if(data.startsWith('adm_')&&!adminUserAccess(env,chatId))return true;await showTickets(env,chatId,match[1]||'mine',match[2],messageId);return true;}
+  match=data.match(/^ticket_view_(\d+)_(\d+)$/);if(match){await env.DB.prepare("DELETE FROM user_states WHERE user_id=? AND state='awaiting_ticket_body'").bind(chatId).run();if(adminUserAccess(env,chatId))await env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='awaiting_ticket_reply'").bind(chatId).run();await showTicket(env,chatId,match[1],match[2],messageId);return true;}
+  match=data.match(/^ticket_new_(\d+)$/);
+  if(match){
+    const order=await env.DB.prepare("SELECT * FROM orders WHERE id=? AND user_id=? AND status IN ('completed','paid_pending_delivery','delivering','refunded')").bind(match[1],chatId).first();
+    if(!order){await sendMsg(env,chatId,'Choose one of your paid orders to open a ticket.');return true;}
+    const existing=await env.DB.prepare("SELECT id FROM support_tickets WHERE order_id=? AND user_id=? AND status<>'closed'").bind(order.id,chatId).first();if(existing){await showTicket(env,chatId,existing.id,0,messageId);return true;}
+    await env.DB.prepare("INSERT OR REPLACE INTO user_states(user_id,state,data) VALUES(?,'awaiting_ticket_body',?)").bind(chatId,JSON.stringify({orderId:order.id,token:crypto.randomUUID()})).run();
+    await editMsg(env,chatId,messageId,`🎫 <b>Get Help · Order #${order.id}</b>\n\nDescribe your issue in one text message (up to 500 characters). Do not send payment PINs, OTPs or account passwords.`,[[{text:'Cancel',callback_data:'my_orders'}]]);return true;
+  }
+  match=data.match(/^ticket_reply_(\d+)$/);
+  if(match){
+    const ticket=await env.DB.prepare("SELECT * FROM support_tickets WHERE id=? AND status<>'closed'").bind(match[1]).first();
+    const admin=adminUserAccess(env,chatId);if(!ticket||(!admin&&String(ticket.user_id)!==String(chatId))){await sendMsg(env,chatId,'Ticket unavailable or closed.');return true;}
+    const table=admin?'admin_states':'user_states',state=admin?'awaiting_ticket_reply':'awaiting_ticket_body';
+    await env.DB.prepare(`INSERT OR REPLACE INTO ${table}(user_id,state,data) VALUES(?,?,?)`).bind(chatId,state,JSON.stringify({ticketId:ticket.id,token:crypto.randomUUID()})).run();
+    await editMsg(env,chatId,messageId,'Send your reply as text (up to 500 characters). Do not send PINs, OTPs or passwords.',[[{text:'Cancel',callback_data:`ticket_view_${ticket.id}_0`}]]);return true;
+  }
+  match=data.match(/^adm_ticket_close_(\d+)$/);
+  if(match){
+    if(!adminUserAccess(env,chatId))return true;
+    const ticket=await env.DB.prepare("SELECT * FROM support_tickets WHERE id=? AND status<>'closed'").bind(match[1]).first();
+    if(ticket){const changed=await env.DB.prepare("UPDATE support_tickets SET status='closed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'closed'").bind(ticket.id).run();if(changed.meta?.changes)await sendMsg(env,ticket.user_id,`✅ Support Ticket #${ticket.id} for Order #${ticket.order_id} was closed by admin.`,[[{text:'View Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);}
+    await showTicket(env,chatId,match[1],0,messageId);return true;
+  }
+  return false;
+}
+async function handleTicketText(env,chatId,text,state,isAdminState){
+  if(!state||!(isAdminState?state.state==='awaiting_ticket_reply'&&adminUserAccess(env,chatId):state.state==='awaiting_ticket_body'))return false;
+  const body=String(text).trim();if(!body||body.length>500){await sendMsg(env,chatId,'Send a text message between 1 and 500 characters.');return true;}
+  const data=JSON.parse(state.data),table=isAdminState?'admin_states':'user_states';
+  let ticket;
+  if(data.ticketId)ticket=await env.DB.prepare("SELECT * FROM support_tickets WHERE id=? AND status<>'closed'").bind(data.ticketId).first();
+  else{
+    const order=await env.DB.prepare("SELECT id FROM orders WHERE id=? AND user_id=? AND status IN ('completed','paid_pending_delivery','delivering','refunded')").bind(data.orderId,chatId).first();
+    if(!order){await sendMsg(env,chatId,'Order unavailable.');return true;}
+    await env.DB.prepare(`INSERT OR IGNORE INTO support_tickets(order_id,user_id) SELECT ?,? WHERE EXISTS(SELECT 1 FROM ${table} WHERE user_id=? AND state=? AND data=?)`).bind(order.id,chatId,chatId,state.state,state.data).run();
+    ticket=await env.DB.prepare("SELECT * FROM support_tickets WHERE order_id=? AND user_id=? AND status<>'closed'").bind(order.id,chatId).first();
+  }
+  if(!ticket||(!isAdminState&&String(ticket.user_id)!==String(chatId))){await sendMsg(env,chatId,'Ticket unavailable or closed.');return true;}
+  const result=await env.DB.batch([
+    env.DB.prepare(`INSERT OR IGNORE INTO support_ticket_messages(ticket_id,sender_id,is_admin,body,submission_token) SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM support_tickets WHERE id=? AND status<>'closed') AND EXISTS(SELECT 1 FROM ${table} WHERE user_id=? AND state=? AND data=?)`).bind(ticket.id,chatId,isAdminState?1:0,body,data.token,ticket.id,chatId,state.state,state.data),
+    env.DB.prepare(`UPDATE support_tickets SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'closed' AND EXISTS(SELECT 1 FROM support_ticket_messages WHERE submission_token=?) AND EXISTS(SELECT 1 FROM ${table} WHERE user_id=? AND state=? AND data=?)`).bind(isAdminState?'answered':'open',ticket.id,data.token,chatId,state.state,state.data),
+    env.DB.prepare(`DELETE FROM ${table} WHERE user_id=? AND state=? AND data=?`).bind(chatId,state.state,state.data)
+  ]);
+  if(!result[0].meta?.changes){await sendMsg(env,chatId,'Message was already submitted, cancelled or the ticket closed.');return true;}
+  const target=isAdminState?ticket.user_id:env.ADMIN_ID;
+  const sent=await sendMsg(env,target,`🎫 <b>${isAdminState?'Admin Reply':'Customer Support Message'} · Ticket #${ticket.id}</b>\nOrder #${ticket.order_id}\n\n${escapeHtml(body)}`,[[{text:'Open Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);
+  await sendMsg(env,chatId,`✅ Message saved to Ticket #${ticket.id}.${sent?.ok?'':' The notification could not be confirmed; the message is available in the ticket.'}`,[[{text:'View Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);return true;
 }
