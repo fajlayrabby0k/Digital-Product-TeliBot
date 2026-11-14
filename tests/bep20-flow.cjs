@@ -43,5 +43,6 @@ const last=()=>messages.filter(m=>m.text).at(-1);
  await callback('bep20_enter_order_'+order.id);clock+=2000;head=212;payment('0x'+'ef'.repeat(32),5,newWallet,201);await text('0x'+'ef'.repeat(32));
  assert.equal(sqlite.prepare('SELECT status FROM orders WHERE id=?').get(order.id).status,'completed');assert.equal(state(99),undefined);assert.equal(balance(99),50);
  assert(messages.some(m=>m.text?.includes('Your Order is Delivered')));assert.equal(sqlite.prepare('SELECT COUNT(*) AS c FROM bep20_payment_claims').get().c,2);
+ assert.equal(sqlite.prepare("SELECT COUNT(*) n FROM wallet_history WHERE user_id=99 AND reason='deposit'").get().n,1);assert.equal(sqlite.prepare("SELECT SUM(usd_delta_cents) n FROM wallet_history WHERE user_id=99 AND reason='deposit'").get().n,5000);
  console.log('PASS: real SQLite BEP20 amount -> copy address -> Enter TxHash -> confirmations/retry -> wallet credit/direct delivery; snapshot address, ownership, duplicate rejection, admin address settings and cancellation');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sqlite.close());

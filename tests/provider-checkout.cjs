@@ -27,5 +27,6 @@ const env={DB,ADMIN_ID:1},balance=()=>db.prepare('SELECT balance_usd FROM users 
  fail=true;await buy();const uncertain=last();assert.equal(balance(),5);fail=false;http=402;await cb(uncertain.id);assert.equal(last().status,'refunded');assert.equal(balance(),10);
  await c.api.handleUpdate({callback_query:{id:'history',data:'my_orders',from:{first_name:'Buyer'},message:{chat:{id:99},message_id:1}}},env);assert(messages.at(-1).text.includes('Wallet payment refunded'));
  pending=false;for(const status of [402,409]){http=status;await buy();assert.equal(last().status,'refunded');assert.equal(balance(),10);}
+ for(const order of db.prepare("SELECT id,status FROM orders WHERE payment_method='WALLET'").all()){assert.equal(db.prepare("SELECT COUNT(*) n FROM wallet_history WHERE reason='purchase' AND reference=?").get('order:'+order.id).n,1);assert.equal(db.prepare("SELECT COUNT(*) n FROM wallet_history WHERE reason='refund' AND reference=?").get('order:'+order.id).n,order.status==='refunded'?1:0);}
  console.log('PASS: documented provider errors refund once; lost responses recover by lookup; pending orders deliver via owner-only retry without a second POST; successful codes persist; concurrent purchases cannot overdraw; secrets redacted');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

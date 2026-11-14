@@ -1,0 +1,31 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,showWalletHistory,walletChangeSql,handleOrderSearchText};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ // Existing funds become an opening snapshot, never an invented deposit.
+ db.exec("CREATE TABLE users(user_id INTEGER UNIQUE NOT NULL,balance_usd REAL DEFAULT 0,balance_bdt REAL DEFAULT 0);INSERT INTO users VALUES(99,20,2500)");await c.api.ensureDbReady(DB);
+ const rows=()=>db.prepare('SELECT * FROM wallet_history WHERE user_id=99 ORDER BY id').all();assert.equal(rows().length,1);assert.equal(rows()[0].reason,'opening');assert.equal(rows()[0].usd_after_cents,2000);assert.equal(rows()[0].usd_delta_cents,0);
+ await c.api.ensureDbReady(DB,true);assert.equal(rows().length,1);
+ db.prepare('INSERT INTO users(user_id,balance_usd,balance_bdt) VALUES(1,0,0)').run();
+ const change=async(reason,ref,usd,bdt)=>DB.prepare(c.api.walletChangeSql('UPDATE users SET balance_usd=balance_usd+?,balance_bdt=balance_bdt+? WHERE user_id=?',reason,ref)).bind(usd,bdt,99).run();
+ await change('deposit','deposit:42',5,650);await change('purchase','product:1',-4,-520);await change('refund','order:12',4,520);await change('referral','buyer:123',0.25,32.5);await change('redeem','redeem',1,130);
+ assert.equal(rows().length,6);assert.equal(rows()[1].usd_delta_cents,500);assert.equal(rows()[2].usd_delta_cents,-400);assert.equal(rows()[4].bdt_delta_minor,3250);assert.equal(rows().at(-1).usd_after_cents,2625);
+ db.prepare('UPDATE users SET balance_usd=balance_usd WHERE user_id=99').run();assert.equal(rows().length,6);
+ await change('deposit','deposit:noop',0,0);assert.equal(rows().length,6);
+ db.prepare('UPDATE users SET balance_usd=balance_usd+1 WHERE user_id=99').run();assert.equal(rows().at(-1).reason,'unspecified');assert.equal(rows().at(-1).reference,null);
+ const before=rows().length,balance=db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd;
+ await assert.rejects(()=>DB.batch([DB.prepare(c.api.walletChangeSql('UPDATE users SET balance_usd=balance_usd+? WHERE user_id=?','deposit','deposit:rollback')).bind(5,99),DB.prepare('INSERT INTO missing_table VALUES(1)')]));assert.equal(rows().length,before);assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,balance);
+ await cb('wallet_history_0',99);assert(last().text.includes('Deposit credited'));assert(last().text.includes('Order refund'));assert(last().text.includes('Opening balance'));await cb('adm_user_view_99');assert(buttons().some(b=>b.callback_data==='adm_wallet_history_99_0'));
+ let count=messages.length;await c.api.showWalletHistory(env,100,99);assert.equal(messages.length,count);await cb('adm_wallet_history_99_0',100);assert(!messages.slice(count).some(m=>m.text?.includes('deposit:42')));
+ for(let i=0;i<12;i++)await change('deposit','deposit:'+i,0.01,1);await cb('wallet_history_0',99);assert(buttons().some(b=>b.callback_data==='wallet_history_1'));await cb('wallet_history_1',99);assert(buttons().some(b=>b.callback_data==='wallet_history_0'));
+ const o=db.prepare("INSERT INTO orders(user_id,product_id,payment_method,amount_usd,status,trx_id) VALUES(99,1,'BINANCE',5,'pending','SEARCH123')").run().lastInsertRowid;
+ await cb('admin_panel');assert(buttons().some(b=>b.callback_data==='adm_order_find'));await cb('adm_order_find');await text('#'+o);assert(last().text.includes('Order #'+o));assert(last().text.includes('SEARCH123'));assert(last().text.includes('pending'));assert.equal(db.prepare('SELECT * FROM admin_states WHERE user_id=1').get(),undefined);
+ await cb('adm_order_find');await text('99999999');assert(last().text.includes('No order found'));await text('invalid');assert(last().text.includes('Enter this store'));await text('order:'+o);assert(last().text.includes('Order #'+o));
+ count=messages.length;await cb('adm_order_find',99);assert.equal(await c.api.handleOrderSearchText(env,99,String(o),{state:'awaiting_order_search'}),false);assert(!messages.slice(count).some(m=>m.text?.includes('SEARCH123')));
+ console.log('PASS: opening baseline, atomic wallet delta/before/after/reasons, BDT precision, no-op and rollback, unspecified changes, history pagination/access and order ID search');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

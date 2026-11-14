@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-support-tickets-1";
+const BOT_BUILD="2026-11-15-wallet-history-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-support-tickets-1";
+const DB_SCHEMA_VERSION = "2026-11-wallet-history-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -153,6 +153,7 @@ async function initializeDatabase(db, force) {
       } catch (_) { /* First installation has no settings table yet. */ }
     }
     const schema = [
+      `CREATE TABLE IF NOT EXISTS wallet_history(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,reason TEXT NOT NULL,reference TEXT,usd_delta_cents INTEGER NOT NULL,bdt_delta_minor INTEGER NOT NULL,usd_before_cents INTEGER NOT NULL,usd_after_cents INTEGER NOT NULL,bdt_before_minor INTEGER NOT NULL,bdt_after_minor INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS support_tickets(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL,user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS support_ticket_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,ticket_id INTEGER NOT NULL,sender_id INTEGER NOT NULL,is_admin INTEGER NOT NULL,body TEXT NOT NULL,submission_token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS payment_verification_events(invoice_type TEXT NOT NULL,invoice_id INTEGER NOT NULL,user_id INTEGER NOT NULL,method TEXT NOT NULL,trx_id TEXT,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 1,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(invoice_type,invoice_id));`,
@@ -185,6 +186,8 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE preorders ADD COLUMN product_id INTEGER DEFAULT NULL;",
       "ALTER TABLE preorders ADD COLUMN user_id INTEGER DEFAULT NULL;",
       "ALTER TABLE preorders ADD COLUMN status TEXT DEFAULT 'pending';",
+      "ALTER TABLE users ADD COLUMN wallet_change_reason TEXT DEFAULT NULL;",
+      "ALTER TABLE users ADD COLUMN wallet_change_ref TEXT DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN purchase_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN purchase_unit_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN sale_origin TEXT DEFAULT NULL;",
@@ -233,15 +236,36 @@ async function initializeDatabase(db, force) {
       if (typeof db.batch === "function") await db.batch(missing.map(sql => db.prepare(sql)));
       else for (const sql of missing) await db.prepare(sql).run();
     }
-    await db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_sale_cost AFTER INSERT ON orders BEGIN
+    const auditSetup=[
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_sale_cost AFTER INSERT ON orders BEGIN
       UPDATE orders SET sale_origin=(SELECT CASE WHEN is_external=1 THEN 'api' ELSE 'local' END FROM products WHERE id=NEW.product_id),
       provider_unit_cost_usd=(SELECT CASE WHEN is_external=1 AND cost_price_usd>0 THEN cost_price_usd ELSE NULL END FROM products WHERE id=NEW.product_id)
-      WHERE id=NEW.id; END`).run();
-    await db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_local_cost AFTER INSERT ON orders BEGIN
-      UPDATE orders SET purchase_unit_cost_usd=(SELECT purchase_cost_usd FROM products WHERE id=NEW.product_id AND COALESCE(is_external,0)=0) WHERE id=NEW.id; END`).run();
+      WHERE id=NEW.id; END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_local_cost AFTER INSERT ON orders BEGIN
+      UPDATE orders SET purchase_unit_cost_usd=(SELECT purchase_cost_usd FROM products WHERE id=NEW.product_id AND COALESCE(is_external,0)=0) WHERE id=NEW.id; END`),
+      db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS wallet_opening_once ON wallet_history(user_id) WHERE reason='opening'"),
+      db.prepare(`INSERT OR IGNORE INTO wallet_history(user_id,reason,usd_delta_cents,bdt_delta_minor,usd_before_cents,usd_after_cents,bdt_before_minor,bdt_after_minor)
+      SELECT user_id,'opening',0,0,ROUND(COALESCE(balance_usd,0)*100),ROUND(COALESCE(balance_usd,0)*100),ROUND(COALESCE(balance_bdt,0)*100),ROUND(COALESCE(balance_bdt,0)*100) FROM users`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS wallet_history_new_user AFTER INSERT ON users BEGIN
+      INSERT INTO wallet_history(user_id,reason,usd_delta_cents,bdt_delta_minor,usd_before_cents,usd_after_cents,bdt_before_minor,bdt_after_minor)
+      VALUES(NEW.user_id,'opening',0,0,ROUND(COALESCE(NEW.balance_usd,0)*100),ROUND(COALESCE(NEW.balance_usd,0)*100),ROUND(COALESCE(NEW.balance_bdt,0)*100),ROUND(COALESCE(NEW.balance_bdt,0)*100)); END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS wallet_history_change AFTER UPDATE OF balance_usd,balance_bdt ON users
+      WHEN ROUND(COALESCE(NEW.balance_usd,0)*100)<>ROUND(COALESCE(OLD.balance_usd,0)*100) OR ROUND(COALESCE(NEW.balance_bdt,0)*100)<>ROUND(COALESCE(OLD.balance_bdt,0)*100)
+      BEGIN INSERT INTO wallet_history(user_id,reason,reference,usd_delta_cents,bdt_delta_minor,usd_before_cents,usd_after_cents,bdt_before_minor,bdt_after_minor)
+      VALUES(NEW.user_id,COALESCE(NEW.wallet_change_reason,'unspecified'),NEW.wallet_change_ref,
+      ROUND(COALESCE(NEW.balance_usd,0)*100)-ROUND(COALESCE(OLD.balance_usd,0)*100),ROUND(COALESCE(NEW.balance_bdt,0)*100)-ROUND(COALESCE(OLD.balance_bdt,0)*100),
+      ROUND(COALESCE(OLD.balance_usd,0)*100),ROUND(COALESCE(NEW.balance_usd,0)*100),ROUND(COALESCE(OLD.balance_bdt,0)*100),ROUND(COALESCE(NEW.balance_bdt,0)*100));
+      UPDATE users SET wallet_change_reason=NULL,wallet_change_ref=NULL WHERE user_id=NEW.user_id; END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS wallet_history_clear_noop AFTER UPDATE OF balance_usd,balance_bdt ON users
+        WHEN NEW.wallet_change_reason IS NOT NULL AND ROUND(COALESCE(NEW.balance_usd,0)*100)=ROUND(COALESCE(OLD.balance_usd,0)*100) AND ROUND(COALESCE(NEW.balance_bdt,0)*100)=ROUND(COALESCE(OLD.balance_bdt,0)*100)
+        BEGIN UPDATE users SET wallet_change_reason=NULL,wallet_change_ref=NULL WHERE user_id=NEW.user_id; END`),
+    ];
+    if(typeof db.batch==="function")await db.batch(auditSetup);
+    else for(const statement of auditSetup)await statement.run();
     orderWriteSchemaCache.delete(db);
     await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
+      "CREATE INDEX IF NOT EXISTS wallet_user_history ON wallet_history(user_id,id DESC)",
       "CREATE UNIQUE INDEX IF NOT EXISTS support_one_active_order ON support_tickets(order_id,user_id) WHERE status<>'closed'",
       "CREATE INDEX IF NOT EXISTS support_user_list ON support_tickets(user_id,id DESC)",
       "CREATE INDEX IF NOT EXISTS support_thread ON support_ticket_messages(ticket_id,id DESC)",
@@ -729,7 +753,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     const token='WALLET:'+crypto.randomUUID();
     const booked=await env.DB.batch([
       env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,currency,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,'USD',CURRENT_TIMESTAMP,'paid_pending_delivery' FROM users WHERE user_id=? AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd),
-      env.DB.prepare("UPDATE users SET balance_usd=balance_usd-?,balance_bdt=balance_bdt-?,total_spent_usd=total_spent_usd+? WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='paid_pending_delivery')").bind(totalUsd,totalBdt,totalUsd,chatId,token,chatId)
+      env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd=balance_usd-?,balance_bdt=balance_bdt-?,total_spent_usd=total_spent_usd+? WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='paid_pending_delivery')",'purchase','wallet:'+token)).bind(totalUsd,totalBdt,totalUsd,chatId,token,chatId)
     ]);
     if(!booked[0].meta?.changes){await sendMsg(env,chatId,'Insufficient wallet balance. No money was deducted.');return;}
     const orderId=booked[0].meta.last_row_id;
@@ -771,7 +795,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     return;
   }
 
-  await env.DB.prepare("UPDATE users SET balance_usd = balance_usd - ?, balance_bdt = balance_bdt - ?, total_spent_usd = total_spent_usd + ? WHERE user_id = ?").bind(totalUsd, totalBdt, totalUsd, chatId).run();
+  await env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd = balance_usd - ?, balance_bdt = balance_bdt - ?, total_spent_usd = total_spent_usd + ? WHERE user_id = ?",'purchase','product:'+prod.id)).bind(totalUsd, totalBdt, totalUsd, chatId).run();
   const res = await env.DB.prepare("INSERT INTO orders (user_id, username, product_id, quantity, payment_method, trx_id, amount_usd, amount_bdt, amount, product_name, currency, created_at, status) VALUES (?, ?, ?, ?, 'WALLET', 'LOCAL_STOCK', ?, ?, ?, ?, 'USD', CURRENT_TIMESTAMP, 'completed')").bind(chatId, username, prod.id, qty, totalUsd, totalBdt,totalUsd,prod.name).run();
   const orderId = res.meta ? res.meta.last_row_id : Math.floor(Math.random() * 10000);
 
@@ -911,7 +935,7 @@ async function redeemWalletCode(env,chatId,text) {
     try {
       results=await env.DB.batch([
         env.DB.prepare("UPDATE redeem_codes SET redeemed_by = ?, redeemed_at = CURRENT_TIMESTAMP, redemption_token = ?, redeemed_bdt = ROUND(amount_cents / 100.0 * ?) WHERE code_hash = ? AND redeemed_by IS NULL AND EXISTS (SELECT 1 FROM users WHERE user_id = ?)").bind(chatId,token,rate,hash,chatId),
-        env.DB.prepare(`UPDATE users SET balance_usd = balance_usd + (SELECT amount_cents / 100.0 FROM redeem_codes WHERE code_hash = ? AND redemption_token = ?), balance_bdt = balance_bdt + (SELECT redeemed_bdt FROM redeem_codes WHERE code_hash = ? AND redemption_token = ?) WHERE user_id = ? AND ${proof}`).bind(hash,token,hash,token,chatId,hash,token,chatId),
+        env.DB.prepare(walletChangeSql(`UPDATE users SET balance_usd = balance_usd + (SELECT amount_cents / 100.0 FROM redeem_codes WHERE code_hash = ? AND redemption_token = ?), balance_bdt = balance_bdt + (SELECT redeemed_bdt FROM redeem_codes WHERE code_hash = ? AND redemption_token = ?) WHERE user_id = ? AND ${proof}`,'redeem','redeem')).bind(hash,token,hash,token,chatId,hash,token,chatId),
         env.DB.prepare("INSERT INTO deposits (user_id, username, method, amount_usd, amount_bdt, trx_id, status) SELECT users.user_id, users.username, 'REDEEM', redeem_codes.amount_cents / 100.0, redeem_codes.redeemed_bdt, ?, 'completed' FROM users JOIN redeem_codes ON redeem_codes.redeemed_by = users.user_id WHERE users.user_id = ? AND redeem_codes.code_hash = ? AND redeem_codes.redemption_token = ?").bind(`REDEEM:${hash}`,chatId,hash,token)
       ]);
     } catch (_) {return {success:false,message:'Redemption could not be completed. Your code was not consumed if the transaction failed. Please retry or contact admin.'};}
@@ -1025,7 +1049,7 @@ async function submitBinancePayment(env, chatId, type, invoice, receiptId) {
     const bdt = Math.round(result.paidAmount * rate);
     await env.DB.batch([
       env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ?").bind(result.paidAmount, bdt, result.orderId, invoice.id),
-      env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(result.paidAmount, bdt, chatId)
+      env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?",'deposit','deposit:'+invoice.id)).bind(result.paidAmount, bdt, chatId)
     ]);
     await sendMsg(env, chatId, `✅ <b>Binance deposit verified!</b>\n\nWallet credited: <b>$${result.paidAmount.toFixed(2)} USDT</b>`, [[{ text: "🛍️ Open Shop", callback_data: "shop" }]]);
     await notifyAdminForUser(env,chatId, `✅ Binance deposit #${invoice.id} credited: $${result.paidAmount.toFixed(2)} USDT. User: ${chatId}`);
@@ -1099,7 +1123,7 @@ async function submitBep20Payment(env, chatId, type, invoice, txHash) {
   } else {
     const bdt=Math.round(result.paidAmount*parseFloat(await getSetting(env,'usd_to_bdt_rate','125')));
     const settled=await env.DB.batch([
-      env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ? AND EXISTS (SELECT 1 FROM deposits WHERE id = ? AND user_id = ? AND status = 'pending')").bind(result.paidAmount,bdt,chatId,invoice.id,chatId),
+      env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ? AND EXISTS (SELECT 1 FROM deposits WHERE id = ? AND user_id = ? AND status = 'pending')",'deposit','deposit:'+invoice.id)).bind(result.paidAmount,bdt,chatId,invoice.id,chatId),
       env.DB.prepare("UPDATE deposits SET amount_usd = ?, amount_bdt = ?, trx_id = ?, status = 'completed' WHERE id = ? AND user_id = ? AND status = 'pending'").bind(result.paidAmount,bdt,result.txHash,invoice.id,chatId)
     ]);
     if (settled[0].meta.changes!==1) {await sendMsg(env,chatId,'This deposit has already been processed. Contact admin if the balance is incorrect.');return;}
@@ -1258,6 +1282,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
+        if (await handleOrderSearchText(env,chatId,text,adminState))return;
         if (await handleTicketText(env,chatId,text,adminState,true))return;
         if (await handleLocalProductText(env,chatId,text,adminState))return;
         if (await handlePricingText(env,chatId,text,adminState))return;
@@ -1433,6 +1458,15 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await env.DB.prepare('UPDATE users SET username=?,first_name=? WHERE user_id=?').bind(username,firstName,chatId).run();
       user={...user,username,first_name:firstName};
     }
+    if(data==='adm_order_find'){
+      if(!adminUserAccess(env,chatId))return;
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_order_search','')").bind(chatId).run();
+      await editMsg(env,chatId,messageId,'🔎 <b>Find Order</b>\n\nSend the order ID, e.g. 123 or #123. This is this store’s order ID, not a payment transaction ID.',[[{text:'Cancel',callback_data:'admin_panel'}]]);return;
+    }
+    let walletHistoryMatch=data.match(/^wallet_history_(\d+)$/);
+    if(walletHistoryMatch){await showWalletHistory(env,chatId,chatId,walletHistoryMatch[1],messageId);return;}
+    walletHistoryMatch=data.match(/^adm_wallet_history_(\d+)_(\d+)$/);
+    if(walletHistoryMatch){if(adminUserAccess(env,chatId))await showWalletHistory(env,chatId,walletHistoryMatch[1],walletHistoryMatch[2],messageId);return;}
     if(await handleDeliveryAdminCallback(env,chatId,data,messageId))return;
     if(await handlePaymentDashboardCallback(env,chatId,data,messageId))return;
     if(/^adm_sales_(today|week|days30|month|all)$/.test(data)){await showAdminSalesReport(env,chatId,data.slice(10),messageId);return;}
@@ -2606,7 +2640,7 @@ async function processReferralCommission(env, buyerChatId, orderAmountUsd, produ
     const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
     const commissionBdt = Math.round(commissionUsd * rate);
 
-    await env.DB.prepare("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?").bind(commissionUsd, commissionBdt, referrerId).run();
+    await env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?",'referral','buyer:'+buyerChatId)).bind(commissionUsd, commissionBdt, referrerId).run();
     await sendMsg(env, referrerId, `🎉 <b>Referral Commission Received!</b>\n\nYour referred friend completed a purchase of <b>${productName}</b>!\n💰 Added: <b>+$${commissionUsd.toFixed(2)} USD (≈ ৳${commissionBdt} BDT)</b> (${commPct}% commission) to your wallet balance.`);
   } catch (e) { console.error("Referral Commission Error:", e); }
 }
@@ -2942,7 +2976,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     `Select any button below to manage your store:`;
 
   const buttons = [
-    [{text:'👥 Users / Find Customer',callback_data:'adm_users'}],
+    [{text:'👥 Users / Find Customer',callback_data:'adm_users'},{text:'🔎 Find Order',callback_data:'adm_order_find'}],
     [{text:'📊 Sales & Profit Reports',callback_data:'adm_sales_today'}],
     [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
     [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
@@ -2979,6 +3013,7 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
 
   const buttons = [
     [{ text: "💳 Deposit Funds", callback_data: "deposit" }],
+    [{text:"📒 Balance History",callback_data:"wallet_history_0"}],
     [{ text: "📦 Order History", callback_data: "my_orders" }, { text: "⏳ My Pre-Orders", callback_data: "my_preorders" }],
     [{ text: "👥 Refer & Earn", callback_data: "refer" }],
     [{ text: "◀️ Main Menu", callback_data: "home" }]
@@ -3175,7 +3210,7 @@ async function settleMobileInvoice(env,type,id) {
     env.DB.prepare(`UPDATE mobile_payment_invoices SET status='paid' WHERE invoice_type=? AND invoice_id=? AND status='pending' AND ${claim}`).bind(type,id,token),
     env.DB.prepare(`UPDATE mobile_bridge_receipts SET status='claimed' WHERE event_id=? AND ${claim}`).bind(receipt.event_id,token)
   ];
-  if(type==='deposit')statements.push(env.DB.prepare(`UPDATE users SET balance_usd=COALESCE(balance_usd,0)+?/100.0,balance_bdt=COALESCE(balance_bdt,0)+?/100.0 WHERE user_id=? AND ${claim}`).bind(invoice.amount_cents,invoice.amount_minor,invoice.user_id,token));
+  if(type==='deposit')statements.push(env.DB.prepare(walletChangeSql(`UPDATE users SET balance_usd=COALESCE(balance_usd,0)+?/100.0,balance_bdt=COALESCE(balance_bdt,0)+?/100.0 WHERE user_id=? AND ${claim}`,'deposit','deposit:'+id)).bind(invoice.amount_cents,invoice.amount_minor,invoice.user_id,token));
   await env.DB.batch(statements);
   const won=await env.DB.prepare('SELECT token FROM mobile_payment_claims WHERE token=?').bind(token).first();
   if(!won){
@@ -3215,7 +3250,7 @@ async function resumeMobilePayments(env,method,trx) {
 
 async function refundRejectedExternalWalletOrder(env,orderId,chatId){
   await env.DB.batch([
-    env.DB.prepare("UPDATE users SET balance_usd=balance_usd+(SELECT amount_usd FROM orders WHERE id=?),balance_bdt=balance_bdt+(SELECT amount_bdt FROM orders WHERE id=?),total_spent_usd=MAX(0,total_spent_usd-(SELECT amount_usd FROM orders WHERE id=?)) WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE id=? AND user_id=? AND payment_method='WALLET' AND status='paid_pending_delivery')").bind(orderId,orderId,orderId,chatId,orderId,chatId),
+    env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd=balance_usd+(SELECT amount_usd FROM orders WHERE id=?),balance_bdt=balance_bdt+(SELECT amount_bdt FROM orders WHERE id=?),total_spent_usd=MAX(0,total_spent_usd-(SELECT amount_usd FROM orders WHERE id=?)) WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE id=? AND user_id=? AND payment_method='WALLET' AND status='paid_pending_delivery')",'refund','order:'+orderId)).bind(orderId,orderId,orderId,chatId,orderId,chatId),
     env.DB.prepare("UPDATE orders SET status='refunded' WHERE id=? AND user_id=? AND payment_method='WALLET' AND status='paid_pending_delivery'").bind(orderId,chatId)
   ]);
 }
@@ -3369,7 +3404,7 @@ async function showAdminUserProfile(env,chatId,userId,messageId=null){
   if(latestDeposit)text+=`\n\nLatest deposit: #${latestDeposit.id} · $${adminMoney(latestDeposit.amount_usd)}\n${adminSnippet(latestDeposit.method,20)} · ${adminSnippet(latestDeposit.status,30)}`;
   if(latestOrder)text+=`\n\nLatest order: #${latestOrder.id} · $${adminMoney(latestOrder.amount_usd)} · ${adminSnippet(latestOrder.status,30)}`;
   const cleanUsername=String(user.username||'').replace(/^@/,'');
-  const buttons=[[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
+  const buttons=[[{text:'📒 Balance History',callback_data:`adm_wallet_history_${user.user_id}_0`}],[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showAdminUserHistory(env,chatId,userId,type,page=0,messageId=null){
@@ -3660,7 +3695,7 @@ async function showDeliveryAdminOrder(env,chatId,id,messageId=null){
   const canRetry=order.status==='paid_pending_delivery'&&order.is_external!=null&&(!order.is_external||order.provider_request_id);
   let help=order.status==='completed'?'Delivered. No further purchase or stock allocation will be performed.':order.status==='delivering'?'Processing or interrupted during delivery. Check supplier history and refresh; automatic restart is blocked to avoid duplicate fulfillment.':order.status==='paid_pending_delivery'?(order.is_external&&!order.provider_request_id?'This older API order has no supplier request ID. Reconcile supplier history before taking further action.':order.is_external?'Check Delivery looks up the existing supplier request and resumes it safely. A provider rejection can refund a wallet order through the existing refund rules.':'Restock this local product, then Check Delivery. Previously allocated items are reused; only missing items are allocated.'):'This order is unpaid or closed; delivery cannot be started here.';
   if(order.is_external==null&&order.status==='paid_pending_delivery')help='Product record is missing. Admin reconciliation is required.';
-  const text=`📦 <b>Delivery · Order #${order.id}</b>\n\nCustomer: <code>${order.user_id}</code>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nPaid total: <b>$${adminMoney(order.amount_usd)}</b>\nMethod: ${adminSnippet(order.payment_method,30)}\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
+  const text=`📦 <b>Delivery · Order #${order.id}</b>\n\nCustomer: <code>${order.user_id}</code>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nOrder total: <b>$${adminMoney(order.amount_usd)}</b>\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
   const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
   if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
   buttons.push([adminUserProfileButton(order.user_id)],[{text:'🔄 Refresh',callback_data:`adm_delivery_view_${order.id}`}],[{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'},{text:'Admin Panel',callback_data:'admin_panel'}]);
@@ -3783,4 +3818,35 @@ async function handleTicketText(env,chatId,text,state,isAdminState){
   const target=isAdminState?ticket.user_id:env.ADMIN_ID;
   const sent=await sendMsg(env,target,`🎫 <b>${isAdminState?'Admin Reply':'Customer Support Message'} · Ticket #${ticket.id}</b>\nOrder #${ticket.order_id}\n\n${escapeHtml(body)}`,[[{text:'Open Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);
   await sendMsg(env,chatId,`✅ Message saved to Ticket #${ticket.id}.${sent?.ok?'':' The notification could not be confirmed; the message is available in the ticket.'}`,[[{text:'View Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);return true;
+}
+
+
+function walletChangeSql(sql,reason,reference){
+  const literal=value=>"'"+String(value).replace(/'/g,"''")+"'";
+  const ref=reason==='purchase'&&String(reference).startsWith('wallet:WALLET:')?`COALESCE((SELECT 'order:'||id FROM orders WHERE trx_id=${literal(String(reference).slice(7))}),${literal(reference)})`:literal(reference);
+  return sql.replace(/ WHERE user_id\s*=/,`,wallet_change_reason=${literal(reason)},wallet_change_ref=${ref} WHERE user_id=`);
+}
+async function showWalletHistory(env,chatId,userId,page=0,messageId=null){
+  if(!adminUserAccess(env,chatId)&&String(userId)!==String(chatId))return;
+  const user=await env.DB.prepare('SELECT balance_usd,balance_bdt FROM users WHERE user_id=?').bind(userId).first();if(!user){await sendMsg(env,chatId,'Customer not found.');return;}
+  page=adminUserPage(page);
+  const {results}=await env.DB.prepare('SELECT * FROM wallet_history WHERE user_id=? ORDER BY id DESC LIMIT 11 OFFSET ?').bind(userId,page*10).all();
+  const labels={opening:'Opening balance (history starts here)',deposit:'Deposit credited',purchase:'Wallet purchase',refund:'Order refund',redeem:'Redeem credit',referral:'Referral commission',unspecified:'Other balance change'};
+  const signed=value=>`${Number(value)>0?'+':''}${(Number(value)/100).toFixed(2)}`;
+  let text=`📒 <b>Balance History</b> · Page ${page+1}\nUser: <code>${userId}</code>\nCurrent: <b>$${adminMoney(user.balance_usd)}</b> · ${adminMoney(user.balance_bdt)} BDT\n\n`;
+  if(!results.length)text+='No entries on this page.';
+  for(const row of results.slice(0,10))text+=`<b>#${row.id} · ${labels[row.reason]||'Other balance change'}</b>\n${paymentDashboardTime(row.created_at)} (Dhaka)\nUSD: <b>${signed(row.usd_delta_cents)}</b> · BDT: ${signed(row.bdt_delta_minor)}\nBalance: $${adminMoney(row.usd_before_cents/100)} → $${adminMoney(row.usd_after_cents/100)}${row.reference?'\nRef: '+adminSnippet(row.reference,90):''}\n\n`;
+  text+='History begins when this feature was enabled. Opening balance is not a new deposit.';
+  const prefix=adminUserAccess(env,chatId)?`adm_wallet_history_${userId}_`:'wallet_history_',buttons=[],pager=[];
+  if(page>0)pager.push({text:'Previous',callback_data:prefix+(page-1)});if(results.length>10)pager.push({text:'Next',callback_data:prefix+(page+1)});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'🔄 Refresh',callback_data:prefix+page},{text:adminUserAccess(env,chatId)?'Customer Profile':'My Profile',callback_data:adminUserAccess(env,chatId)?`adm_user_view_${userId}`:'profile'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function handleOrderSearchText(env,chatId,text,state){
+  if(!adminUserAccess(env,chatId)||state.state!=='awaiting_order_search')return false;
+  const match=String(text).trim().match(/^(?:order[:# -]*|#)?(\d{1,15})$/i);
+  if(!match){await sendMsg(env,chatId,'Enter this store’s order number, e.g. 123 or #123.');return true;}
+  const order=await env.DB.prepare('SELECT id FROM orders WHERE id=?').bind(match[1]).first();
+  if(!order){await sendMsg(env,chatId,'No order found with this ID. Check the number and try again.');return true;}
+  await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,order.id);return true;
 }
