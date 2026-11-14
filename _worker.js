@@ -12,12 +12,14 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
+const BOT_BUILD="2026-11-14-diagnostics-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/mobile-receipt") return receiveMobileBridgeReceipt(request, env, ctx);
 
+    if(url.pathname==='/api/health')return new Response(JSON.stringify({service:'telibot',build:BOT_BUILD,configured:{database:Boolean(env.DB),telegram:Boolean(env.BOT_TOKEN),admin:Boolean(env.ADMIN_ID)}}),{headers:{'Content-Type':'application/json','Cache-Control':'no-store'}});
     // 1. Database Setup & Telegram Command Registration (/api/setup)
     if (url.pathname === "/api/setup") {
       try {
@@ -104,9 +106,9 @@ export default {
         }
         const update = await request.json();
         if (ctx && typeof ctx.waitUntil === "function") {
-          ctx.waitUntil(handleUpdate(update, env, url.origin, ctx).catch(error => console.error("Webhook processing error:", error)));
+          ctx.waitUntil(processBotUpdate(update, env, url.origin, ctx));
         } else {
-          await handleUpdate(update, env, url.origin, ctx);
+          await processBotUpdate(update, env, url.origin, ctx);
         }
         return new Response("OK", { status: 200 });
       } catch (e) {
@@ -128,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-provider-failure-1";
+const DB_SCHEMA_VERSION = "2026-11-diagnostics-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -263,7 +265,8 @@ async function initializeDatabase(db, force) {
     await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('__schema_version', ?)").bind(DB_SCHEMA_VERSION).run();
     isDbInitialized = true;
   } catch (err) {
-    console.error("ensureDbReady error:", err);
+    console.error("Database initialization failed");
+    throw err;
   }
 }
 
@@ -681,6 +684,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
       return;
     }
 
+    orderStage(env,'wallet.reserve');
     const token='WALLET:'+crypto.randomUUID();
     const booked=await env.DB.batch([
       env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,status) SELECT user_id,?,?,?,'WALLET',?,?,?,'paid_pending_delivery' FROM users WHERE user_id=? AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,chatId,totalUsd),
@@ -689,7 +693,9 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     if(!booked[0].meta?.changes){await sendMsg(env,chatId,'Insufficient wallet balance. No money was deducted.');return;}
     const orderId=booked[0].meta.last_row_id;
 
+    orderStage(env,'provider.order',orderId);
     const apiResult = await dispatchExternalOrder(env, prod, qty, orderId);
+    orderStage(env,'provider.result',orderId);
     if(!apiResult.success){
       await env.DB.prepare('UPDATE orders SET provider_error=?,provider_order_id=? WHERE id=?').bind(apiResult.message||'Delivery unconfirmed',apiResult.externalOrderId||null,orderId).run();
       if(apiResult.rejected){
@@ -1538,8 +1544,10 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const parts = data.replace("wallet_pay_check_", "").split("_");
       const prodId = parts[0];
       const qty = parseInt(parts[1]) || 1;
+      orderStage(env,'wallet.product');
       let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
-      if (!prod) return;
+      if (!prod){await sendMsg(env,chatId,'This product is no longer available. Open /shop again.');return;}
+      orderStage(env,'wallet.live_stock');
       if (prod.is_external === 1) prod = await fetchLiveProductStock(env, prod);
       if (!await checkExternalStock(env, chatId, prod, qty)) return;
 
@@ -2495,11 +2503,13 @@ async function dispatchExternalOrder(env,prod,quantity,orderId){
     apiKey=await getSetting(env,'external_api_key','');
     if(!apiKey)return {success:false,rejected:true,message:'External API Key is not set'};
     if(!Number.isSafeInteger(quantity)||quantity<1||quantity>100||!String(prod.external_id||'').trim())return {success:false,rejected:true,message:'Provider product ID or quantity is invalid (allowed 1–100)'};
+    orderStage(env,'provider.prepare',orderId);
     const existing=await env.DB.prepare('SELECT provider_request_id FROM orders WHERE id=?').bind(orderId).first();
     if(!existing)return {success:false,rejected:true,message:'Local order is missing'};
     await env.DB.prepare('UPDATE orders SET provider_request_id=COALESCE(provider_request_id,?) WHERE id=?').bind('shop-'+crypto.randomUUID(),orderId).run();
     requestId=(await env.DB.prepare('SELECT provider_request_id FROM orders WHERE id=?').bind(orderId).first()).provider_request_id;
     if(existing.provider_request_id){const found=await lookup();if(found.success)return found;if(!found.missing)return {success:false,...found};}
+    orderStage(env,'provider.post',orderId);
     const response=await fetchWithTimeout(`${baseUrl}/api/reseller/orders`,{method:'POST',headers:{'X-Reseller-Key':apiKey,'Content-Type':'application/json','Accept':'application/json','Idempotency-Key':requestId},body:JSON.stringify({product_id:String(prod.external_id),quantity,external_order_id:requestId})},8000);
     const body=await response.json().catch(()=>null);
     await backoff(response,body);
@@ -2857,6 +2867,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     `Select any button below to manage your store:`;
 
   const buttons = [
+    [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'}],
     [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
     [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
     [{ text: "💰 Custom Prices", callback_data: "adm_price_menu" }, { text: "📋 Manage Products", callback_data: "adm_manage_products" }],
@@ -3121,4 +3132,63 @@ async function refundRejectedExternalWalletOrder(env,orderId,chatId){
     env.DB.prepare("UPDATE users SET balance_usd=balance_usd+(SELECT amount_usd FROM orders WHERE id=?),balance_bdt=balance_bdt+(SELECT amount_bdt FROM orders WHERE id=?),total_spent_usd=MAX(0,total_spent_usd-(SELECT amount_usd FROM orders WHERE id=?)) WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE id=? AND user_id=? AND payment_method='WALLET' AND status='paid_pending_delivery')").bind(orderId,orderId,orderId,chatId,orderId,chatId),
     env.DB.prepare("UPDATE orders SET status='refunded' WHERE id=? AND user_id=? AND payment_method='WALLET' AND status='paid_pending_delivery'").bind(orderId,chatId)
   ]);
+}
+
+function orderStage(env,stage,orderId=null){if(env.__orderTrace){env.__orderTrace.stage=stage;if(orderId)env.__orderTrace.orderId=orderId;}}
+async function safeDiagnostic(env,value){
+  let text=String(value||'Unknown failure');
+  const values=[env.BOT_TOKEN,env.BINANCE_API_KEY,env.BINANCE_API_SECRET,env.MOBILE_BRIDGE_SECRET];
+  try{values.push(await getSetting(env,'external_api_key',''));}catch{}
+  for(const secret of values)if(secret)text=text.split(secret).join('[redacted]');
+  return text.replace(/vxr_live_[A-Za-z0-9_]+/g,'[redacted]').slice(0,200);
+}
+async function ensureDiagnosticTable(db){await db.prepare('CREATE TABLE IF NOT EXISTS bot_runtime_errors(reference TEXT PRIMARY KEY,stage TEXT,chat_id TEXT,order_id INTEGER,detail TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)').run();}
+async function processBotUpdate(update,env,origin,ctx){
+  const chatId=update.message?.chat?.id??update.callback_query?.message?.chat?.id;
+  const diagnosticCommand=/^\/diagnostics(?:@\w+)?\s*$/i.test(update.message?.text||'')||update.callback_query?.data==='adm_diagnostics';
+  const trace={stage:'database.initialize',orderId:null};const scoped={...env,__orderTrace:trace};
+  try{
+    if(diagnosticCommand){
+      if(String(chatId)!==String(env.ADMIN_ID))return;
+      if(update.callback_query?.id)await ansCb(env,update.callback_query.id).catch(()=>{});
+      await sendOrderDiagnostics(scoped,chatId);return;
+    }
+    await handleUpdate(update,scoped,origin,ctx);
+  }catch(error){
+    const reference='ERR-'+crypto.randomUUID().slice(0,8),detail=await safeDiagnostic(scoped,error?.message||error);
+    console.error(`Bot error ${reference} at ${trace.stage}: ${detail}`);
+    try{await ensureDiagnosticTable(env.DB);await env.DB.prepare('INSERT INTO bot_runtime_errors(reference,stage,chat_id,order_id,detail) VALUES(?,?,?,?,?)').bind(reference,trace.stage,String(chatId||''),trace.orderId,detail).run();}catch{console.error('Could not persist runtime diagnostic');}
+    if(chatId)await sendMsg(env,chatId,`⚠️ কাজটি সম্পন্ন হয়নি। রেফারেন্স: <code>${reference}</code>\n${trace.orderId?'Order #'+trace.orderId+'\n':''}অ্যাডমিনকে জানানো হয়েছে। অর্ডার আবার দিয়ে বা টাকা পাঠিয়ে চেষ্টা করবেন না।`).catch(()=>{});
+    if(env.ADMIN_ID)await sendMsg(env,env.ADMIN_ID,`⚠️ <b>Bot error ${reference}</b>\nBuild: <code>${BOT_BUILD}</code>\nStage: <code>${trace.stage}</code>\nOrder: ${trace.orderId||'not created'}\nReason: <code>${escapeHtml(detail)}</code>\nSend /diagnostics to check configuration and recent orders.`).catch(()=>{});
+  }
+}
+async function sendOrderDiagnostics(env,chatId){
+  if(String(chatId)!==String(env.ADMIN_ID))return;
+  let report=`🔍 <b>API / Order Diagnostics</b>\nBuild: <code>${BOT_BUILD}</code>\n`;
+  try{
+    const {results:columns}=await env.DB.prepare('PRAGMA table_info(orders)').all();
+    const names=new Set(columns.map(x=>x.name));const needed=['provider_request_id','provider_error','provider_order_id','provider_retry_at','delivery_data'];
+    const missing=needed.filter(x=>!names.has(x));
+    report+='Database: '+(missing.length?'missing columns: '+missing.join(', '):'order columns OK')+'\n';
+    const key=await getSetting(env,'external_api_key','');let base=String(await getSetting(env,'external_api_url','')).trim().replace(/\/+$/,'');if(base.includes('/api/reseller'))base=base.split('/api/reseller')[0];
+    report+='API key: '+(key?'configured':'NOT SET')+'\n';
+    if(key&&base){
+      try{
+        const u=new URL(base);report+='API host: '+escapeHtml(u.hostname)+'\n';
+        const response=await fetchWithTimeout(`${base}/api/reseller/me`,{headers:{'X-Reseller-Key':key,'Accept':'application/json'}},5000);
+        const body=await response.json().catch(()=>null);
+        report+=`Provider /me: HTTP ${response.status}\n`;
+        if(body?.error?.code)report+='Provider error: '+escapeHtml(await safeDiagnostic(env,body.error.code))+'\n';
+        const balance=body?.wallet?.balance??body?.balance;
+        if(balance!==null&&balance!==undefined&&Number.isFinite(Number(balance)))report+='Provider wallet: '+Number(balance)+' USDT\n';
+      }catch(error){report+='Provider connection: '+escapeHtml(await safeDiagnostic(env,error?.message))+'\n';}
+    }else report+='Provider connection: missing URL or API key\n';
+    const sql=missing.length?'SELECT id,status FROM orders ORDER BY id DESC LIMIT 5':'SELECT id,status,provider_error FROM orders ORDER BY id DESC LIMIT 5';
+    const {results:orders}=await env.DB.prepare(sql).all();report+='\n<b>Recent orders</b>\n';
+    if(!orders.length)report+='No local orders found.\n';
+    for(const order of orders)report+=`#${order.id}: ${escapeHtml(order.status)}${order.provider_error?' — '+escapeHtml(await safeDiagnostic(env,order.provider_error)):''}\n`;
+    await ensureDiagnosticTable(env.DB);const {results:errors}=await env.DB.prepare('SELECT reference,stage,detail FROM bot_runtime_errors ORDER BY created_at DESC,rowid DESC LIMIT 3').all();
+    if(errors.length){report+='\n<b>Recent runtime errors</b>\n';for(const error of errors)report+=`${error.reference}: ${escapeHtml(error.stage)} — ${escapeHtml(await safeDiagnostic(env,error.detail))}\n`;}
+  }catch(error){report+='\nDatabase/configuration failure: '+escapeHtml(await safeDiagnostic(env,error?.message));}
+  return await sendMsg(env,chatId,report,[[{text:'Refresh diagnostics',callback_data:'adm_diagnostics'}],[{text:'Admin Panel',callback_data:'admin_panel'}]]);
 }

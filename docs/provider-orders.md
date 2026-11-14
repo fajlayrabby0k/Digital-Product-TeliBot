@@ -30,3 +30,11 @@ ORDER BY id DESC LIMIT 20;
 ```
 
 `node tests/provider-checkout.cjs` uses real SQLite and mocked documented provider responses: rejection refunds, duplicate refund attempts, insufficient funds/out-of-stock, timeout recovery, delayed delivery lookup, ownership, no repeat POST/charge after recovery, persisted credentials, concurrent balance guards and secret redaction. It does not certify live provider access.
+
+## No message / no local order
+
+Webhook background exceptions used to be written only to Cloudflare logs; schema initialization also swallowed failures. The current build reports failures to the user with an `ERR-...` reference, sends a sanitized stage/reason to the admin and persists `bot_runtime_errors`. Failed migrations now propagate instead of continuing into broken queries.
+
+Admin can send `/diagnostics` or tap **API / Order Diagnostics** in Admin Panel. This works independently of stale text states and before normal migrations, reports missing order columns, performs a read-only provider `/me` request, and shows recent order errors/runtime references. It creates no purchase and does not alter wallet balances. API key/Telegram token values are never included.
+
+Public `/api/health` returns the build identifier and binding-presence booleans only, without credentials or user/order data. If the production URL does not show the new build, first verify the deployment; repeated purchase attempts cannot diagnose stale deployed code. Diagnostics cannot guarantee a Telegram notification if BOT_TOKEN/network access itself is broken, so the public build check remains useful.
