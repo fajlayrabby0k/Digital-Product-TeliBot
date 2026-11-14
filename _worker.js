@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-14-preorder-details-1";
+const BOT_BUILD="2026-11-14-local-preorders-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -703,8 +703,8 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   // External API Product Purchase
   if (prod.is_external === 1) {
     if ((prod.api_stock || 0) < qty) {
-      await sendMsg(env, chatId, `📦 Available Stock: <b>0</b>\nYou can pre-order and you will be notified the instant it's restocked!`, [
-        [{ text: "🔔 Notify When Available", callback_data: `preorder_${prod.id}` }]
+      await sendMsg(env, chatId, `📦 Available Stock: <b>0</b>\nThis API product has insufficient stock. Please refresh stock or choose another product.`, [
+        [{ text: "🔄 Refresh Stock", callback_data: `prod_refresh_${prod.id}` }]
       ]);
       return;
     }
@@ -750,7 +750,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   const { results: items } = await env.DB.prepare("SELECT * FROM inventory WHERE product_id = ? AND is_sold = 0 LIMIT ?").bind(prod.id, qty).all();
   if (!items || items.length < qty) {
     await sendMsg(env, chatId, `❌ <b>Insufficient Stock!</b>\nOnly ${items ? items.length : 0} item(s) available. You can pre-order!`, [
-      [{ text: "🔔 Notify When Available", callback_data: `preorder_${prod.id}` }]
+      [{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]
     ]);
     return;
   }
@@ -1543,6 +1543,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const prodId = data.replace("preorder_", "");
       const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (prod) {
+        if(prod.is_external){await sendMsg(env,chatId,'Pre-orders are not available for API products.',[[{text:'Back to Product',callback_data:`prod_${prod.id}`}]]);return;}
         const existingPo = await env.DB.prepare("SELECT id FROM preorders WHERE user_id = ? AND product_id = ? AND status = 'pending'").bind(chatId, prodId).first();
         if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, product_name, details, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)").bind(chatId, username, prodId, prod.name, JSON.stringify({product_name:prod.name,external_id:prod.is_external?String(prod.external_id):null,type:'stock_notification'})).run();
         await editMsg(env, chatId, messageId, `⏳ <b>Stock Alert Registered</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your stock alert is registered in this store. No payment was taken and no supplier pre-order was placed. When stock is added or synced, you will receive a purchase link.`, [
@@ -2480,10 +2481,6 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
         targetId = ins.meta ? ins.meta.last_row_id : null;
       }
 
-      // Restock Alert for Pre-orders
-      if (prevStock === 0 && apiStock > 0 && targetId) {
-        await notifyPreorders(env, targetId, name, apiStock);
-      }
       importedCount++;
     }
 
@@ -2582,6 +2579,8 @@ async function processReferralCommission(env, buyerChatId, orderAmountUsd, produ
 
 async function notifyPreorders(env, productId, productName, stockCount) {
   try {
+    const product=await env.DB.prepare('SELECT is_external FROM products WHERE id=?').bind(productId).first();
+    if(!product||product.is_external)return;
     const { results: pendingPreorders } = await env.DB.prepare("SELECT * FROM preorders WHERE product_id = ? AND status = 'pending'").bind(productId).all();
     if (pendingPreorders && pendingPreorders.length > 0) {
       for (const po of pendingPreorders) {
@@ -2762,8 +2761,8 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null, 
       // Keep Refresh available without offering checkout on stale stock.
     } else if (stockCount > 0) {
       buttons.push([{ text: "🛍️ Buy Now", callback_data: `buynow_${prod.id}_1` }]);
-    } else {
-      buttons.push([{ text: "🔔 Notify When Available", callback_data: `preorder_${prod.id}` }]);
+    } else if (!prod.is_external) {
+      buttons.push([{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]);
     }
     buttons.push([
       { text: "🔄 Refresh Stock", callback_data: `prod_refresh_${prod.id}` },

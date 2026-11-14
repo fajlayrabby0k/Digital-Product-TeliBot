@@ -61,3 +61,6 @@ Production also required `orders.currency` with no default. Build `2026-11-14-le
 The historical `preorders.details NOT NULL` field is now explicitly supplied on new stock-alert registrations. Migration adds the field for databases that lack it and preserves existing details and requests. The regression test uses a populated NOT NULL legacy table.
 
 The current preorder callback registers a local restock notification; it does not purchase or reserve stock at the supplier and takes no payment. Buttons and confirmation messages now describe this accurately. Supplier preorder placement needs its documented endpoint, eligibility, payment, idempotency and fulfillment contract; the provided standard reseller `/orders` documentation does not establish those rules.
+
+
+API products no longer offer preorder/restock registration. Old preorder buttons for API products are rejected without inserting a request or charging the customer. Supplier sync no longer sends preorder alerts. Local products retain preorder registration, including legacy details compatibility. Existing records are preserved.
