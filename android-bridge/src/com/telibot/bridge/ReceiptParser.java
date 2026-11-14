@@ -6,7 +6,7 @@ import java.util.*;
 public final class ReceiptParser {
  private static final String MONEY="(?:[0-9]{1,9}|[0-9]{1,3}(?:,[0-9]{3}){1,2})(?:\\.[0-9]{2})";
  private static final String DATE="([0-9]{2}/[0-9]{2}/[0-9]{4} [0-9]{2}:[0-9]{2})";
- private static final Pattern BKASH=Pattern.compile("You have received Tk ("+MONEY+") from 01[3-9][0-9]{8}\\. Fee Tk "+MONEY+"\\. Balance Tk "+MONEY+"\\. TrxID ([A-Z0-9]{10}) at "+DATE);
+ private static final Pattern BKASH=Pattern.compile("You have received Tk ("+MONEY+") from 01[3-9][0-9]{8}\\. (?:Ref [^\\r\\n]{1,100}?\\. )?Fee Tk "+MONEY+"\\. Balance Tk "+MONEY+"\\. TrxID ([A-Z0-9]{10}) at "+DATE);
  private static final Pattern NAGAD=Pattern.compile("Money Received\\.\\r?\\nAmount: Tk ("+MONEY+")\\r?\\nSender: 01[3-9][0-9]{8}\\r?\\nRef: [^\\r\\n]{1,100}\\r?\\nTxnID: ([A-Z0-9]{8})\\r?\\nBalance: Tk "+MONEY+"\\r?\\n"+DATE);
  public static final class Receipt { public final long minor,paidAt; public final String trx; Receipt(long m,String t,long p){minor=m;trx=t;paidAt=p;} }
  public static Receipt parse(String text,String method) {

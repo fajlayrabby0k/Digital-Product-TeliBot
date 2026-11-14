@@ -1,6 +1,6 @@
-# TeliBot Receipt Bridge v0.3 — সহজ সেটআপ
+# TeliBot Receipt Bridge v0.4 — সহজ সেটআপ
 
-[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.3.apk)
+[নতুন APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.4.apk)
 
 Android 8+। পুরোনো v0.1 ইনস্টল থাকলে তার ওপর Update করুন; Uninstall করার দরকার নেই। একই release certificate ব্যবহার করা হয়েছে; আগের Device ID ও encrypted secret রাখা হবে। Uninstall করলে বা Clear data করলে নতুন চাবি/ID তৈরি হবে এবং Cloudflare-এ আবার দিতে হবে।
 
@@ -83,3 +83,10 @@ Receipt fields: `version:1,eventId,deviceId,method,account,trxId,amountMinor,rec
 Android SDK platform 35/build-tools 35.0.0, JDK 17+ (or Java runtime + Eclipse ECJ 3.40.0), Python 3 and zip. Supply `ANDROID_SDK_ROOT`, `BRIDGE_KEYSTORE`, `BRIDGE_STORE_PASS` to `./build.sh`; optional `ECJ_JAR`. Alias: `bridge`. Output: `build/telibot-receipt-bridge.apk`. No Gradle or dependency download during build.
 
 Release keystore stays outside Git at `/workspace/.bridge-signing`; privately back it up to sign future updates. Never commit keystores/passwords or share them in chat. Run ParserTest.java with ReceiptParser for supplied receipt templates; `node ../tests/mobile-bridge.cjs` tests authenticated setup and receipt security/idempotency with real SQLite. Inspect permissions with aapt2; verify APK with apksigner. Build/signature/tests do not replace live Android installation, runtime permission, SMS reception and HTTPS delivery tests; these phone tests have not been performed here.
+
+
+## v0.4 — bKash reference-field fix
+
+Provided bKash SMS can contain `Ref 2.` between the sender number and `Fee Tk`. The earlier exact template rejected these receipts before queueing/uploading. v0.4 accepts an optional bounded reference field while retaining exact amount/TrxID/time extraction, full-message validation and OTP/outgoing exclusion. Fixtures use anonymized numbers/transaction IDs.
+
+Update the APK **over the installed app**, using the same signing certificate, to keep encrypted key/device ID/settings. No new permissions, Cloudflare secrets or server protocol changes are required. Reading/marking an SMS seen does not alter the SMS_RECEIVED broadcast. This app still does not read historical inbox messages: a receipt ignored by the previous parser cannot be recovered merely by updating or pressing Retry Pending. The existing paid invoice needs manual reconciliation; do not pay twice. The local SMS-format preview can test old text but does not upload or authorize a payment.

@@ -29,7 +29,7 @@ public final class MainActivity extends Activity {
   try{android.content.SharedPreferences.Editor init=p.edit();if(!p.contains("device"))init.putString("device",UUID.randomUUID().toString());if(!p.contains("secret")){byte[] bytes=new byte[32];new SecureRandom().nextBytes(bytes);StringBuilder key=new StringBuilder();for(byte b:bytes)key.append(String.format(Locale.ROOT,"%02x",b&255));init.putString("secret",Store.seal(key.toString()));}init.commit();}catch(Exception e){TextView error=new TextView(this);error.setText("ফোনের নিরাপদ storage চালু করা যায়নি। অ্যাপ বন্ধ করে আবার খুলুন।");setContentView(error);return;}
   ScrollView scroll=new ScrollView(this);box=new LinearLayout(this);box.setOrientation(1);box.setPadding(dp(20),dp(16),dp(20),dp(24));scroll.addView(box);setContentView(scroll);
   scroll.setOnApplyWindowInsetsListener((v,insets)->{if(android.os.Build.VERSION.SDK_INT>=30){android.graphics.Insets safe=insets.getInsets(android.view.WindowInsets.Type.systemBars()|android.view.WindowInsets.Type.displayCutout());v.setPadding(safe.left,safe.top,safe.right,safe.bottom);}else{applyLegacyInsets(v,insets);}return insets;});
-  text(box,"পেমেন্ট SMS সংযোগ",25);text(box,"সহজ সেটআপ · v0.3\nআপনার বটের ঠিকানা আগে থেকেই দেওয়া আছে।",16);
+  text(box,"পেমেন্ট SMS সংযোগ",25);text(box,"সহজ সেটআপ · v0.4\nআপনার বটের ঠিকানা আগে থেকেই দেওয়া আছে।",16);
   status=new TextView(this);status.setTextSize(16);status.setPadding(0,dp(12),0,dp(12));box.addView(status);
   text(box,"১. SMS-এর অনুমতি দিন",20);text(box,"শুধু নতুন SMS গ্রহণ করবে। পুরোনো ইনবক্স পড়বে না।",14);
   button(box,"SMS permission দিন",()->requestPermissions(new String[]{"android.permission.RECEIVE_SMS"},1));
