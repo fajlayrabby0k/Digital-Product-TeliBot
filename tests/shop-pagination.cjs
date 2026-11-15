@@ -25,6 +25,6 @@ const ids=()=>Array.from(buttons().filter(b=>/^prod_\d+$/.test(b.callback_data))
  await cb('shopcatrefresh_0_1');assert(last().text.includes('Page 2/3'));
  await cb('prod_9999');assert(last().text.includes('Product not found'));assert(buttons().some(b=>b.callback_data==='shop'));
  sqlite.exec('UPDATE products SET is_active=0 WHERE id>10');await cb('shopcatrefresh_0_2');assert(last().text.includes('Page 1/1'));assert.equal(ids().length,10);assert(!buttons().some(b=>/^shopcat_0_/.test(b.callback_data)));
- sqlite.exec('UPDATE products SET is_active=0');await cb('shop');assert.equal(ids().length,0);assert(last().text.includes('No products'));assert(buttons().some(b=>b.callback_data==='shop_refresh'));
+ sqlite.exec('UPDATE products SET is_active=0');await cb('shop');assert.equal(ids().length,0);assert(last().text.includes('Shop Categories'));assert(buttons().some(b=>b.text==='অন্যান্য (0)'));assert(buttons().some(b=>b.callback_data==='shop_refresh'));
  console.log('PASS: 10-item pages, active-only indexed queries, fresh Shop message, previous/next, last/empty pages, safe bounds, page-preserving refresh, product return and stock button styles');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sqlite.close());

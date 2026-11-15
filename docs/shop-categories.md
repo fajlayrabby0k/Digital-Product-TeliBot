@@ -12,7 +12,7 @@
 
 API sync imports a label from `category_name`, a string `category`, or `category.name`. A provider category ID without a readable name does not invent a label. Missing metadata puts the product in অন্যান্য. Admin overrides are stored separately and survive supplier price, stock and category updates. Provider metadata is still recorded while an override is active, so resetting to the API/default takes effect immediately. Existing products, margins, orders and balances are preserved.
 
-Only active categories with active products are shown to customers. Admins can select empty categories for product assignment. Admin create/assign/reset controls require the configured `ADMIN_ID`; customers cannot change categories by forging callbacks. No API key, Android update, Cron Trigger or extra Cloudflare binding is needed.
+All non-deleted categories are shown to customers, including empty categories with (0). The built-in অন্যান্য group also remains visible with (0) when empty. Admins can select empty categories for product assignment. Admin create/assign/reset controls require the configured `ADMIN_ID`; customers cannot change categories by forging callbacks. No API key, Android update, Cron Trigger or extra Cloudflare binding is needed.
 
 The additive migration creates `product_categories`, adds nullable product category/provider-category fields and an admin-override flag, plus a shop index. No existing products are deleted or assigned by guessing their names.
 

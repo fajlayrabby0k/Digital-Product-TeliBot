@@ -4002,7 +4002,7 @@ async function ensureCategory(env,name,restore=false){
 }
 async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
   await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
-  const {results}=await env.DB.prepare("SELECT COALESCE(c.id,0) AS id,COALESCE(c.name,'অন্যান্য') AS name,c.custom_icon,COUNT(*) AS count FROM products p LEFT JOIN product_categories c ON c.id=p.shop_category_id AND c.is_deleted=0 WHERE p.is_active=1 GROUP BY COALESCE(c.id,0) ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
+  const {results}=await env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 GROUP BY c.id UNION ALL SELECT 0 AS id,'অন্যান্য' AS name,NULL AS custom_icon,COUNT(*) AS count FROM products WHERE is_active=1 AND shop_category_id IS NULL ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
   const categoryButtons=results.slice(0,10).map(c=>categoryButton(c,`shopcat_${c.id}_0`,true));
   const buttons=[];for(let i=0;i<categoryButtons.length;i+=2)buttons.push(categoryButtons.slice(i,i+2));
   const pager=[];
