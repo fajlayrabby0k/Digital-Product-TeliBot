@@ -10,6 +10,7 @@ Open **Admin Panel → Channel Alerts**. All channel notifications default to ON
 - Low stock / last chance when quantity enters 1–5.
 - Successfully completed purchase.
 - Successfully completed deposit, including manual approvals and redeem credits.
+- Selling price drops and increases.
 
 These settings are independent of private product alerts. Muting private alerts does not disable public channel posts.
 
@@ -32,3 +33,12 @@ The queue snapshots the configured channel at event creation. Changing the force
 The additive migration creates `channel_notice_events`, event indexes and transition triggers without broadcasting historical sales/deposits or altering wallet balances. No new Cloudflare binding or Android APK is needed. After deployment, `/start` performs normal initialization.
 
 `node tests/channel-notifications.cjs` covers API/local stock, low-stock crossing, completed-only sale/deposit posts, duplicate settlement, rollback, privacy, deep links, independent private/channel switches, permission retry, target normalization and channel changes. Tests simulate Telegram responses and do not publish live channel posts.
+
+
+## Price-change posts
+
+Updates to a product's USD selling price queue a Price Drop or Price Increased channel post. This covers API sync, default/custom margin changes and manual local prices. Each event snapshots the old/new amounts in cents and has a per-product revision key. Unchanged prices, sub-cent changes that do not alter the displayed price, and rolled-back writes do not generate posts. New product insertion is a new-product alert rather than a price-change alert.
+
+Price posts show product name, old/new USD prices, difference, percentage and change time in Dhaka, with the public product deep link. Quick successive changes retain their original amounts and order instead of rewriting old alerts to use today's price. Historical order prices/costs are not modified. A BDT exchange-rate-only change does not create a USD price alert.
+
+**Channel Alerts → Price Drops / Price Increases** controls these types separately; both default ON. They use the same existing force channel, permission requirements, queue, retries and privacy rules. `node tests/price-notifications.cjs` covers API/manual/margin changes, immutable snapshots, repeated sync, rapid updates, rollback, toggles and unchanged historical order profit.

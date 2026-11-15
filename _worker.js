@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-channel-notifications-1";
+const BOT_BUILD="2026-11-15-price-notifications-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -132,7 +132,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-channel-notifications-1";
+const DB_SCHEMA_VERSION = "2026-11-price-notifications-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -186,6 +186,9 @@ async function initializeDatabase(db, force) {
     else for (const q of schema) await db.prepare(q).run();
 
     const alters = [
+      "ALTER TABLE channel_notice_events ADD COLUMN old_price_cents INTEGER DEFAULT NULL;",
+      "ALTER TABLE channel_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
+      "ALTER TABLE products ADD COLUMN price_notice_revision INTEGER DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN product_alerts INTEGER DEFAULT 1;",
       "ALTER TABLE product_categories ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE product_categories ADD COLUMN is_deleted INTEGER DEFAULT 0;",
@@ -274,6 +277,11 @@ async function initializeDatabase(db, force) {
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_add AFTER INSERT ON inventory WHEN NEW.is_sold=0 BEGIN ${stockBody('NEW.product_id','stock+1',localCondition('NEW.product_id'))} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_remove AFTER DELETE ON inventory WHEN OLD.is_sold=0 BEGIN ${stockBody('OLD.product_id','MAX(0,stock-1)',localCondition('OLD.product_id'))} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_change AFTER UPDATE OF is_sold,product_id ON inventory WHEN OLD.is_sold<>NEW.is_sold OR OLD.product_id<>NEW.product_id BEGIN ${stockBody('OLD.product_id','MAX(0,stock-1)',`OLD.is_sold=0 AND ${localCondition('OLD.product_id')}`)} ${stockBody('NEW.product_id','stock+1',`NEW.is_sold=0 AND ${localCondition('NEW.product_id')}`)} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_price AFTER UPDATE OF price_usd ON products WHEN NEW.is_active=1 AND OLD.price_usd>0 AND NEW.price_usd>0 AND ROUND(OLD.price_usd*100)<>ROUND(NEW.price_usd*100) BEGIN
+        INSERT OR IGNORE INTO channel_notice_events(event_key,product_id,kind,channel_id,old_price_cents,new_price_cents)
+        SELECT 'price:'||NEW.id||':'||(COALESCE(OLD.price_notice_revision,0)+1),NEW.id,CASE WHEN NEW.price_usd<OLD.price_usd THEN 'price_drop' ELSE 'price_increase' END,(SELECT value FROM settings WHERE key='force_channel_username'),ROUND(OLD.price_usd*100),ROUND(NEW.price_usd*100)
+        WHERE COALESCE((SELECT value FROM settings WHERE key='force_channel_username'),'')<>'' AND COALESCE((SELECT value FROM settings WHERE key='channel_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key=CASE WHEN NEW.price_usd<OLD.price_usd THEN 'channel_notice_price_drop' ELSE 'channel_notice_price_increase' END),'1')='1';
+        UPDATE products SET price_notice_revision=COALESCE(price_notice_revision,0)+1 WHERE id=NEW.id; END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_low_insert AFTER INSERT ON product_notice_state WHEN NEW.stock BETWEEN 1 AND 5 BEGIN ${channelEvent('NEW.product_id',"'low_stock'","'low:'||NEW.product_id||':'||NEW.revision")} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_low_update AFTER UPDATE OF stock ON product_notice_state WHEN NEW.stock BETWEEN 1 AND 5 AND (OLD.stock=0 OR OLD.stock>5) BEGIN ${channelEvent('NEW.product_id',"'low_stock'","'low:'||NEW.product_id||':'||NEW.revision")} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_order_insert AFTER INSERT ON orders WHEN NEW.status='completed' BEGIN ${channelEvent('NEW.product_id',"'purchase'","'purchase:'||NEW.id",'', '1=1','NEW.id')} END`),
@@ -351,7 +359,7 @@ async function initializeDatabase(db, force) {
       ['bep20_addr', '0x71C...YourWalletAddress'],
       ['external_api_url', 'https://207-148-64-141.sslip.io'],
       ['external_api_key', ''],
-      ['channel_notifications_enabled','1'],['channel_notice_new_product','1'],['channel_notice_restock','1'],['channel_notice_sold_out','1'],['channel_notice_low_stock','1'],['channel_notice_purchase','1'],['channel_notice_deposit','1'],
+      ['channel_notice_price_drop','1'],['channel_notice_price_increase','1'],['channel_notifications_enabled','1'],['channel_notice_new_product','1'],['channel_notice_restock','1'],['channel_notice_sold_out','1'],['channel_notice_low_stock','1'],['channel_notice_purchase','1'],['channel_notice_deposit','1'],
       ['product_notifications_enabled','1'],['product_notice_new_product','1'],['product_notice_restock','1'],['product_notice_sold_out','1'],
       ['external_profit_margin', '20'],
       ['external_profit_margin_type', 'percent'],
@@ -4198,7 +4206,11 @@ async function deliverChannelNotices(env){
     const event=await env.DB.prepare('SELECT * FROM channel_notice_events WHERE lease_token=?').bind(token).first();
     const product=event.product_id?await env.DB.prepare('SELECT p.*,s.stock FROM products p LEFT JOIN product_notice_state s ON s.product_id=p.id WHERE p.id=?').bind(event.product_id).first():null;
     let text='',invalid=normalizeNoticeChannel(event.channel_id)!==normalizeNoticeChannel(current)||!normalizeNoticeChannel(current)||await getSetting(env,'channel_notice_'+event.kind,'1')!=='1';
-    if(['new_product','restock','sold_out','low_stock'].includes(event.kind)){
+    if(['price_drop','price_increase'].includes(event.kind)){
+      const oldPrice=Number(event.old_price_cents),newPrice=Number(event.new_price_cents);
+      invalid=invalid||!product||product.is_active===0||!Number.isFinite(oldPrice)||!Number.isFinite(newPrice)||oldPrice<=0||newPrice<=0||oldPrice===newPrice;
+      if(!invalid){const drop=newPrice<oldPrice,difference=Math.abs(newPrice-oldPrice);text=`${drop?'📉 Price Drop!':'📈 Price Increased'}\n\n<b>${escapeHtml(productDisplayName(product))}</b>\nOld price: <b>$${adminMoney(oldPrice/100)}</b>\nNew price: <b>$${adminMoney(newPrice/100)}</b>\nChange: ${drop?'-':'+'}$${adminMoney(difference/100)} (${(difference/oldPrice*100).toFixed(2)}%)\n\nUpdated: ${paymentDashboardTime(event.created_at)} (Dhaka)`;}
+    }else if(['new_product','restock','sold_out','low_stock'].includes(event.kind)){
       invalid=invalid||!product||product.is_active===0||(event.kind==='low_stock'&&!(product.stock>0&&product.stock<=5))||(event.kind==='sold_out'&&product.stock>0)||(event.kind==='restock'&&product.stock<=0);
       const titles={new_product:'🆕 New Product',restock:'✅ Stock Added',sold_out:'📦 Sold Out',low_stock:'🔥 Last Chance to Purchase!'};
       if(product)text=`<b>${titles[event.kind]}</b>\n\n${escapeHtml(productDisplayName(product))}\nPrice: <b>$${adminMoney(product.price_usd)}</b>\n${event.kind==='low_stock'?`Only <b>${product.stock}</b> left — order before stock runs out!`:`Available stock: <b>${Number(product.stock||0)}</b>`}`;
@@ -4218,7 +4230,7 @@ async function deliverChannelNotices(env){
 }
 async function showChannelNotices(env,chatId,messageId=null){
   if(!adminUserAccess(env,chatId))return;
-  const channel=await getSetting(env,'force_channel_username',''),keys=['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit'],labels=['All Channel Alerts','New Product','Stock Added','Stock Finished','Last 5 / Low Stock','Successful Purchase','Successful Deposit'];
+  const channel=await getSetting(env,'force_channel_username',''),keys=['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit','channel_notice_price_drop','channel_notice_price_increase'],labels=['All Channel Alerts','New Product','Stock Added','Stock Finished','Last 5 / Low Stock','Successful Purchase','Successful Deposit','Price Drops','Price Increases'];
   const values=await Promise.all(keys.map(key=>getSetting(env,key,'1'))),pending=await env.DB.prepare("SELECT COUNT(*) AS n FROM channel_notice_events WHERE status='pending'").first(),issue=await env.DB.prepare('SELECT last_error FROM channel_notice_events WHERE last_error IS NOT NULL ORDER BY id DESC LIMIT 1').first();
   const buttons=keys.map((key,i)=>[{text:`${labels[i]}: ${values[i]==='1'?'ON':'OFF'}`,callback_data:`adm_channel_toggle_${i}`}]);buttons.push([{text:'Retry Pending Channel Posts',callback_data:'adm_channel_retry'}],[{text:'Force Channel Settings',callback_data:'adm_force_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]);
   const text=`📢 <b>Channel Notifications</b>\n\nForce channel: <code>${escapeHtml(channel||'Not configured')}</code>\nPending posts: ${pending.n}\nLast issue: ${escapeHtml(issue?.last_error||'None recorded')}\n\nThe bot must be an admin in this channel with permission to post messages. Posts do not expose customer identity, payment transaction IDs or product credentials. Low-stock posts trigger when stock enters 1–5, not on every remaining-item sale.`;
@@ -4228,7 +4240,7 @@ async function handleChannelNoticeCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
   if(data==='adm_channel_notices'){await showChannelNotices(env,chatId,messageId);return true;}
   if(data==='adm_channel_retry'){await env.DB.prepare("UPDATE channel_notice_events SET next_at=0 WHERE status='pending' AND lease_until<?").bind(Date.now()).run();await drainChannelNotices(env);await showChannelNotices(env,chatId,messageId);return true;}
-  const match=data.match(/^adm_channel_toggle_([0-6])$/);if(match){const key=['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit'][Number(match[1])];await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,CASE WHEN COALESCE((SELECT value FROM settings WHERE key=?),'1')='1' THEN '0' ELSE '1' END)").bind(key,key).run();await showChannelNotices(env,chatId,messageId);return true;}return false;
+  const match=data.match(/^adm_channel_toggle_([0-8])$/);if(match){const key=['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit','channel_notice_price_drop','channel_notice_price_increase'][Number(match[1])];await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,CASE WHEN COALESCE((SELECT value FROM settings WHERE key=?),'1')='1' THEN '0' ELSE '1' END)").bind(key,key).run();await showChannelNotices(env,chatId,messageId);return true;}return false;
 }
 
 function normalizeNoticeChannel(value){
