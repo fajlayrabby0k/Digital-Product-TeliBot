@@ -1,0 +1,28 @@
+# Product and stock notifications
+
+**Admin Panel → Product Notifications** controls all alerts and each event type separately: new products, stock added and stock finished. They default to ON. Customers can mute/unmute from **Profile → Product Alerts**, and each alert has a mute button. The configured admin is excluded from customer campaigns.
+
+Both local products and API products are supported. New product insertion creates a new-product event. Any available-stock increase creates a stock-added event, and positive stock becoming zero creates a stock-finished event. Local inventory additions, sales, deletions and allocation changes are covered; supplier stock is detected when API sync/detail/checkout observes a new quantity. An unchanged sync creates no event.
+
+Events and stock state are recorded by SQLite triggers in the same transaction as the product/inventory change. A rollback also rolls back the event. Existing stock is baselined during migration without broadcasting the existing catalog. Pending updates of the same kind/product are coalesced; stale stock-return/stock-finished events are superseded if current stock no longer supports them. Notifications show product name, selling price, available stock, event time and View Product. They never include stock credentials, email accounts, passwords or license contents.
+
+## Background delivery
+
+Authenticated bot updates and API sync schedule a bounded background queue drain. It normally attempts up to 24 recipients and 18 seconds per pass; heavier stock/import actions use smaller passes. Per-event leases and recipient cursors prevent concurrent workers from intentionally sending the same recorded batch twice. Successful progress is saved after each recipient. Transient errors and Telegram rate limits defer the event for retry. Blocked/unavailable chats count as failed recipients rather than blocking everyone behind them.
+
+Pending rows survive runtime restarts. Small queues finish automatically during normal bot activity. On Cloudflare Pages there is no persistent daemon: remaining batches require subsequent bot activity, sync requests or the admin's **Send Pending Batch** button. A scheduled sync trigger can provide unattended progress where configured. Likewise, a supplier change cannot be discovered until a sync is run. This feature does not add a new Worker or Cron Trigger automatically and does not promise instant delivery to an arbitrary number of inactive users.
+
+Delivery is best effort: a Telegram send followed by a database failure can be repeated on retry, and a successful API response does not prove the person read it. No live customer campaign was sent during tests.
+
+## Adding email stock
+
+Use **Admin Panel → Add Stock → local product** and send one item per line, for example:
+
+```text
+bikpaz@umail.asia
+another@example.com
+```
+
+The existing limit is 1–50 items per message. Single-column Markdown tables are also accepted: outer pipes, blank rows, separator lines and code fences are discarded; the actual email/key text is retained as one item. Stock contents remain private and only enter the order's delivery.
+
+No extra secret, Android update or Cloudflare binding is required. Migration adds stock-state/event tables, a customer alert preference and indexes/triggers. `node tests/product-notifications.cjs` covers events, stock increases while already available, repeated updates, rollback, stale-event suppression, coalescing, batch continuation, concurrency, rate-limit retry, mute/admin controls and table parsing. Existing payment/checkout suites verify unchanged finances.

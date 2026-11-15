@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-subscription-category-1";
+const BOT_BUILD="2026-11-15-product-notifications-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -54,7 +54,9 @@ export default {
     // 2. Live Sync Webhook / Cron Ping Endpoint (/api/sync)
     if (url.pathname === "/api/sync") {
       try {
+        await ensureDbReady(env.DB);
         const res = await syncExternalProducts(env, null, null, true);
+        if(ctx?.waitUntil)ctx.waitUntil(drainProductNotices(env).catch(()=>{}));
         return new Response(JSON.stringify(res), { status: 200, headers: { "Content-Type": "application/json" } });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } });
@@ -122,7 +124,7 @@ export default {
 
   // Cloudflare Scheduled Cron Handler (Periodic background live sync)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(syncExternalProducts(env));
+    ctx.waitUntil((async()=>{await ensureDbReady(env.DB);await syncExternalProducts(env);await drainProductNotices(env);})());
   }
 };
 
@@ -130,7 +132,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-category-icons-1";
+const DB_SCHEMA_VERSION = "2026-11-product-notifications-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -153,6 +155,8 @@ async function initializeDatabase(db, force) {
       } catch (_) { /* First installation has no settings table yet. */ }
     }
     const schema = [
+      `CREATE TABLE IF NOT EXISTS product_notice_state(product_id INTEGER PRIMARY KEY,stock INTEGER NOT NULL,revision INTEGER NOT NULL DEFAULT 0);`,
+      `CREATE TABLE IF NOT EXISTS product_notice_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,product_id INTEGER NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,retries INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS product_categories(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL COLLATE NOCASE UNIQUE);`,
       `CREATE TABLE IF NOT EXISTS checkout_quotes(user_id INTEGER NOT NULL,product_id INTEGER NOT NULL,quantity INTEGER NOT NULL,total_usd REAL NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(user_id,product_id,quantity));`,
       `CREATE TABLE IF NOT EXISTS broadcast_jobs(id TEXT PRIMARY KEY,body TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'ready',sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0);`,
@@ -181,6 +185,7 @@ async function initializeDatabase(db, force) {
     else for (const q of schema) await db.prepare(q).run();
 
     const alters = [
+      "ALTER TABLE users ADD COLUMN product_alerts INTEGER DEFAULT 1;",
       "ALTER TABLE product_categories ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE product_categories ADD COLUMN is_deleted INTEGER DEFAULT 0;",
       // Historical preorder tables stored product names without a numeric product_id.
@@ -253,7 +258,19 @@ async function initializeDatabase(db, force) {
         await db.prepare('UPDATE products SET shop_category_id=category_id WHERE category_id IN (SELECT id FROM product_categories WHERE is_deleted=0)').run();
       }
     }
+    const noticeEvent=(product,kind,key)=>`INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id) SELECT ${key},${product},${kind},COALESCE((SELECT MAX(user_id) FROM users),0) WHERE COALESCE((SELECT MAX(user_id) FROM users),0)>0 AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='product_notice_'||${kind}),'1')='1';`;
+    const stockBody=(product,stock,condition='1=1')=>{
+      const kind=`CASE WHEN ${stock}>stock THEN 'restock' ELSE 'sold_out' END`;
+      return `INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id) SELECT 'stock:'||product_id||':'||(revision+1),product_id,${kind},COALESCE((SELECT MAX(user_id) FROM users),0) FROM product_notice_state WHERE product_id=${product} AND ${condition} AND (${stock}>stock OR (stock>0 AND ${stock}=0)) AND COALESCE((SELECT MAX(user_id) FROM users),0)>0 AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='product_notice_'||${kind}),'1')='1'; UPDATE product_notice_state SET stock=${stock},revision=revision+1 WHERE product_id=${product} AND ${condition} AND stock<>${stock};`;
+    };
+    const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const auditSetup=[
+      db.prepare(`INSERT OR IGNORE INTO product_notice_state(product_id,stock) SELECT id,CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=products.id AND is_sold=0) END FROM products`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_new AFTER INSERT ON products BEGIN INSERT OR IGNORE INTO product_notice_state(product_id,stock) VALUES(NEW.id,CASE WHEN NEW.is_external=1 THEN MAX(0,COALESCE(NEW.api_stock,0)) ELSE 0 END); ${noticeEvent('NEW.id',"'new_product'","'new:'||NEW.id")} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_api_stock AFTER UPDATE OF api_stock ON products WHEN NEW.is_external=1 AND NEW.is_active=1 BEGIN ${stockBody('NEW.id','MAX(0,COALESCE(NEW.api_stock,0))')} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_add AFTER INSERT ON inventory WHEN NEW.is_sold=0 BEGIN ${stockBody('NEW.product_id','stock+1',localCondition('NEW.product_id'))} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_remove AFTER DELETE ON inventory WHEN OLD.is_sold=0 BEGIN ${stockBody('OLD.product_id','MAX(0,stock-1)',localCondition('OLD.product_id'))} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_change AFTER UPDATE OF is_sold,product_id ON inventory WHEN OLD.is_sold<>NEW.is_sold OR OLD.product_id<>NEW.product_id BEGIN ${stockBody('OLD.product_id','MAX(0,stock-1)',`OLD.is_sold=0 AND ${localCondition('OLD.product_id')}`)} ${stockBody('NEW.product_id','stock+1',`NEW.is_sold=0 AND ${localCondition('NEW.product_id')}`)} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_sale_cost AFTER INSERT ON orders BEGIN
       UPDATE orders SET sale_origin=(SELECT CASE WHEN is_external=1 THEN 'api' ELSE 'local' END FROM products WHERE id=NEW.product_id),
       provider_unit_cost_usd=(SELECT CASE WHEN is_external=1 AND cost_price_usd>0 THEN cost_price_usd ELSE NULL END FROM products WHERE id=NEW.product_id)
@@ -282,6 +299,8 @@ async function initializeDatabase(db, force) {
     orderWriteSchemaCache.delete(db);
     await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
+      "CREATE UNIQUE INDEX IF NOT EXISTS product_notice_coalesce ON product_notice_events(product_id,kind) WHERE status='pending'",
+      "CREATE INDEX IF NOT EXISTS product_notice_pending ON product_notice_events(status,next_at,id)",
       "CREATE INDEX IF NOT EXISTS products_shop_category_v2 ON products(is_active,shop_category_id,id)",
       "CREATE INDEX IF NOT EXISTS wallet_user_history ON wallet_history(user_id,id DESC)",
       "CREATE UNIQUE INDEX IF NOT EXISTS support_one_active_order ON support_tickets(order_id,user_id) WHERE status<>'closed'",
@@ -321,6 +340,7 @@ async function initializeDatabase(db, force) {
       ['bep20_addr', '0x71C...YourWalletAddress'],
       ['external_api_url', 'https://207-148-64-141.sslip.io'],
       ['external_api_key', ''],
+      ['product_notifications_enabled','1'],['product_notice_new_product','1'],['product_notice_restock','1'],['product_notice_sold_out','1'],
       ['external_profit_margin', '20'],
       ['external_profit_margin_type', 'percent'],
       ['auto_order_enabled', '1'],
@@ -1604,6 +1624,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
 
     if(await handleCategoryCallback(env,chatId,data,messageId))return;
+    if(await handleProductNoticeCallback(env,chatId,data,messageId))return;
     // Navigation Callbacks
     if (data === "home") { await clearAdminState(env, chatId); await sendHomeDashboard(env, chatId, user, firstName, messageId); return; }
     const shopPage=data.match(/^shop_(page|refresh)_(\d+)$/);
@@ -2583,6 +2604,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       }
     }
 
+    if(importedCount>10&&env.__orderTrace)env.__orderTrace.noticeMaxRecipients=4;
     if (targetExternalId === null) {
       await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('last_external_sync_time', ?)").bind(String(Date.now())).run();
       if (snapshot?.items === items) { snapshot.appliedRate = configuredRate; snapshot.appliedMargin = configuredMargin; snapshot.appliedMarginType=configuredMarginType; }
@@ -3005,6 +3027,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
     [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
     [{text:'🎫 Support Tickets',callback_data:'adm_tickets_open_0'}],
+    [{text:'🔔 Product Notifications',callback_data:'adm_product_notices'}],
     [{text:'📂 Categories',callback_data:'adm_categories_0'}],
     [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'}],
     [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
@@ -3039,6 +3062,7 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
   const buttons = [
     [{ text: "💳 Deposit Funds", callback_data: "deposit" }],
     [{text:"📒 Balance History",callback_data:"wallet_history_0"}],
+    [{text:`🔔 Product Alerts: ${user?.product_alerts===0?'OFF':'ON'}`,callback_data:"product_alert_toggle"}],
     [{ text: "📦 Order History", callback_data: "my_orders" }, { text: "⏳ My Pre-Orders", callback_data: "my_preorders" }],
     [{ text: "👥 Refer & Earn", callback_data: "refer" }],
     [{ text: "◀️ Main Menu", callback_data: "home" }]
@@ -3300,6 +3324,7 @@ async function processBotUpdate(update,env,origin,ctx){
       await sendOrderDiagnostics(scoped,chatId);return;
     }
     await handleUpdate(update,scoped,origin,ctx);
+    if(ctx?.waitUntil)ctx.waitUntil(drainProductNotices(scoped).catch(()=>console.error('Product notice delivery paused')));
   }catch(error){
     const reference='ERR-'+crypto.randomUUID().slice(0,8),detail=await safeDiagnostic(scoped,error?.message||error);
     console.error(`Bot error ${reference} at ${trace.stage}: ${detail}`);
@@ -3909,11 +3934,11 @@ async function handleAdminCoreText(env,chatId,text,state){
   if(state.state==='awaiting_stock'){
     const product=await env.DB.prepare('SELECT * FROM products WHERE id=? AND is_active=1').bind(state.data).first();
     if(!product||product.is_external){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Choose an active local product to add stock.');return true;}
-    const items=String(text).split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    const items=parseStockItems(text);
     if(!items.length||items.length>50||items.some(x=>x.length>1500)){await sendMsg(env,chatId,'Send 1–50 stock items, one per line (up to 1500 characters each).');return true;}
     const writes=items.map(item=>env.DB.prepare('INSERT INTO inventory(product_id,item_data) SELECT ?,? WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)').bind(product.id,item,chatId,state.state,state.data));
     writes.push(env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data));const saved=await env.DB.batch(writes);
-    const added=saved.slice(0,-1).reduce((n,r)=>n+Number(r.meta?.changes||0),0);await sendMsg(env,chatId,`Stock added: ${added} item(s).`,[[{text:'Product',callback_data:`adm_prod_details_${product.id}`}]]);
+    const added=saved.slice(0,-1).reduce((n,r)=>n+Number(r.meta?.changes||0),0);if(added>10)env.__noticeMaxRecipients=4;await sendMsg(env,chatId,`Stock added: ${added} item(s).`,[[{text:'Product',callback_data:`adm_prod_details_${product.id}`}]]);
     if(added)await notifyPreorders(env,product.id,escapeHtml(productDisplayName(product)),added);return true;
   }
   if(state.state==='awaiting_deposit_amount'){
@@ -4079,4 +4104,61 @@ async function beginProductInCategory(env,chatId,categoryId,messageId=null){
   const text=`➕ <b>Add Product · Step 2/5: Name</b>\n\nCategory: <b>${escapeHtml(category.name)}</b>\n\nEnter the product name.`;
   const buttons=[[{text:'Back to Categories',callback_data:'adm_add_product'}],[{text:'Cancel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+
+
+function parseStockItems(text){
+  return String(text).split(/\r?\n/).map(line=>line.trim()).filter(line=>line&&!/^[|:\-\s]+$/.test(line)&&!/^```/.test(line)).map(line=>line.startsWith('|')&&line.endsWith('|')?line.slice(1,-1).trim():line).filter(Boolean);
+}
+const noticeDrainRunning=new WeakMap();
+async function drainProductNotices(env){
+  if(!env.DB)return;
+  if(noticeDrainRunning.has(env.DB))return noticeDrainRunning.get(env.DB);
+  const work=(async()=>{const deadline=Date.now()+18000,maxRecipients=env.__noticeMaxRecipients||env.__orderTrace?.noticeMaxRecipients||24;let attempted=0;for(let event=0;event<20&&attempted<maxRecipients&&Date.now()<deadline;event++){const sent=await deliverProductNoticeBatch(env,Math.min(4,maxRecipients-attempted),deadline);if(sent==null)break;attempted+=sent;}})().finally(()=>noticeDrainRunning.delete(env.DB));noticeDrainRunning.set(env.DB,work);return work;
+}
+async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
+  if(await getSetting(env,'product_notifications_enabled','1')!=='1')return null;
+  const now=Date.now(),token=crypto.randomUUID();
+  const claim=await env.DB.prepare("UPDATE product_notice_events SET lease_token=?,lease_until=? WHERE id=(SELECT id FROM product_notice_events WHERE status='pending' AND next_at<=? AND lease_until<? ORDER BY id LIMIT 1) AND lease_until<?").bind(token,now+60000,now,now,now).run();
+  if(!claim.meta?.changes)return null;
+  const event=await env.DB.prepare('SELECT * FROM product_notice_events WHERE lease_token=?').bind(token).first();
+  const product=await env.DB.prepare('SELECT p.*,s.stock FROM products p LEFT JOIN product_notice_state s ON s.product_id=p.id WHERE p.id=?').bind(event.product_id).first();
+  if(!product||product.is_active===0||await getSetting(env,'product_notice_'+event.kind,'1')!=='1'||(event.kind==='restock'&&product.stock===0)||(event.kind==='sold_out'&&product.stock>0)){
+    await env.DB.prepare("UPDATE product_notice_events SET status='superseded',lease_until=0 WHERE id=? AND lease_token=?").bind(event.id,token).run();return 0;
+  }
+  const titles={new_product:'🆕 New Product Added',restock:'✅ Stock Added',sold_out:'📦 Stock Finished'};
+  const text=`<b>${titles[event.kind]||'Product Update'}</b>\n\n${escapeHtml(productDisplayName(product))}\nPrice: <b>$${adminMoney(product.price_usd)}</b>\n${event.kind==='sold_out'?'Stock: 0':'Available stock: '+Number(product.stock||0)}\n\n${paymentDashboardTime(event.created_at)} (Dhaka)`;
+  const {results:users}=await env.DB.prepare('SELECT user_id FROM users WHERE user_id>? AND user_id<=? AND user_id<>? AND COALESCE(product_alerts,1)=1 ORDER BY user_id LIMIT ?').bind(event.cursor,event.max_user_id,env.ADMIN_ID||0,limit).all();
+  let cursor=event.cursor,attempted=0;
+  for(const user of users){
+    if(Date.now()>=deadline)break;
+    attempted++;
+    const sent=await sendMsg(env,user.user_id,text,[[{text:'View Product',callback_data:`prod_${product.id}`}],[{text:'🔕 Turn Off Product Alerts',callback_data:'product_alert_off'}]]);
+    if(!sent?.ok&&![400,403].includes(sent?.error_code)){
+      const delay=Math.max(30,Math.min(3600,Number(sent?.parameters?.retry_after)||30));
+      await env.DB.prepare('UPDATE product_notice_events SET next_at=?,lease_until=0,retries=retries+1 WHERE id=? AND lease_token=?').bind(Date.now()+delay*1000,event.id,token).run();return null;
+    }
+    cursor=user.user_id;await env.DB.prepare('UPDATE product_notice_events SET cursor=?,sent=sent+?,failed=failed+?,retries=0 WHERE id=? AND lease_token=?').bind(cursor,sent?.ok?1:0,sent?.ok?0:1,event.id,token).run();
+  }
+  await env.DB.prepare('UPDATE product_notice_events SET status=?,lease_until=0 WHERE id=? AND lease_token=?').bind(attempted===users.length&&(users.length<limit||cursor>=event.max_user_id)?'done':'pending',event.id,token).run();
+  return attempted;
+}
+async function showProductNoticeSettings(env,chatId,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  const keys=['product_notifications_enabled','product_notice_new_product','product_notice_restock','product_notice_sold_out'];
+  const values=await Promise.all(keys.map(k=>getSetting(env,k,'1'))),labels=['All Product Alerts','New Products','Stock Added','Stock Finished'];
+  const pending=await env.DB.prepare("SELECT COUNT(*) AS n FROM product_notice_events WHERE status='pending'").first();
+  const buttons=keys.map((k,i)=>[{text:`${labels[i]}: ${values[i]==='1'?'ON':'OFF'}`,callback_data:`adm_notice_toggle_${i}`}]);buttons.push([{text:'Send Pending Batch',callback_data:'adm_notice_drain'}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
+  const text=`🔔 <b>Product Notifications</b>\n\nPending events: ${pending.n}\n\nUsers receive new-product, stock-return and stock-finished updates. They can mute alerts from Profile. Repeated unchanged syncs do not create new alerts.\n\nDelivery runs in small background batches after bot activity/sync. Large queues may need more bot activity or scheduled sync calls to finish promptly.`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function handleProductNoticeCallback(env,chatId,data,messageId){
+  if(data==='product_alert_off'||data==='product_alert_toggle'){
+    await env.DB.prepare(data==='product_alert_off'?'UPDATE users SET product_alerts=0 WHERE user_id=?':'UPDATE users SET product_alerts=CASE WHEN COALESCE(product_alerts,1)=1 THEN 0 ELSE 1 END WHERE user_id=?').bind(chatId).run();
+    const user=await env.DB.prepare('SELECT * FROM users WHERE user_id=?').bind(chatId).first();await sendProfile(env,chatId,user,messageId);return true;
+  }
+  if(!adminUserAccess(env,chatId))return false;
+  if(data==='adm_product_notices'){await showProductNoticeSettings(env,chatId,messageId);return true;}
+  if(data==='adm_notice_drain'){await drainProductNotices(env);await showProductNoticeSettings(env,chatId,messageId);return true;}
+  const match=data.match(/^adm_notice_toggle_([0-3])$/);if(match){const key=['product_notifications_enabled','product_notice_new_product','product_notice_restock','product_notice_sold_out'][Number(match[1])];await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,CASE WHEN COALESCE((SELECT value FROM settings WHERE key=?),'1')='1' THEN '0' ELSE '1' END)").bind(key,key).run();await showProductNoticeSettings(env,chatId,messageId);return true;}return false;
 }
