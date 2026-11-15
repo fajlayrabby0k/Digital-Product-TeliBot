@@ -4002,7 +4002,7 @@ async function ensureCategory(env,name,restore=false){
 async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
   await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
   const {results}=await env.DB.prepare("SELECT COALESCE(c.id,0) AS id,COALESCE(c.name,'অন্যান্য') AS name,COUNT(*) AS count FROM products p LEFT JOIN product_categories c ON c.id=p.shop_category_id AND c.is_deleted=0 WHERE p.is_active=1 GROUP BY COALESCE(c.id,0) ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
-  const buttons=results.slice(0,10).map(c=>[{text:`📂 ${c.name} (${c.count})`,callback_data:`shopcat_${c.id}_0`}]),pager=[];
+  const buttons=results.slice(0,10).map(c=>[{text:`${c.name} (${c.count})`,callback_data:`shopcat_${c.id}_0`}]),pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'Main Menu',callback_data:'home'}]);
   const text=`📂 <b>Shop Categories</b>\n\n${results.length?'Choose a category to browse its products.':'No products are available yet.'}`;
@@ -4064,5 +4064,5 @@ async function showCategoryAdminDetail(env,chatId,id,messageId){
   if(!adminUserAccess(env,chatId))return;
   const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(id).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return;}
   const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM products WHERE shop_category_id=? AND is_active=1').bind(id).first();
-  await editMsg(env,chatId,messageId,`📂 <b>${escapeHtml(cat.name)}</b>\n\nActive products: ${count.n}\n\nAssign products from Manage Products → product → Set Category. Deleting a category keeps its products.`,[[{text:'View Products',callback_data:`shopcat_${cat.id}_0`}],[{text:'🗑️ Delete Category',callback_data:`adm_cat_delete_${cat.id}`}],[{text:'⬅️ Back to Categories',callback_data:'adm_categories_0'}]]);
+  await editMsg(env,chatId,messageId,`<b>${escapeHtml(cat.name)}</b>\n\nActive products: ${count.n}\n\nAssign products from Manage Products → product → Set Category. Deleting a category keeps its products.`,[[{text:'View Products',callback_data:`shopcat_${cat.id}_0`}],[{text:'🗑️ Delete Category',callback_data:`adm_cat_delete_${cat.id}`}],[{text:'⬅️ Back to Categories',callback_data:'adm_categories_0'}]]);
 }
