@@ -24,3 +24,12 @@ The additive migration creates `product_categories`, adds nullable product categ
 Open **Admin Panel → Categories → category → Delete Category**, then confirm. Products remain in the store and move to **অন্যান্য**. Their prices, stock, orders and margins are preserved. Category removal is recorded internally so provider sync cannot recreate the deleted category automatically. Choosing Create New Category with the same name restores that category; moved products stay in অন্যান্য until assigned again or reset to the API/default rule. The built-in অন্যান্য group cannot be deleted.
 
 The Create New Category button is at the top of the admin category list and product-category picker. Opening an admin category shows its active product count, View Products and Delete Category. Customers cannot delete categories. Deletion and product reassignment happen in one database transaction.
+
+
+## Legacy foreign-key compatibility
+
+Build `2026-11-15-category-foreign-key-fix-1` uses `products.shop_category_id` for this shop. A historical `products.category_id` may reference an older category table, so assigning a new product_categories ID there can fail with `SQLITE_CONSTRAINT_FOREIGNKEY`. The old column and all its constraints/values are left untouched.
+
+On first upgrade, saved selections from a compatible previous category_id column are copied only if it has no conflicting foreign key and the destination category exists. Relationships to another legacy table are not guessed or remapped. Once shop_category_id exists, repeated migrations never copy old selections back over current choices. This is an additive migration; product/order/balance data is preserved.
+
+`node tests/legacy-category-foreign-key.cjs` enables SQLite foreign keys, reproduces the failing old assignment, then verifies migration, assign/create/delete, preservation of the legacy relationship, compatible-selection upgrade and repeat initialization.

@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-category-management-2";
+const BOT_BUILD="2026-11-15-category-foreign-key-fix-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-category-management-2";
+const DB_SCHEMA_VERSION = "2026-11-category-foreign-key-fix-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -193,7 +193,7 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE preorders ADD COLUMN status TEXT DEFAULT 'pending';",
       "ALTER TABLE users ADD COLUMN wallet_change_reason TEXT DEFAULT NULL;",
       "ALTER TABLE users ADD COLUMN wallet_change_ref TEXT DEFAULT NULL;",
-      "ALTER TABLE products ADD COLUMN category_id INTEGER DEFAULT NULL;",
+      "ALTER TABLE products ADD COLUMN shop_category_id INTEGER DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN provider_category_id INTEGER DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN category_override INTEGER DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN purchase_cost_usd REAL DEFAULT NULL;",
@@ -244,6 +244,14 @@ async function initializeDatabase(db, force) {
       if (typeof db.batch === "function") await db.batch(missing.map(sql => db.prepare(sql)));
       else for (const sql of missing) await db.prepare(sql).run();
     }
+    // A historical category_id may reference a different legacy category table.
+    // Keep that column and its foreign key untouched; only migrate compatible IDs.
+    if(!columns.get('products').has('shop_category_id')&&columns.get('products').has('category_id')){
+      const {results:links}=await db.prepare('PRAGMA foreign_key_list(products)').all();
+      if(!links.some(link=>link.from==='category_id'&&link.table!=='product_categories')){
+        await db.prepare('UPDATE products SET shop_category_id=category_id WHERE category_id IN (SELECT id FROM product_categories WHERE is_deleted=0)').run();
+      }
+    }
     const auditSetup=[
       db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_sale_cost AFTER INSERT ON orders BEGIN
       UPDATE orders SET sale_origin=(SELECT CASE WHEN is_external=1 THEN 'api' ELSE 'local' END FROM products WHERE id=NEW.product_id),
@@ -273,7 +281,7 @@ async function initializeDatabase(db, force) {
     orderWriteSchemaCache.delete(db);
     await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
-      "CREATE INDEX IF NOT EXISTS products_category_shop ON products(is_active,category_id,id)",
+      "CREATE INDEX IF NOT EXISTS products_shop_category_v2 ON products(is_active,shop_category_id,id)",
       "CREATE INDEX IF NOT EXISTS wallet_user_history ON wallet_history(user_id,id DESC)",
       "CREATE UNIQUE INDEX IF NOT EXISTS support_one_active_order ON support_tickets(order_id,user_id) WHERE status<>'closed'",
       "CREATE INDEX IF NOT EXISTS support_user_list ON support_tickets(user_id,id DESC)",
@@ -1612,9 +1620,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
     const shopReturn=data.match(/^shop_return_(\d+)$/);
     if(shopReturn){
-      const product=await env.DB.prepare('SELECT category_id FROM products WHERE id=?').bind(shopReturn[1]).first();
-      const category=Number(product?.category_id||0);
-      const rank=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND COALESCE(category_id,0)=? AND id<?').bind(category,shopReturn[1]).first();
+      const product=await env.DB.prepare('SELECT shop_category_id FROM products WHERE id=?').bind(shopReturn[1]).first();
+      const category=Number(product?.shop_category_id||0);
+      const rank=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND COALESCE(shop_category_id,0)=? AND id<?').bind(category,shopReturn[1]).first();
       await sendCategoryProducts(env,chatId,category,Math.floor(Number(rank?.count||0)/10),messageId);
       return;
     }
@@ -2590,7 +2598,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       }
 
       if(targetId&&(Number(existing?.provider_category_id||0)!==Number(providerCategoryId||0)||!existing&&providerCategoryId)){
-        await env.DB.prepare('UPDATE products SET provider_category_id=(SELECT id FROM product_categories WHERE id=? AND is_deleted=0),category_id=CASE WHEN category_override=1 THEN category_id ELSE (SELECT id FROM product_categories WHERE id=? AND is_deleted=0) END WHERE id=?').bind(providerCategoryId,providerCategoryId,targetId).run();
+        await env.DB.prepare('UPDATE products SET provider_category_id=(SELECT id FROM product_categories WHERE id=? AND is_deleted=0),shop_category_id=CASE WHEN category_override=1 THEN shop_category_id ELSE (SELECT id FROM product_categories WHERE id=? AND is_deleted=0) END WHERE id=?').bind(providerCategoryId,providerCategoryId,targetId).run();
       }
       importedCount++;
     }
@@ -3993,7 +4001,7 @@ async function ensureCategory(env,name,restore=false){
 }
 async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
   await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
-  const {results}=await env.DB.prepare("SELECT COALESCE(c.id,0) AS id,COALESCE(c.name,'অন্যান্য') AS name,COUNT(*) AS count FROM products p LEFT JOIN product_categories c ON c.id=p.category_id AND c.is_deleted=0 WHERE p.is_active=1 GROUP BY COALESCE(c.id,0) ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
+  const {results}=await env.DB.prepare("SELECT COALESCE(c.id,0) AS id,COALESCE(c.name,'অন্যান্য') AS name,COUNT(*) AS count FROM products p LEFT JOIN product_categories c ON c.id=p.shop_category_id AND c.is_deleted=0 WHERE p.is_active=1 GROUP BY COALESCE(c.id,0) ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
   const buttons=results.slice(0,10).map(c=>[{text:`📂 ${c.name} (${c.count})`,callback_data:`shopcat_${c.id}_0`}]),pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'Main Menu',callback_data:'home'}]);
@@ -4004,9 +4012,9 @@ async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,fo
   const sync=await syncExternalProducts(env,null,null,false,null,force);
   const cat=category?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first():{name:'অন্যান্য'};
   if(!cat){await showShopCategories(env,chatId,messageId);return;}
-  const count=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND COALESCE(category_id,0)=?').bind(category).first();
+  const count=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND COALESCE(shop_category_id,0)=?').bind(category).first();
   const pages=Math.max(1,Math.ceil(Number(count.count)/10));page=Math.min(pages-1,adminUserPage(Number.isSafeInteger(Number(page))?page:0));
-  const {results}=await env.DB.prepare('SELECT p.*,CASE WHEN is_external=1 THEN COALESCE(api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS stock_qty FROM products p WHERE is_active=1 AND COALESCE(category_id,0)=? ORDER BY p.id LIMIT 10 OFFSET ?').bind(category,page*10).all();
+  const {results}=await env.DB.prepare('SELECT p.*,CASE WHEN is_external=1 THEN COALESCE(api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS stock_qty FROM products p WHERE is_active=1 AND COALESCE(shop_category_id,0)=? ORDER BY p.id LIMIT 10 OFFSET ?').bind(category,page*10).all();
   const buttons=results.map(p=>[productListButton(p,`prod_${p.id}`,!(p.is_external&&!sync.success))]),pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:`shopcat_${category}_${page-1}`});if(page<pages-1)pager.push({text:'Next',callback_data:`shopcat_${category}_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔄 Refresh Stock',callback_data:`shopcatrefresh_${category}_${page}`}],[{text:'⬅️ Back to Categories',callback_data:'shop'},{text:'Main Menu',callback_data:'home'}]);
@@ -4022,23 +4030,24 @@ async function showAdminCategories(env,chatId,productId=null,page=0,messageId=nu
   if(page>0)pager.push({text:'Previous',callback_data:prefix+(page-1)});if(results.length>10)pager.push({text:'Next',callback_data:prefix+(page+1)});if(pager.length)buttons.push(pager);
   if(product)buttons.push([{text:'অন্যান্য',callback_data:`adm_cat_assign_${productId}_0`}],[{text:'Use API Category / Default',callback_data:`adm_cat_default_${productId}`}]);
   buttons.push([{text:product?'Product':'Admin Panel',callback_data:product?`adm_prod_details_${productId}`:'admin_panel'}]);
-  let current='';if(product){const c=product.category_id?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(product.category_id).first():null;current=`\nProduct: ${adminSnippet(productDisplayName(product),100)}\nCurrent: ${escapeHtml(c?.name||'অন্যান্য')}\nRule: ${product.category_override?'Admin choice (kept after API sync)':'API category / default'}\n`;}
+  let current='';if(product){const c=product.shop_category_id?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(product.shop_category_id).first():null;current=`\nProduct: ${adminSnippet(productDisplayName(product),100)}\nCurrent: ${escapeHtml(c?.name||'অন্যান্য')}\nRule: ${product.category_override?'Admin choice (kept after API sync)':'API category / default'}\n`;}
   const text=`📂 <b>${product?'Choose Product Category':'Manage Categories'}</b>\n${current}\n${product?'Choose a category below.':'Tap Create New Category above to add one. Select a category to view or delete it. Assign products from Manage Products → product → Set Category.'}`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleCategoryCallback(env,chatId,data,messageId){
   let match=data.match(/^(shopcat|shopcatrefresh)_(\d+)_(\d+)$/);if(match){await clearBinanceInput(env,chatId);await clearTicketInput(env,chatId);await sendCategoryProducts(env,chatId,Number(match[2]),Number(match[3]),messageId,match[1]==='shopcatrefresh');return true;}
   if(!adminUserAccess(env,chatId))return false;
+  orderStage(env,'category.manage');
   match=data.match(/^adm_categories_(\d+)$/);if(match){await showAdminCategories(env,chatId,null,match[1],messageId);return true;}
   match=data.match(/^adm_cat_product_(\d+)_(\d+)$/);if(match){await showAdminCategories(env,chatId,match[1],match[2],messageId);return true;}
   match=data.match(/^adm_cat_create_(\d+)$/);if(match){await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_name',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,'Enter a category name (1–60 characters), e.g. AI Tools, VPN or Streaming.',[[{text:'Cancel',callback_data:match[1]==='0'?'adm_categories_0':`adm_cat_product_${match[1]}_0`}]]);return true;}
-  match=data.match(/^adm_cat_assign_(\d+)_(\d+)$/);if(match){const category=Number(match[2]);if(category&&!await env.DB.prepare('SELECT id FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first())return true;await env.DB.prepare('UPDATE products SET category_id=?,category_override=1 WHERE id=?').bind(category||null,match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
-  match=data.match(/^adm_cat_default_(\d+)$/);if(match){await env.DB.prepare('UPDATE products SET category_id=(SELECT id FROM product_categories WHERE id=products.provider_category_id AND is_deleted=0),category_override=0 WHERE id=?').bind(match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
+  match=data.match(/^adm_cat_assign_(\d+)_(\d+)$/);if(match){const category=Number(match[2]);if(category&&!await env.DB.prepare('SELECT id FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first())return true;await env.DB.prepare('UPDATE products SET shop_category_id=?,category_override=1 WHERE id=?').bind(category||null,match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
+  match=data.match(/^adm_cat_default_(\d+)$/);if(match){await env.DB.prepare('UPDATE products SET shop_category_id=(SELECT id FROM product_categories WHERE id=products.provider_category_id AND is_deleted=0),category_override=0 WHERE id=?').bind(match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
   match=data.match(/^adm_cat_view_(\d+)$/);if(match){await showCategoryAdminDetail(env,chatId,match[1],messageId);return true;}
   match=data.match(/^adm_cat_(delete|confirmdelete)_(\d+)$/);if(match){
     const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(match[2]).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return true;}
     if(match[1]==='delete'){await editMsg(env,chatId,messageId,`Delete <b>${escapeHtml(cat.name)}</b>?\n\nProducts will remain and move to অন্যান্য. API sync will not recreate this category unless you create it again.`,[[{text:'Delete Category',callback_data:`adm_cat_confirmdelete_${cat.id}`}],[{text:'Cancel',callback_data:`adm_cat_view_${cat.id}`}]]);return true;}
-    await env.DB.batch([env.DB.prepare('UPDATE products SET category_id=NULL,category_override=1 WHERE category_id=?').bind(cat.id),env.DB.prepare('UPDATE products SET provider_category_id=NULL WHERE provider_category_id=?').bind(cat.id),env.DB.prepare('UPDATE product_categories SET is_deleted=1 WHERE id=?').bind(cat.id)]);
+    await env.DB.batch([env.DB.prepare('UPDATE products SET shop_category_id=NULL,category_override=1 WHERE shop_category_id=?').bind(cat.id),env.DB.prepare('UPDATE products SET provider_category_id=NULL WHERE provider_category_id=?').bind(cat.id),env.DB.prepare('UPDATE product_categories SET is_deleted=1 WHERE id=?').bind(cat.id)]);
     providerCatalogCache.delete(env.DB);await showAdminCategories(env,chatId,null,0,messageId);return true;
   }return false;
 }
@@ -4046,7 +4055,7 @@ async function handleCategoryText(env,chatId,text,state){
   if(!adminUserAccess(env,chatId)||state.state!=='awaiting_category_name')return false;
   const name=String(text).trim();if(!name||name.length>60||/[\r\n]/.test(name)||name==='অন্যান্য'){await sendMsg(env,chatId,'Enter a unique category name of 1–60 characters. অন্যান্য is the built-in default.');return true;}
   const id=await ensureCategory(env,name,true);providerCatalogCache.delete(env.DB);await clearAdminState(env,chatId);
-  if(Number(state.data)){await env.DB.prepare('UPDATE products SET category_id=?,category_override=1 WHERE id=?').bind(id,state.data).run();await showAdminCategories(env,chatId,state.data);}else await showAdminCategories(env,chatId);
+  if(Number(state.data)){await env.DB.prepare('UPDATE products SET shop_category_id=?,category_override=1 WHERE id=?').bind(id,state.data).run();await showAdminCategories(env,chatId,state.data);}else await showAdminCategories(env,chatId);
   return true;
 }
 
@@ -4054,6 +4063,6 @@ async function handleCategoryText(env,chatId,text,state){
 async function showCategoryAdminDetail(env,chatId,id,messageId){
   if(!adminUserAccess(env,chatId))return;
   const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(id).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return;}
-  const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM products WHERE category_id=? AND is_active=1').bind(id).first();
+  const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM products WHERE shop_category_id=? AND is_active=1').bind(id).first();
   await editMsg(env,chatId,messageId,`📂 <b>${escapeHtml(cat.name)}</b>\n\nActive products: ${count.n}\n\nAssign products from Manage Products → product → Set Category. Deleting a category keeps its products.`,[[{text:'View Products',callback_data:`shopcat_${cat.id}_0`}],[{text:'🗑️ Delete Category',callback_data:`adm_cat_delete_${cat.id}`}],[{text:'⬅️ Back to Categories',callback_data:'adm_categories_0'}]]);
 }
