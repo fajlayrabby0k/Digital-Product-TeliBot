@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-product-notifications-1";
+const BOT_BUILD="2026-11-15-channel-notifications-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -56,7 +56,7 @@ export default {
       try {
         await ensureDbReady(env.DB);
         const res = await syncExternalProducts(env, null, null, true);
-        if(ctx?.waitUntil)ctx.waitUntil(drainProductNotices(env).catch(()=>{}));
+        if(ctx?.waitUntil)ctx.waitUntil(drainAllNotices(env).catch(()=>{}));
         return new Response(JSON.stringify(res), { status: 200, headers: { "Content-Type": "application/json" } });
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } });
@@ -124,7 +124,7 @@ export default {
 
   // Cloudflare Scheduled Cron Handler (Periodic background live sync)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async()=>{await ensureDbReady(env.DB);await syncExternalProducts(env);await drainProductNotices(env);})());
+    ctx.waitUntil((async()=>{await ensureDbReady(env.DB);await syncExternalProducts(env);await drainAllNotices(env);})());
   }
 };
 
@@ -132,7 +132,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-product-notifications-1";
+const DB_SCHEMA_VERSION = "2026-11-channel-notifications-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -155,6 +155,7 @@ async function initializeDatabase(db, force) {
       } catch (_) { /* First installation has no settings table yet. */ }
     }
     const schema = [
+      `CREATE TABLE IF NOT EXISTS channel_notice_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,product_id INTEGER,order_id INTEGER,deposit_id INTEGER,kind TEXT NOT NULL,channel_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',next_at INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0,lease_token TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,sent_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS product_notice_state(product_id INTEGER PRIMARY KEY,stock INTEGER NOT NULL,revision INTEGER NOT NULL DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS product_notice_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,product_id INTEGER NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,retries INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS product_categories(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL COLLATE NOCASE UNIQUE);`,
@@ -258,19 +259,27 @@ async function initializeDatabase(db, force) {
         await db.prepare('UPDATE products SET shop_category_id=category_id WHERE category_id IN (SELECT id FROM product_categories WHERE is_deleted=0)').run();
       }
     }
-    const noticeEvent=(product,kind,key)=>`INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id) SELECT ${key},${product},${kind},COALESCE((SELECT MAX(user_id) FROM users),0) WHERE COALESCE((SELECT MAX(user_id) FROM users),0)>0 AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='product_notice_'||${kind}),'1')='1';`;
+    const channelEvent=(product,kind,key,from='',condition='1=1',order='NULL',deposit='NULL')=>`INSERT OR IGNORE INTO channel_notice_events(event_key,product_id,order_id,deposit_id,kind,channel_id) SELECT ${key},${product},${order},${deposit},${kind},(SELECT value FROM settings WHERE key='force_channel_username') ${from} WHERE ${condition} AND COALESCE((SELECT value FROM settings WHERE key='force_channel_username'),'')<>'' AND COALESCE((SELECT value FROM settings WHERE key='channel_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='channel_notice_'||${kind}),'1')='1';`;
+    const noticeEvent=(product,kind,key)=>`INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id) SELECT ${key},${product},${kind},COALESCE((SELECT MAX(user_id) FROM users),0) WHERE COALESCE((SELECT MAX(user_id) FROM users),0)>0 AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='product_notice_'||${kind}),'1')='1';`+channelEvent(product,kind,key);
     const stockBody=(product,stock,condition='1=1')=>{
       const kind=`CASE WHEN ${stock}>stock THEN 'restock' ELSE 'sold_out' END`;
-      return `INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id) SELECT 'stock:'||product_id||':'||(revision+1),product_id,${kind},COALESCE((SELECT MAX(user_id) FROM users),0) FROM product_notice_state WHERE product_id=${product} AND ${condition} AND (${stock}>stock OR (stock>0 AND ${stock}=0)) AND COALESCE((SELECT MAX(user_id) FROM users),0)>0 AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='product_notice_'||${kind}),'1')='1'; UPDATE product_notice_state SET stock=${stock},revision=revision+1 WHERE product_id=${product} AND ${condition} AND stock<>${stock};`;
+      return `INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id) SELECT 'stock:'||product_id||':'||(revision+1),product_id,${kind},COALESCE((SELECT MAX(user_id) FROM users),0) FROM product_notice_state WHERE product_id=${product} AND ${condition} AND (${stock}>stock OR (stock>0 AND ${stock}=0)) AND COALESCE((SELECT MAX(user_id) FROM users),0)>0 AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='product_notice_'||${kind}),'1')='1'; ${channelEvent('product_id',kind,"'stock:'||product_id||':'||(revision+1)",'FROM product_notice_state',`product_id=${product} AND ${condition} AND (${stock}>stock OR (stock>0 AND ${stock}=0))`)} UPDATE product_notice_state SET stock=${stock},revision=revision+1 WHERE product_id=${product} AND ${condition} AND stock<>${stock};`;
     };
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const auditSetup=[
+      ...['product_notice_new','product_notice_api_stock','product_notice_inventory_add','product_notice_inventory_remove','product_notice_inventory_change'].map(name=>db.prepare(`DROP TRIGGER IF EXISTS ${name}`)),
       db.prepare(`INSERT OR IGNORE INTO product_notice_state(product_id,stock) SELECT id,CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=products.id AND is_sold=0) END FROM products`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_new AFTER INSERT ON products BEGIN INSERT OR IGNORE INTO product_notice_state(product_id,stock) VALUES(NEW.id,CASE WHEN NEW.is_external=1 THEN MAX(0,COALESCE(NEW.api_stock,0)) ELSE 0 END); ${noticeEvent('NEW.id',"'new_product'","'new:'||NEW.id")} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_api_stock AFTER UPDATE OF api_stock ON products WHEN NEW.is_external=1 AND NEW.is_active=1 BEGIN ${stockBody('NEW.id','MAX(0,COALESCE(NEW.api_stock,0))')} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_add AFTER INSERT ON inventory WHEN NEW.is_sold=0 BEGIN ${stockBody('NEW.product_id','stock+1',localCondition('NEW.product_id'))} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_remove AFTER DELETE ON inventory WHEN OLD.is_sold=0 BEGIN ${stockBody('OLD.product_id','MAX(0,stock-1)',localCondition('OLD.product_id'))} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_inventory_change AFTER UPDATE OF is_sold,product_id ON inventory WHEN OLD.is_sold<>NEW.is_sold OR OLD.product_id<>NEW.product_id BEGIN ${stockBody('OLD.product_id','MAX(0,stock-1)',`OLD.is_sold=0 AND ${localCondition('OLD.product_id')}`)} ${stockBody('NEW.product_id','stock+1',`NEW.is_sold=0 AND ${localCondition('NEW.product_id')}`)} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_low_insert AFTER INSERT ON product_notice_state WHEN NEW.stock BETWEEN 1 AND 5 BEGIN ${channelEvent('NEW.product_id',"'low_stock'","'low:'||NEW.product_id||':'||NEW.revision")} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_low_update AFTER UPDATE OF stock ON product_notice_state WHEN NEW.stock BETWEEN 1 AND 5 AND (OLD.stock=0 OR OLD.stock>5) BEGIN ${channelEvent('NEW.product_id',"'low_stock'","'low:'||NEW.product_id||':'||NEW.revision")} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_order_insert AFTER INSERT ON orders WHEN NEW.status='completed' BEGIN ${channelEvent('NEW.product_id',"'purchase'","'purchase:'||NEW.id",'', '1=1','NEW.id')} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_order_update AFTER UPDATE OF status ON orders WHEN NEW.status='completed' AND OLD.status<>'completed' BEGIN ${channelEvent('NEW.product_id',"'purchase'","'purchase:'||NEW.id",'','1=1','NEW.id')} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_deposit_insert AFTER INSERT ON deposits WHEN NEW.status='completed' BEGIN ${channelEvent('NULL',"'deposit'","'deposit:'||NEW.id",'','1=1','NULL','NEW.id')} END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_deposit_update AFTER UPDATE OF status ON deposits WHEN NEW.status='completed' AND OLD.status<>'completed' BEGIN ${channelEvent('NULL',"'deposit'","'deposit:'||NEW.id",'','1=1','NULL','NEW.id')} END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_sale_cost AFTER INSERT ON orders BEGIN
       UPDATE orders SET sale_origin=(SELECT CASE WHEN is_external=1 THEN 'api' ELSE 'local' END FROM products WHERE id=NEW.product_id),
       provider_unit_cost_usd=(SELECT CASE WHEN is_external=1 AND cost_price_usd>0 THEN cost_price_usd ELSE NULL END FROM products WHERE id=NEW.product_id)
@@ -299,6 +308,8 @@ async function initializeDatabase(db, force) {
     orderWriteSchemaCache.delete(db);
     await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
+      "CREATE INDEX IF NOT EXISTS channel_notice_pending ON channel_notice_events(status,next_at,id)",
+      "CREATE UNIQUE INDEX IF NOT EXISTS channel_notice_coalesce ON channel_notice_events(product_id,kind) WHERE status='pending' AND product_id IS NOT NULL AND kind IN ('new_product','restock','sold_out','low_stock')",
       "CREATE UNIQUE INDEX IF NOT EXISTS product_notice_coalesce ON product_notice_events(product_id,kind) WHERE status='pending'",
       "CREATE INDEX IF NOT EXISTS product_notice_pending ON product_notice_events(status,next_at,id)",
       "CREATE INDEX IF NOT EXISTS products_shop_category_v2 ON products(is_active,shop_category_id,id)",
@@ -340,6 +351,7 @@ async function initializeDatabase(db, force) {
       ['bep20_addr', '0x71C...YourWalletAddress'],
       ['external_api_url', 'https://207-148-64-141.sslip.io'],
       ['external_api_key', ''],
+      ['channel_notifications_enabled','1'],['channel_notice_new_product','1'],['channel_notice_restock','1'],['channel_notice_sold_out','1'],['channel_notice_low_stock','1'],['channel_notice_purchase','1'],['channel_notice_deposit','1'],
       ['product_notifications_enabled','1'],['product_notice_new_product','1'],['product_notice_restock','1'],['product_notice_sold_out','1'],
       ['external_profit_margin', '20'],
       ['external_profit_margin_type', 'percent'],
@@ -1367,6 +1379,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       if (!forceCheck.passed) { await sendForceJoinScreen(env, chatId, forceCheck); return; }
     }
 
+    const productStart=text.match(/^\/start(?:@\w+)?\s+product_(\d+)$/i);
+    if(productStart){await clearBinanceInput(env,chatId);await sendProductDetailView(env,chatId,productStart[1]);return;}
     const redeemStart=text.match(/^\/start(?:@\w+)?\s+redeem_(RDM-[A-Fa-f0-9]{32})$/i);
     if (redeemStart) {await clearBinanceInput(env,chatId);await submitRedeemCode(env,chatId,redeemStart[1]);return;}
     if (await handleTicketText(env,chatId,text,userState,false))return;
@@ -3027,7 +3041,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
     [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
     [{text:'🎫 Support Tickets',callback_data:'adm_tickets_open_0'}],
-    [{text:'🔔 Product Notifications',callback_data:'adm_product_notices'}],
+    [{text:'🔔 Product Notifications',callback_data:'adm_product_notices'},{text:'📢 Channel Alerts',callback_data:'adm_channel_notices'}],
     [{text:'📂 Categories',callback_data:'adm_categories_0'}],
     [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'}],
     [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
@@ -3324,7 +3338,7 @@ async function processBotUpdate(update,env,origin,ctx){
       await sendOrderDiagnostics(scoped,chatId);return;
     }
     await handleUpdate(update,scoped,origin,ctx);
-    if(ctx?.waitUntil)ctx.waitUntil(drainProductNotices(scoped).catch(()=>console.error('Product notice delivery paused')));
+    if(ctx?.waitUntil)ctx.waitUntil(drainAllNotices(scoped).catch(()=>console.error('Product notice delivery paused')));
   }catch(error){
     const reference='ERR-'+crypto.randomUUID().slice(0,8),detail=await safeDiagnostic(scoped,error?.message||error);
     console.error(`Bot error ${reference} at ${trace.stage}: ${detail}`);
@@ -4114,7 +4128,7 @@ const noticeDrainRunning=new WeakMap();
 async function drainProductNotices(env){
   if(!env.DB)return;
   if(noticeDrainRunning.has(env.DB))return noticeDrainRunning.get(env.DB);
-  const work=(async()=>{const deadline=Date.now()+18000,maxRecipients=env.__noticeMaxRecipients||env.__orderTrace?.noticeMaxRecipients||24;let attempted=0;for(let event=0;event<20&&attempted<maxRecipients&&Date.now()<deadline;event++){const sent=await deliverProductNoticeBatch(env,Math.min(4,maxRecipients-attempted),deadline);if(sent==null)break;attempted+=sent;}})().finally(()=>noticeDrainRunning.delete(env.DB));noticeDrainRunning.set(env.DB,work);return work;
+  const work=(async()=>{const deadline=env.__noticeDeadline||Date.now()+18000,maxRecipients=env.__noticeMaxRecipients||env.__orderTrace?.noticeMaxRecipients||24;let attempted=0;for(let event=0;event<20&&attempted<maxRecipients&&Date.now()<deadline;event++){const sent=await deliverProductNoticeBatch(env,Math.min(4,maxRecipients-attempted),deadline);if(sent==null)break;attempted+=sent;}})().finally(()=>noticeDrainRunning.delete(env.DB));noticeDrainRunning.set(env.DB,work);return work;
 }
 async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
   if(await getSetting(env,'product_notifications_enabled','1')!=='1')return null;
@@ -4153,6 +4167,7 @@ async function showProductNoticeSettings(env,chatId,messageId=null){
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleProductNoticeCallback(env,chatId,data,messageId){
+  if(await handleChannelNoticeCallback(env,chatId,data,messageId))return true;
   if(data==='product_alert_off'||data==='product_alert_toggle'){
     await env.DB.prepare(data==='product_alert_off'?'UPDATE users SET product_alerts=0 WHERE user_id=?':'UPDATE users SET product_alerts=CASE WHEN COALESCE(product_alerts,1)=1 THEN 0 ELSE 1 END WHERE user_id=?').bind(chatId).run();
     const user=await env.DB.prepare('SELECT * FROM users WHERE user_id=?').bind(chatId).first();await sendProfile(env,chatId,user,messageId);return true;
@@ -4161,4 +4176,62 @@ async function handleProductNoticeCallback(env,chatId,data,messageId){
   if(data==='adm_product_notices'){await showProductNoticeSettings(env,chatId,messageId);return true;}
   if(data==='adm_notice_drain'){await drainProductNotices(env);await showProductNoticeSettings(env,chatId,messageId);return true;}
   const match=data.match(/^adm_notice_toggle_([0-3])$/);if(match){const key=['product_notifications_enabled','product_notice_new_product','product_notice_restock','product_notice_sold_out'][Number(match[1])];await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,CASE WHEN COALESCE((SELECT value FROM settings WHERE key=?),'1')='1' THEN '0' ELSE '1' END)").bind(key,key).run();await showProductNoticeSettings(env,chatId,messageId);return true;}return false;
+}
+
+
+const channelDrainRunning=new WeakMap();
+async function drainAllNotices(env){const scoped={...env,__noticeDeadline:Date.now()+18000};await drainChannelNotices(scoped);await drainProductNotices(scoped);}
+async function drainChannelNotices(env){
+  if(!env.DB)return;if(channelDrainRunning.has(env.DB))return channelDrainRunning.get(env.DB);
+  const work=deliverChannelNotices(env).finally(()=>channelDrainRunning.delete(env.DB));channelDrainRunning.set(env.DB,work);return work;
+}
+async function deliverChannelNotices(env){
+  if(await getSetting(env,'channel_notifications_enabled','1')!=='1')return;
+  const current=await getSetting(env,'force_channel_username','');if(!current)return;
+  const pending=await env.DB.prepare("SELECT id FROM channel_notice_events WHERE status='pending' AND next_at<=? AND lease_until<? LIMIT 1").bind(Date.now(),Date.now()).first();if(!pending)return;
+  const me=await callTg(env,'getMe',{}),username=me?.result?.username;
+  const link=typeof username==='string'&&/^[A-Za-z0-9_]+$/.test(username)?`https://t.me/${username}`:null;
+  const deadline=Math.min(Date.now()+8000,env.__noticeDeadline||Infinity);
+  for(let i=0;i<6&&Date.now()<deadline;i++){
+    const token=crypto.randomUUID(),now=Date.now();
+    const claim=await env.DB.prepare("UPDATE channel_notice_events SET lease_token=?,lease_until=? WHERE id=(SELECT id FROM channel_notice_events WHERE status='pending' AND next_at<=? AND lease_until<? ORDER BY id LIMIT 1) AND lease_until<?").bind(token,now+60000,now,now,now).run();if(!claim.meta?.changes)return;
+    const event=await env.DB.prepare('SELECT * FROM channel_notice_events WHERE lease_token=?').bind(token).first();
+    const product=event.product_id?await env.DB.prepare('SELECT p.*,s.stock FROM products p LEFT JOIN product_notice_state s ON s.product_id=p.id WHERE p.id=?').bind(event.product_id).first():null;
+    let text='',invalid=normalizeNoticeChannel(event.channel_id)!==normalizeNoticeChannel(current)||!normalizeNoticeChannel(current)||await getSetting(env,'channel_notice_'+event.kind,'1')!=='1';
+    if(['new_product','restock','sold_out','low_stock'].includes(event.kind)){
+      invalid=invalid||!product||product.is_active===0||(event.kind==='low_stock'&&!(product.stock>0&&product.stock<=5))||(event.kind==='sold_out'&&product.stock>0)||(event.kind==='restock'&&product.stock<=0);
+      const titles={new_product:'🆕 New Product',restock:'✅ Stock Added',sold_out:'📦 Sold Out',low_stock:'🔥 Last Chance to Purchase!'};
+      if(product)text=`<b>${titles[event.kind]}</b>\n\n${escapeHtml(productDisplayName(product))}\nPrice: <b>$${adminMoney(product.price_usd)}</b>\n${event.kind==='low_stock'?`Only <b>${product.stock}</b> left — order before stock runs out!`:`Available stock: <b>${Number(product.stock||0)}</b>`}`;
+    }else if(event.kind==='purchase'){
+      const order=await env.DB.prepare("SELECT product_name,quantity,amount_usd FROM orders WHERE id=? AND status='completed'").bind(event.order_id).first();invalid=invalid||!order;
+      if(order)text=`🛍️ <b>Purchase Completed!</b>\n\n${escapeHtml(order.product_name||product?.name||'Store Product')}\nQuantity: <b>${order.quantity||1}</b>\nTotal: <b>$${adminMoney(order.amount_usd)}</b>\n\nThank you for shopping with us!`;
+    }else if(event.kind==='deposit'){
+      const deposit=await env.DB.prepare("SELECT method,amount_usd FROM deposits WHERE id=? AND status='completed'").bind(event.deposit_id).first();invalid=invalid||!deposit;
+      if(deposit)text=`💳 <b>Deposit Completed!</b>\n\nAmount: <b>$${adminMoney(deposit.amount_usd)}</b>\nMethod: ${escapeHtml(deposit.method==='REDEEM'?'Redeem Code':deposit.method)}\n\nWallet top-up confirmed.`;
+    }else invalid=true;
+    if(invalid){await env.DB.prepare("UPDATE channel_notice_events SET status='superseded',lease_until=0 WHERE id=? AND lease_token=?").bind(event.id,token).run();continue;}
+    const keyboard=link?[[{text:event.product_id?'Open Product':'Open Store Bot',url:event.product_id?`${link}?start=product_${event.product_id}`:link}]]:null;
+    const sent=await sendMsg(env,normalizeNoticeChannel(event.channel_id),text,keyboard);
+    if(sent?.ok){await env.DB.prepare("UPDATE channel_notice_events SET status='sent',sent_at=CURRENT_TIMESTAMP,lease_until=0,last_error=NULL,attempts=attempts+1 WHERE id=? AND lease_token=?").bind(event.id,token).run();}
+    else{const delay=Math.max(30,Math.min(3600,Number(sent?.parameters?.retry_after)||300));await env.DB.prepare('UPDATE channel_notice_events SET next_at=?,lease_until=0,attempts=attempts+1,last_error=? WHERE id=? AND lease_token=?').bind(Date.now()+delay*1000,'Telegram '+(Number(sent?.error_code)||'unavailable'),event.id,token).run();return;}
+  }
+}
+async function showChannelNotices(env,chatId,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  const channel=await getSetting(env,'force_channel_username',''),keys=['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit'],labels=['All Channel Alerts','New Product','Stock Added','Stock Finished','Last 5 / Low Stock','Successful Purchase','Successful Deposit'];
+  const values=await Promise.all(keys.map(key=>getSetting(env,key,'1'))),pending=await env.DB.prepare("SELECT COUNT(*) AS n FROM channel_notice_events WHERE status='pending'").first(),issue=await env.DB.prepare('SELECT last_error FROM channel_notice_events WHERE last_error IS NOT NULL ORDER BY id DESC LIMIT 1').first();
+  const buttons=keys.map((key,i)=>[{text:`${labels[i]}: ${values[i]==='1'?'ON':'OFF'}`,callback_data:`adm_channel_toggle_${i}`}]);buttons.push([{text:'Retry Pending Channel Posts',callback_data:'adm_channel_retry'}],[{text:'Force Channel Settings',callback_data:'adm_force_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  const text=`📢 <b>Channel Notifications</b>\n\nForce channel: <code>${escapeHtml(channel||'Not configured')}</code>\nPending posts: ${pending.n}\nLast issue: ${escapeHtml(issue?.last_error||'None recorded')}\n\nThe bot must be an admin in this channel with permission to post messages. Posts do not expose customer identity, payment transaction IDs or product credentials. Low-stock posts trigger when stock enters 1–5, not on every remaining-item sale.`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function handleChannelNoticeCallback(env,chatId,data,messageId){
+  if(!adminUserAccess(env,chatId))return false;
+  if(data==='adm_channel_notices'){await showChannelNotices(env,chatId,messageId);return true;}
+  if(data==='adm_channel_retry'){await env.DB.prepare("UPDATE channel_notice_events SET next_at=0 WHERE status='pending' AND lease_until<?").bind(Date.now()).run();await drainChannelNotices(env);await showChannelNotices(env,chatId,messageId);return true;}
+  const match=data.match(/^adm_channel_toggle_([0-6])$/);if(match){const key=['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit'][Number(match[1])];await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,CASE WHEN COALESCE((SELECT value FROM settings WHERE key=?),'1')='1' THEN '0' ELSE '1' END)").bind(key,key).run();await showChannelNotices(env,chatId,messageId);return true;}return false;
+}
+
+function normalizeNoticeChannel(value){
+  const text=String(value||'').trim();if(/^-[0-9]+$/.test(text)||/^@[A-Za-z0-9_]{5,32}$/.test(text))return text;
+  const match=text.match(/^https?:\/\/t\.me\/([A-Za-z0-9_]{5,32})\/?$/i);return match?'@'+match[1]:null;
 }
