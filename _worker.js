@@ -4010,6 +4010,7 @@ async function showShopCategories(env,chatId,messageId=null,force=false,page=0,p
   const count=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND shop_category_id IS NULL').first();
   const pages=Math.max(1,Math.ceil(Number(count.count)/10));productPage=Math.min(pages-1,adminUserPage(Number.isSafeInteger(Number(productPage))?productPage:0));
   const {results:products}=await env.DB.prepare('SELECT p.*,CASE WHEN is_external=1 THEN COALESCE(api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS stock_qty FROM products p WHERE is_active=1 AND shop_category_id IS NULL ORDER BY p.id LIMIT 10 OFFSET ?').bind(productPage*10).all();
+  if(products.length)buttons.push([{text:'⠀',callback_data:'shop_section_spacer'}],[{text:'Others Product',callback_data:'shop_section_heading'}]);
   for(const product of products)buttons.push([productListButton(product,`prod_${product.id}`,!(product.is_external&&!sync.success))]);
   const productPager=[];if(productPage>0)productPager.push({text:'Previous Products',callback_data:`shoploose_${page}_${productPage-1}`});if(productPage<pages-1)productPager.push({text:'Next Products',callback_data:`shoploose_${page}_${productPage+1}`});if(productPager.length)buttons.push(productPager);
   buttons.push([{text:'🔄 Refresh',callback_data:`shoplooserefresh_${page}_${productPage}`} ,{text:'Main Menu',callback_data:'home'}]);
@@ -4044,6 +4045,7 @@ async function showAdminCategories(env,chatId,productId=null,page=0,messageId=nu
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleCategoryCallback(env,chatId,data,messageId){
+  if(data==='shop_section_spacer'||data==='shop_section_heading')return true;
   let loose=data.match(/^(shoploose|shoplooserefresh)_(\d+)_(\d+)$/);if(loose){await clearBinanceInput(env,chatId);await clearTicketInput(env,chatId);await showShopCategories(env,chatId,messageId,loose[1]==='shoplooserefresh',Number(loose[2]),Number(loose[3]));return true;}
   let match=data.match(/^(shopcat|shopcatrefresh)_(\d+)_(\d+)$/);if(match){await clearBinanceInput(env,chatId);await clearTicketInput(env,chatId);await sendCategoryProducts(env,chatId,Number(match[2]),Number(match[3]),messageId,match[1]==='shopcatrefresh');return true;}
   if(!adminUserAccess(env,chatId))return false;

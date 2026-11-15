@@ -47,3 +47,5 @@ Icons persist independently of provider sync and category assignment. The migrat
 ## Products without a category
 
 Shop shows the two-column category buttons first, followed by active products without a category as individual product buttons. These product buttons retain their prices, icons and stock styles. Unassigned products paginate ten per page with Next/Previous Products; this pagination is independent of category pagination. Refresh retains the current category and product pages. Returning from an unassigned product restores its page below the category list. Old links to category zero redirect to this Shop view. Empty named categories still display (0).
+
+Unassigned products are separated from category buttons by a spacer row and an **Others Product** section label. Telegram inline keyboards do not support standalone text between button rows, so these are inert display rows; tapping them is acknowledged without navigation or purchase. The section is hidden when there are no unassigned products.
