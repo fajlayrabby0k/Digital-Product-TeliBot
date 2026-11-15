@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-category-icons-1";
+const BOT_BUILD="2026-11-15-shop-uncategorized-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -4000,18 +4000,24 @@ async function ensureCategory(env,name,restore=false){
   const row=await env.DB.prepare('SELECT id,is_deleted FROM product_categories WHERE name=? COLLATE NOCASE').bind(name).first();
   return row?.is_deleted?null:row?.id;
 }
-async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
-  await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
-  const {results}=await env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 GROUP BY c.id UNION ALL SELECT 0 AS id,'অন্যান্য' AS name,NULL AS custom_icon,COUNT(*) AS count FROM products WHERE is_active=1 AND shop_category_id IS NULL ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
+async function showShopCategories(env,chatId,messageId=null,force=false,page=0,productPage=0){
+  const sync=await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
+  const {results}=await env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 GROUP BY c.id ORDER BY c.name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
   const categoryButtons=results.slice(0,10).map(c=>categoryButton(c,`shopcat_${c.id}_0`,true));
   const buttons=[];for(let i=0;i<categoryButtons.length;i+=2)buttons.push(categoryButtons.slice(i,i+2));
   const pager=[];
-  if(page>0)pager.push({text:'Previous',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
-  buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'Main Menu',callback_data:'home'}]);
-  const text=`📂 <b>Shop Categories</b>\n\n${results.length?'Choose a category to browse its products.':'No products are available yet.'}`;
+  if(page>0)pager.push({text:'Previous Categories',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next Categories',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
+  const count=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND shop_category_id IS NULL').first();
+  const pages=Math.max(1,Math.ceil(Number(count.count)/10));productPage=Math.min(pages-1,adminUserPage(Number.isSafeInteger(Number(productPage))?productPage:0));
+  const {results:products}=await env.DB.prepare('SELECT p.*,CASE WHEN is_external=1 THEN COALESCE(api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS stock_qty FROM products p WHERE is_active=1 AND shop_category_id IS NULL ORDER BY p.id LIMIT 10 OFFSET ?').bind(productPage*10).all();
+  for(const product of products)buttons.push([productListButton(product,`prod_${product.id}`,!(product.is_external&&!sync.success))]);
+  const productPager=[];if(productPage>0)productPager.push({text:'Previous Products',callback_data:`shoploose_${page}_${productPage-1}`});if(productPage<pages-1)productPager.push({text:'Next Products',callback_data:`shoploose_${page}_${productPage+1}`});if(productPager.length)buttons.push(productPager);
+  buttons.push([{text:'🔄 Refresh',callback_data:`shoplooserefresh_${page}_${productPage}`} ,{text:'Main Menu',callback_data:'home'}]);
+  const text=`📂 <b>Shop</b>\n\n${results.length?'Choose a category, or select a product below.':products.length?'Select a product below.':'No products are available yet.'}${products.length?`\n\nProducts without a category appear below the category buttons.\nPage ${productPage+1}/${pages} · ${count.count} products`:''}`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,force=false){
+  if(!category){await showShopCategories(env,chatId,messageId,force,0,page);return;}
   const sync=await syncExternalProducts(env,null,null,false,null,force);
   const cat=category?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first():{name:'অন্যান্য'};
   if(!cat){await showShopCategories(env,chatId,messageId);return;}
@@ -4031,13 +4037,14 @@ async function showAdminCategories(env,chatId,productId=null,page=0,messageId=nu
   const {results}=await env.DB.prepare('SELECT * FROM product_categories WHERE is_deleted=0 ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?').bind(page*10).all();
   const buttons=[[{text:'➕ Create New Category',callback_data:`adm_cat_create_${productId||0}`}],...results.slice(0,10).map(c=>[{text:c.name,callback_data:product?`adm_cat_assign_${productId}_${c.id}`:`adm_cat_view_${c.id}`}])],prefix=product?`adm_cat_product_${productId}_`:'adm_categories_',pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:prefix+(page-1)});if(results.length>10)pager.push({text:'Next',callback_data:prefix+(page+1)});if(pager.length)buttons.push(pager);
-  if(product)buttons.push([{text:'অন্যান্য',callback_data:`adm_cat_assign_${productId}_0`}],[{text:'Use API Category / Default',callback_data:`adm_cat_default_${productId}`}]);
+  if(product)buttons.push([{text:'No Category',callback_data:`adm_cat_assign_${productId}_0`}],[{text:'Use API Category / Default',callback_data:`adm_cat_default_${productId}`}]);
   buttons.push([{text:product?'Product':'Admin Panel',callback_data:product?`adm_prod_details_${productId}`:'admin_panel'}]);
-  let current='';if(product){const c=product.shop_category_id?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(product.shop_category_id).first():null;current=`\nProduct: ${adminSnippet(productDisplayName(product),100)}\nCurrent: ${escapeHtml(c?.name||'অন্যান্য')}\nRule: ${product.category_override?'Admin choice (kept after API sync)':'API category / default'}\n`;}
+  let current='';if(product){const c=product.shop_category_id?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(product.shop_category_id).first():null;current=`\nProduct: ${adminSnippet(productDisplayName(product),100)}\nCurrent: ${escapeHtml(c?.name||'No Category')}\nRule: ${product.category_override?'Admin choice (kept after API sync)':'API category / default'}\n`;}
   const text=`📂 <b>${product?'Choose Product Category':'Manage Categories'}</b>\n${current}\n${product?'Choose a category below.':'Tap Create New Category above to add one. Select a category to view or delete it. Assign products from Manage Products → product → Set Category.'}`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleCategoryCallback(env,chatId,data,messageId){
+  let loose=data.match(/^(shoploose|shoplooserefresh)_(\d+)_(\d+)$/);if(loose){await clearBinanceInput(env,chatId);await clearTicketInput(env,chatId);await showShopCategories(env,chatId,messageId,loose[1]==='shoplooserefresh',Number(loose[2]),Number(loose[3]));return true;}
   let match=data.match(/^(shopcat|shopcatrefresh)_(\d+)_(\d+)$/);if(match){await clearBinanceInput(env,chatId);await clearTicketInput(env,chatId);await sendCategoryProducts(env,chatId,Number(match[2]),Number(match[3]),messageId,match[1]==='shopcatrefresh');return true;}
   if(!adminUserAccess(env,chatId))return false;
   orderStage(env,'category.manage');
@@ -4050,7 +4057,7 @@ async function handleCategoryCallback(env,chatId,data,messageId){
   match=data.match(/^adm_cat_view_(\d+)$/);if(match){await showCategoryAdminDetail(env,chatId,match[1],messageId);return true;}
   match=data.match(/^adm_cat_(delete|confirmdelete)_(\d+)$/);if(match){
     const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(match[2]).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return true;}
-    if(match[1]==='delete'){await editMsg(env,chatId,messageId,`Delete <b>${escapeHtml(cat.name)}</b>?\n\nProducts will remain and move to অন্যান্য. API sync will not recreate this category unless you create it again.`,[[{text:'Delete Category',callback_data:`adm_cat_confirmdelete_${cat.id}`}],[{text:'Cancel',callback_data:`adm_cat_view_${cat.id}`}]]);return true;}
+    if(match[1]==='delete'){await editMsg(env,chatId,messageId,`Delete <b>${escapeHtml(cat.name)}</b>?\n\nProducts will remain and appear directly below the category buttons in Shop. API sync will not recreate this category unless you create it again.`,[[{text:'Delete Category',callback_data:`adm_cat_confirmdelete_${cat.id}`}],[{text:'Cancel',callback_data:`adm_cat_view_${cat.id}`}]]);return true;}
     await env.DB.batch([env.DB.prepare('UPDATE products SET shop_category_id=NULL,category_override=1 WHERE shop_category_id=?').bind(cat.id),env.DB.prepare('UPDATE products SET provider_category_id=NULL WHERE provider_category_id=?').bind(cat.id),env.DB.prepare('UPDATE product_categories SET is_deleted=1 WHERE id=?').bind(cat.id)]);
     providerCatalogCache.delete(env.DB);await showAdminCategories(env,chatId,null,0,messageId);return true;
   }return false;
