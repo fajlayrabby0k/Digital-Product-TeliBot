@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-category-foreign-key-fix-1";
+const BOT_BUILD="2026-11-15-category-icons-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-category-foreign-key-fix-1";
+const DB_SCHEMA_VERSION = "2026-11-category-icons-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -181,6 +181,7 @@ async function initializeDatabase(db, force) {
     else for (const q of schema) await db.prepare(q).run();
 
     const alters = [
+      "ALTER TABLE product_categories ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE product_categories ADD COLUMN is_deleted INTEGER DEFAULT 0;",
       // Historical preorder tables stored product names without a numeric product_id.
       // Keep those rows intact and unlinked; never guess a product/account for an old request.
@@ -1301,7 +1302,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
-        if (await handleCategoryText(env,chatId,text,adminState))return;
+        if (await handleCategoryText(env,chatId,text,adminState,msg))return;
         if (await handleAdminCoreText(env,chatId,text,adminState))return;
         if (await handleOrderSearchText(env,chatId,text,adminState))return;
         if (await handleTicketText(env,chatId,text,adminState,true))return;
@@ -4001,8 +4002,10 @@ async function ensureCategory(env,name,restore=false){
 }
 async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
   await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
-  const {results}=await env.DB.prepare("SELECT COALESCE(c.id,0) AS id,COALESCE(c.name,'অন্যান্য') AS name,COUNT(*) AS count FROM products p LEFT JOIN product_categories c ON c.id=p.shop_category_id AND c.is_deleted=0 WHERE p.is_active=1 GROUP BY COALESCE(c.id,0) ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
-  const buttons=results.slice(0,10).map(c=>[{text:`${c.name} (${c.count})`,callback_data:`shopcat_${c.id}_0`}]),pager=[];
+  const {results}=await env.DB.prepare("SELECT COALESCE(c.id,0) AS id,COALESCE(c.name,'অন্যান্য') AS name,c.custom_icon,COUNT(*) AS count FROM products p LEFT JOIN product_categories c ON c.id=p.shop_category_id AND c.is_deleted=0 WHERE p.is_active=1 GROUP BY COALESCE(c.id,0) ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
+  const categoryButtons=results.slice(0,10).map(c=>categoryButton(c,`shopcat_${c.id}_0`,true));
+  const buttons=[];for(let i=0;i<categoryButtons.length;i+=2)buttons.push(categoryButtons.slice(i,i+2));
+  const pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'Main Menu',callback_data:'home'}]);
   const text=`📂 <b>Shop Categories</b>\n\n${results.length?'Choose a category to browse its products.':'No products are available yet.'}`;
@@ -4040,6 +4043,7 @@ async function handleCategoryCallback(env,chatId,data,messageId){
   orderStage(env,'category.manage');
   match=data.match(/^adm_categories_(\d+)$/);if(match){await showAdminCategories(env,chatId,null,match[1],messageId);return true;}
   match=data.match(/^adm_cat_product_(\d+)_(\d+)$/);if(match){await showAdminCategories(env,chatId,match[1],match[2],messageId);return true;}
+  match=data.match(/^adm_cat_icon_(\d+)$/);if(match){await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_icon',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,'Send an emoji or a Telegram Custom Emoji ID. Send /remove to clear it. No icon is used by default.',[[{text:'Cancel',callback_data:`adm_cat_view_${match[1]}`}]]);return true;}
   match=data.match(/^adm_cat_create_(\d+)$/);if(match){await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_name',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,'Enter a category name (1–60 characters), e.g. AI Tools, VPN or Streaming.',[[{text:'Cancel',callback_data:match[1]==='0'?'adm_categories_0':`adm_cat_product_${match[1]}_0`}]]);return true;}
   match=data.match(/^adm_cat_assign_(\d+)_(\d+)$/);if(match){const category=Number(match[2]);if(category&&!await env.DB.prepare('SELECT id FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first())return true;await env.DB.prepare('UPDATE products SET shop_category_id=?,category_override=1 WHERE id=?').bind(category||null,match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
   match=data.match(/^adm_cat_default_(\d+)$/);if(match){await env.DB.prepare('UPDATE products SET shop_category_id=(SELECT id FROM product_categories WHERE id=products.provider_category_id AND is_deleted=0),category_override=0 WHERE id=?').bind(match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
@@ -4051,8 +4055,15 @@ async function handleCategoryCallback(env,chatId,data,messageId){
     providerCatalogCache.delete(env.DB);await showAdminCategories(env,chatId,null,0,messageId);return true;
   }return false;
 }
-async function handleCategoryText(env,chatId,text,state){
-  if(!adminUserAccess(env,chatId)||state.state!=='awaiting_category_name')return false;
+async function handleCategoryText(env,chatId,text,state,msg=null){
+  if(!adminUserAccess(env,chatId))return false;
+  if(state.state==='awaiting_category_icon'){
+    const entity=msg?.entities?.find(e=>e.type==='custom_emoji');
+    const icon=text==='/remove'?null:entity?.custom_emoji_id||String(text).trim();
+    if(icon!==null&&!/^\d{10,22}$/.test(icon)&&!validProductIcon(icon)){await sendMsg(env,chatId,'Send one emoji, a Custom Emoji ID, or /remove.');return true;}
+    await env.DB.prepare('UPDATE product_categories SET custom_icon=? WHERE id=? AND is_deleted=0').bind(icon,state.data).run();await clearAdminState(env,chatId);await showCategoryAdminDetail(env,chatId,state.data);return true;
+  }
+  if(state.state!=='awaiting_category_name')return false;
   const name=String(text).trim();if(!name||name.length>60||/[\r\n]/.test(name)||name==='অন্যান্য'){await sendMsg(env,chatId,'Enter a unique category name of 1–60 characters. অন্যান্য is the built-in default.');return true;}
   const id=await ensureCategory(env,name,true);providerCatalogCache.delete(env.DB);await clearAdminState(env,chatId);
   if(Number(state.data)){await env.DB.prepare('UPDATE products SET shop_category_id=?,category_override=1 WHERE id=?').bind(id,state.data).run();await showAdminCategories(env,chatId,state.data);}else await showAdminCategories(env,chatId);
@@ -4064,5 +4075,11 @@ async function showCategoryAdminDetail(env,chatId,id,messageId){
   if(!adminUserAccess(env,chatId))return;
   const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(id).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return;}
   const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM products WHERE shop_category_id=? AND is_active=1').bind(id).first();
-  await editMsg(env,chatId,messageId,`<b>${escapeHtml(cat.name)}</b>\n\nActive products: ${count.n}\n\nAssign products from Manage Products → product → Set Category. Deleting a category keeps its products.`,[[{text:'View Products',callback_data:`shopcat_${cat.id}_0`}],[{text:'🗑️ Delete Category',callback_data:`adm_cat_delete_${cat.id}`}],[{text:'⬅️ Back to Categories',callback_data:'adm_categories_0'}]]);
+  await editMsg(env,chatId,messageId,`<b>${escapeHtml(cat.name)}</b>\n\nActive products: ${count.n}\n\nAssign products from Manage Products → product → Set Category. Deleting a category keeps its products.`,[[{text:'View Products',callback_data:`shopcat_${cat.id}_0`}],[{text:'🎨 Set Category Icon',callback_data:`adm_cat_icon_${cat.id}`}],[{text:'🗑️ Delete Category',callback_data:`adm_cat_delete_${cat.id}`}],[{text:'⬅️ Back to Categories',callback_data:'adm_categories_0'}]]);
+}
+
+
+function categoryButton(category,callback,count=false){
+  const icon=category.custom_icon,custom=typeof icon==='string'&&/^\d{10,22}$/.test(icon);
+  return {text:`${icon&&!custom?icon+' ':''}${category.name}${count?' ('+category.count+')':''}`,callback_data:callback,style:'primary',...(custom?{icon_custom_emoji_id:icon}:{})};
 }

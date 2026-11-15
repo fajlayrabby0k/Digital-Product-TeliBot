@@ -33,3 +33,12 @@ Build `2026-11-15-category-foreign-key-fix-1` uses `products.shop_category_id` f
 On first upgrade, saved selections from a compatible previous category_id column are copied only if it has no conflicting foreign key and the destination category exists. Relationships to another legacy table are not guessed or remapped. Once shop_category_id exists, repeated migrations never copy old selections back over current choices. This is an additive migration; product/order/balance data is preserved.
 
 `node tests/legacy-category-foreign-key.cjs` enables SQLite foreign keys, reproduces the failing old assignment, then verifies migration, assign/create/delete, preservation of the legacy relationship, compatible-selection upgrade and repeat initialization.
+
+
+## Two-column buttons and optional icons
+
+Customer category buttons use two columns and Telegram's primary button style. Existing names/counts are retained; no icon is assigned automatically. Native button colors/rendering depend on Telegram client support.
+
+Set an icon from **Admin Panel → Categories → category → Set Category Icon**. Send a single ordinary emoji, a Telegram custom emoji, or its numeric Custom Emoji ID. Send `/remove` to clear it. Custom IDs remain strings and use the native `icon_custom_emoji_id` button field; ordinary emoji prefix the label. The existing Telegram fallback handles clients/API permissions that reject custom button icons. Uploaded image URLs are not button icons.
+
+Icons persist independently of provider sync and category assignment. The migration adds a nullable `product_categories.custom_icon`; existing categories remain icon-free. Category tests cover two-column rows, ordinary/custom icons, removal and access checks.
