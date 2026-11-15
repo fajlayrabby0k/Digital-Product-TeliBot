@@ -1622,8 +1622,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     const shopReturn=data.match(/^shop_return_(\d+)$/);
     if(shopReturn){
       const product=await env.DB.prepare('SELECT p.shop_category_id,c.name AS category_name FROM products p LEFT JOIN product_categories c ON c.id=p.shop_category_id WHERE p.id=?').bind(shopReturn[1]).first();
-      const category=product?.category_name?.toLowerCase()==='subscription'?0:Number(product?.shop_category_id||0);
-      const rank=await env.DB.prepare("SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND (COALESCE(shop_category_id,0)=? OR (?=0 AND shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name)='subscription' AND is_deleted=0))) AND id<?").bind(category,category,shopReturn[1]).first();
+      const category=['subscription','others subscription'].includes(product?.category_name?.toLowerCase())?0:Number(product?.shop_category_id||0);
+      const rank=await env.DB.prepare("SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND (COALESCE(shop_category_id,0)=? OR (?=0 AND shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name) IN ('subscription','others subscription') AND is_deleted=0))) AND id<?").bind(category,category,shopReturn[1]).first();
       await sendCategoryProducts(env,chatId,category,Math.floor(Number(rank?.count||0)/10),messageId);
       return;
     }
@@ -3975,7 +3975,7 @@ async function ensureCategory(env,name,restore=false){
 }
 async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
   await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
-  const {results}=await env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count,0 AS sort_order FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 AND LOWER(c.name)<>'subscription' GROUP BY c.id UNION ALL SELECT 0 AS id,'Subscription' AS name,NULL AS custom_icon,COUNT(*) AS count,1 AS sort_order FROM products WHERE is_active=1 AND (shop_category_id IS NULL OR shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name)='subscription' AND is_deleted=0)) ORDER BY sort_order,name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
+  const {results}=await env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count,0 AS sort_order FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 AND LOWER(c.name) NOT IN ('subscription','others subscription') GROUP BY c.id UNION ALL SELECT 0 AS id,'Others Subscription' AS name,NULL AS custom_icon,COUNT(*) AS count,1 AS sort_order FROM products WHERE is_active=1 AND (shop_category_id IS NULL OR shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name) IN ('subscription','others subscription') AND is_deleted=0)) ORDER BY sort_order,name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
   const choices=results.slice(0,10).map(c=>categoryButton(c,`shopcat_${c.id}_0`,true)),buttons=[];
   for(let i=0;i<choices.length;i+=2)buttons.push(choices.slice(i,i+2));
   const pager=[];if(page>0)pager.push({text:'Previous Categories',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next Categories',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
@@ -3985,12 +3985,12 @@ async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
 }
 async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,force=false){
   const sync=await syncExternalProducts(env,null,null,false,null,force);
-  const cat=category?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first():{name:'Subscription'};
-  if(cat?.name.toLowerCase()==='subscription')category=0;
+  const cat=category?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first():{name:'Others Subscription'};
+  if(['subscription','others subscription'].includes(cat?.name.toLowerCase())){category=0;cat.name='Others Subscription';}
   if(!cat){await showShopCategories(env,chatId,messageId);return;}
-  const count=await env.DB.prepare("SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND (COALESCE(shop_category_id,0)=? OR (?=0 AND shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name)='subscription' AND is_deleted=0)))").bind(category,category).first();
+  const count=await env.DB.prepare("SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND (COALESCE(shop_category_id,0)=? OR (?=0 AND shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name) IN ('subscription','others subscription') AND is_deleted=0)))").bind(category,category).first();
   const pages=Math.max(1,Math.ceil(Number(count.count)/10));page=Math.min(pages-1,adminUserPage(Number.isSafeInteger(Number(page))?page:0));
-  const {results}=await env.DB.prepare("SELECT p.*,CASE WHEN is_external=1 THEN COALESCE(api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS stock_qty FROM products p WHERE is_active=1 AND (COALESCE(shop_category_id,0)=? OR (?=0 AND shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name)='subscription' AND is_deleted=0))) ORDER BY p.id LIMIT 10 OFFSET ?").bind(category,category,page*10).all();
+  const {results}=await env.DB.prepare("SELECT p.*,CASE WHEN is_external=1 THEN COALESCE(api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS stock_qty FROM products p WHERE is_active=1 AND (COALESCE(shop_category_id,0)=? OR (?=0 AND shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name) IN ('subscription','others subscription') AND is_deleted=0))) ORDER BY p.id LIMIT 10 OFFSET ?").bind(category,category,page*10).all();
   const buttons=results.map(p=>[productListButton(p,`prod_${p.id}`,!(p.is_external&&!sync.success))]),pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:`shopcat_${category}_${page-1}`});if(page<pages-1)pager.push({text:'Next',callback_data:`shopcat_${category}_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔄 Refresh Stock',callback_data:`shopcatrefresh_${category}_${page}`}],[{text:'⬅️ Back to Categories',callback_data:'shop'},{text:'Main Menu',callback_data:'home'}]);
@@ -4004,9 +4004,9 @@ async function showAdminCategories(env,chatId,productId=null,page=0,messageId=nu
   const {results}=await env.DB.prepare('SELECT * FROM product_categories WHERE is_deleted=0 ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?').bind(page*10).all();
   const buttons=[[{text:'➕ Create New Category',callback_data:`adm_cat_create_${productId||0}`}],...results.slice(0,10).map(c=>[{text:c.name,callback_data:product?`adm_cat_assign_${productId}_${c.id}`:`adm_cat_view_${c.id}`}])],prefix=product?`adm_cat_product_${productId}_`:'adm_categories_',pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:prefix+(page-1)});if(results.length>10)pager.push({text:'Next',callback_data:prefix+(page+1)});if(pager.length)buttons.push(pager);
-  if(product)buttons.push([{text:'Subscription (Default)',callback_data:`adm_cat_assign_${productId}_0`}],[{text:'Use API Category / Default',callback_data:`adm_cat_default_${productId}`}]);
+  if(product)buttons.push([{text:'Others Subscription (Default)',callback_data:`adm_cat_assign_${productId}_0`}],[{text:'Use API Category / Default',callback_data:`adm_cat_default_${productId}`}]);
   buttons.push([{text:product?'Product':'Admin Panel',callback_data:product?`adm_prod_details_${productId}`:'admin_panel'}]);
-  let current='';if(product){const c=product.shop_category_id?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(product.shop_category_id).first():null;current=`\nProduct: ${adminSnippet(productDisplayName(product),100)}\nCurrent: ${escapeHtml(c?.name||'Subscription')}\nRule: ${product.category_override?'Admin choice (kept after API sync)':'API category / default'}\n`;}
+  let current='';if(product){const c=product.shop_category_id?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(product.shop_category_id).first():null;current=`\nProduct: ${adminSnippet(productDisplayName(product),100)}\nCurrent: ${escapeHtml(c?.name||'Others Subscription')}\nRule: ${product.category_override?'Admin choice (kept after API sync)':'API category / default'}\n`;}
   const text=`📂 <b>${product?'Choose Product Category':'Manage Categories'}</b>\n${current}\n${product?'Choose a category below.':'Tap Create New Category above to add one. Select a category to view or delete it. Assign products from Manage Products → product → Set Category.'}`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
@@ -4025,7 +4025,7 @@ async function handleCategoryCallback(env,chatId,data,messageId){
   match=data.match(/^adm_cat_view_(\d+)$/);if(match){await showCategoryAdminDetail(env,chatId,match[1],messageId);return true;}
   match=data.match(/^adm_cat_(delete|confirmdelete)_(\d+)$/);if(match){
     const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(match[2]).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return true;}
-    if(match[1]==='delete'){await editMsg(env,chatId,messageId,`Delete <b>${escapeHtml(cat.name)}</b>?\n\nProducts will remain and move to Subscription. API sync will not recreate this category unless you create it again.`,[[{text:'Delete Category',callback_data:`adm_cat_confirmdelete_${cat.id}`}],[{text:'Cancel',callback_data:`adm_cat_view_${cat.id}`}]]);return true;}
+    if(match[1]==='delete'){await editMsg(env,chatId,messageId,`Delete <b>${escapeHtml(cat.name)}</b>?\n\nProducts will remain and move to Others Subscription. API sync will not recreate this category unless you create it again.`,[[{text:'Delete Category',callback_data:`adm_cat_confirmdelete_${cat.id}`}],[{text:'Cancel',callback_data:`adm_cat_view_${cat.id}`}]]);return true;}
     await env.DB.batch([env.DB.prepare('UPDATE products SET shop_category_id=NULL,category_override=1 WHERE shop_category_id=?').bind(cat.id),env.DB.prepare('UPDATE products SET provider_category_id=NULL WHERE provider_category_id=?').bind(cat.id),env.DB.prepare('UPDATE product_categories SET is_deleted=1 WHERE id=?').bind(cat.id)]);
     providerCatalogCache.delete(env.DB);await showAdminCategories(env,chatId,null,0,messageId);return true;
   }return false;
@@ -4067,13 +4067,13 @@ async function showNewProductCategories(env,chatId,page=0,messageId=null){
   const choices=results.slice(0,10).map(c=>categoryButton(c,`adm_newcategory_${c.id}`)),buttons=[];
   for(let i=0;i<choices.length;i+=2)buttons.push(choices.slice(i,i+2));
   const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_newcategories_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_newcategories_${page+1}`});if(pager.length)buttons.push(pager);
-  buttons.push([{text:'➕ Create New Category',callback_data:'adm_newcategory_create'}],[{text:'Subscription (Default)',callback_data:'adm_newcategory_0'}],[{text:'Cancel',callback_data:'admin_panel'}]);
+  buttons.push([{text:'➕ Create New Category',callback_data:'adm_newcategory_create'}],[{text:'Others Subscription (Default)',callback_data:'adm_newcategory_0'}],[{text:'Cancel',callback_data:'admin_panel'}]);
   const text=`➕ <b>Add New Product · Step 1/5: Category</b>\n\n${results.length?'Choose one of your existing categories below.':'No categories created yet. Create a category or continue without one.'}\nThe product will be saved in the category you select.`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function beginProductInCategory(env,chatId,categoryId,messageId=null){
   if(!adminUserAccess(env,chatId))return;
-  const category=categoryId?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(categoryId).first():{name:'Subscription'};
+  const category=categoryId?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(categoryId).first():{name:'Others Subscription'};
   if(!category){await showNewProductCategories(env,chatId,0,messageId);return;}
   await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_prod_name',?)").bind(chatId,JSON.stringify({categoryId,icon:''})).run();
   const text=`➕ <b>Add Product · Step 2/5: Name</b>\n\nCategory: <b>${escapeHtml(category.name)}</b>\n\nEnter the product name.`;
