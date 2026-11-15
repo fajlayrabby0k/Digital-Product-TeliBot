@@ -4006,7 +4006,7 @@ async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,fo
   const {results}=await env.DB.prepare('SELECT p.*,CASE WHEN is_external=1 THEN COALESCE(api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS stock_qty FROM products p WHERE is_active=1 AND COALESCE(category_id,0)=? ORDER BY p.id LIMIT 10 OFFSET ?').bind(category,page*10).all();
   const buttons=results.map(p=>[productListButton(p,`prod_${p.id}`,!(p.is_external&&!sync.success))]),pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:`shopcat_${category}_${page-1}`});if(page<pages-1)pager.push({text:'Next',callback_data:`shopcat_${category}_${page+1}`});if(pager.length)buttons.push(pager);
-  buttons.push([{text:'🔄 Refresh Stock',callback_data:`shopcatrefresh_${category}_${page}`}],[{text:'📂 Categories',callback_data:'shop'},{text:'Main Menu',callback_data:'home'}]);
+  buttons.push([{text:'🔄 Refresh Stock',callback_data:`shopcatrefresh_${category}_${page}`}],[{text:'⬅️ Back to Categories',callback_data:'shop'},{text:'Main Menu',callback_data:'home'}]);
   const text=`🛍️ <b>${escapeHtml(cat.name)}</b>\nPage ${page+1}/${pages} · ${count.count} products\n\n${results.length?'Click any product below to view details and order:':'No products in this category yet.'}`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
