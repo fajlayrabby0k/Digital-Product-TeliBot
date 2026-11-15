@@ -49,3 +49,10 @@ Icons persist independently of provider sync and category assignment. The migrat
 Shop shows the two-column category buttons first, followed by active products without a category as individual product buttons. These product buttons retain their prices, icons and stock styles. Unassigned products paginate ten per page with Next/Previous Products; this pagination is independent of category pagination. Refresh retains the current category and product pages. Returning from an unassigned product restores its page below the category list. Old links to category zero redirect to this Shop view. Empty named categories still display (0).
 
 Unassigned products are separated from category buttons by a spacer row and an **Others Product** section label. Telegram inline keyboards do not support standalone text between button rows, so these are inert display rows; tapping them is acknowledged without navigation or purchase. The section is hidden when there are no unassigned products.
+
+
+## Choose category while creating a product
+
+Add New Product now starts with the actual saved category list (two columns, ten categories per page), replacing the old preset icon buttons. Choosing a category starts the name → description → purchase cost → selling price flow. The category is saved atomically with the product as an admin choice. No Category keeps it in Others Product below the category list.
+
+Create New Category is available in this picker; after entering the name, product creation continues in that new category. A selected category deleted before saving is rejected without creating the product. Old icon-selection buttons redirect to the category picker; product icons remain editable separately from Manage Products.

@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-shop-uncategorized-1";
+const BOT_BUILD="2026-11-15-product-category-picker-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1985,41 +1985,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       return;
     }
 
-    if (data === "adm_add_product") {
-      await editMsg(env, chatId, messageId, `➕ <b>Add New Product — Step 1/5: Choose an Icon</b>\n\nSelect an attractive icon for this product from the presets below, or choose 'Skip' to type your own:`, [
-        [
-          { text: "🤖 AI Tool", callback_data: "adm_newicon_🤖" },
-          { text: "🍿 Streaming", callback_data: "adm_newicon_🍿" },
-          { text: "🎵 Music", callback_data: "adm_newicon_🎵" }
-        ],
-        [
-          { text: "🛡️ VPN", callback_data: "adm_newicon_🛡️" },
-          { text: "🎨 Design", callback_data: "adm_newicon_🎨" },
-          { text: "🔑 License", callback_data: "adm_newicon_🔑" }
-        ],
-        [
-          { text: "📺 OTT / Video", callback_data: "adm_newicon_📺" },
-          { text: "🎓 Education", callback_data: "adm_newicon_🎓" },
-          { text: "💎 Premium", callback_data: "adm_newicon_💎" }
-        ],
-        [
-          { text: "⚡ General", callback_data: "adm_newicon_⚡" },
-          { text: "🛍️ Digital", callback_data: "adm_newicon_🛍️" },
-          { text: "⏩ Skip / Type Own", callback_data: "adm_newicon_NONE" }
-        ],
-        [{ text: "❌ Cancel", callback_data: "admin_panel" }]
-      ]);
-      return;
-    }
-
-    if (data.startsWith("adm_newicon_")) {
-      const icon = data.replace("adm_newicon_", "");
-      const iconData = { icon: icon === "NONE" ? "" : icon };
-      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_prod_name', ?)").bind(chatId, JSON.stringify(iconData)).run();
-      await editMsg(env, chatId, messageId, `➕ <b>Add Product — Step 2/5: Product Name</b>\n\nSelected Icon: <b>${icon === "NONE" ? "None / Custom" : icon}</b>\n\nPlease enter the <b>Name</b> of the product:\n<i>(Example: Amazon Prime 6 Months)</i>`, [
-        [{ text: "❌ Cancel", callback_data: "admin_panel" }]
-      ]);
-      return;
+    if(data==='adm_add_product'||data.startsWith('adm_newicon_')){await showNewProductCategories(env,chatId,0,messageId);return;}
+    const newCategoryPage=data.match(/^adm_newcategories_(\d+)$/);if(newCategoryPage){await showNewProductCategories(env,chatId,newCategoryPage[1],messageId);return;}
+    const newProductCategory=data.match(/^adm_newcategory_(\d+)$/);if(newProductCategory){await beginProductInCategory(env,chatId,Number(newProductCategory[1]),messageId);return;}
+    if(data==='adm_newcategory_create'){
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_name','new_product')").bind(chatId).run();
+      await editMsg(env,chatId,messageId,'Enter the new category name (1–60 characters). The new product will use this category.',[[{text:'Back',callback_data:'adm_add_product'}]]);return;
     }
 
     if (data.startsWith("adm_icon_") || data.startsWith("adm_iconpick_") || data.startsWith("adm_iconcustom_")) {
@@ -3674,9 +3645,11 @@ async function handleLocalProductText(env,chatId,text,state){
   if(!Number.isFinite(draft.cost)||!draft.name||!draft.description){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Product draft is incomplete. Please restart Add New Product.');return true;}
   const rate=Number(await getSetting(env,'usd_to_bdt_rate','125'));
   if(!Number.isFinite(rate)||rate<=0){await sendMsg(env,chatId,'Set a valid USD to BDT exchange rate first.');return true;}
+  const selectedCategory=Number(draft.categoryId||0);
+  if(selectedCategory&&!await env.DB.prepare('SELECT id FROM product_categories WHERE id=? AND is_deleted=0').bind(selectedCategory).first()){await clearAdminState(env,chatId);await sendMsg(env,chatId,'The selected category was deleted. Start Add New Product and choose a category again.',[[{text:'Add New Product',callback_data:'adm_add_product'}]]);return true;}
   const name=(draft.icon?draft.icon+' ':'')+draft.name;
   const result=await env.DB.batch([
-    env.DB.prepare("INSERT INTO products(name,description,price_usd,price_bdt,purchase_cost_usd,is_external,is_active) SELECT ?,?,?,?,?,0,1 WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='awaiting_prod_sale' AND data=?)").bind(name,draft.description,value,Math.round(value*rate),draft.cost,chatId,state.data),
+    env.DB.prepare("INSERT INTO products(name,description,price_usd,price_bdt,purchase_cost_usd,shop_category_id,category_override,is_external,is_active) SELECT ?,?,?,?,?,?,1,0,1 WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='awaiting_prod_sale' AND data=?) AND (? IS NULL OR EXISTS(SELECT 1 FROM product_categories WHERE id=? AND is_deleted=0))").bind(name,draft.description,value,Math.round(value*rate),draft.cost,selectedCategory||null,chatId,state.data,selectedCategory||null,selectedCategory||null),
     env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='awaiting_prod_sale' AND data=?").bind(chatId,state.data)
   ]);
   if(!result[0].meta?.changes){await sendMsg(env,chatId,'Product draft was already saved or cancelled.');return true;}
@@ -4075,6 +4048,7 @@ async function handleCategoryText(env,chatId,text,state,msg=null){
   if(state.state!=='awaiting_category_name')return false;
   const name=String(text).trim();if(!name||name.length>60||/[\r\n]/.test(name)||name==='অন্যান্য'){await sendMsg(env,chatId,'Enter a unique category name of 1–60 characters. অন্যান্য is the built-in default.');return true;}
   const id=await ensureCategory(env,name,true);providerCatalogCache.delete(env.DB);await clearAdminState(env,chatId);
+  if(state.data==='new_product'){await beginProductInCategory(env,chatId,id);return true;}
   if(Number(state.data)){await env.DB.prepare('UPDATE products SET shop_category_id=?,category_override=1 WHERE id=?').bind(id,state.data).run();await showAdminCategories(env,chatId,state.data);}else await showAdminCategories(env,chatId);
   return true;
 }
@@ -4091,4 +4065,25 @@ async function showCategoryAdminDetail(env,chatId,id,messageId){
 function categoryButton(category,callback,count=false){
   const icon=category.custom_icon,custom=typeof icon==='string'&&/^\d{10,22}$/.test(icon);
   return {text:`${icon&&!custom?icon+' ':''}${category.name}${count?' ('+category.count+')':''}`,callback_data:callback,style:'primary',...(custom?{icon_custom_emoji_id:icon}:{})};
+}
+
+
+async function showNewProductCategories(env,chatId,page=0,messageId=null){
+  if(!adminUserAccess(env,chatId))return;await clearAdminState(env,chatId);page=adminUserPage(page);
+  const {results}=await env.DB.prepare('SELECT * FROM product_categories WHERE is_deleted=0 ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?').bind(page*10).all();
+  const choices=results.slice(0,10).map(c=>categoryButton(c,`adm_newcategory_${c.id}`)),buttons=[];
+  for(let i=0;i<choices.length;i+=2)buttons.push(choices.slice(i,i+2));
+  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_newcategories_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_newcategories_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'➕ Create New Category',callback_data:'adm_newcategory_create'}],[{text:'No Category',callback_data:'adm_newcategory_0'}],[{text:'Cancel',callback_data:'admin_panel'}]);
+  const text=`➕ <b>Add New Product · Step 1/5: Category</b>\n\n${results.length?'Choose one of your existing categories below.':'No categories created yet. Create a category or continue without one.'}\nThe product will be saved in the category you select.`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function beginProductInCategory(env,chatId,categoryId,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  const category=categoryId?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(categoryId).first():{name:'No Category'};
+  if(!category){await showNewProductCategories(env,chatId,0,messageId);return;}
+  await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_prod_name',?)").bind(chatId,JSON.stringify({categoryId,icon:''})).run();
+  const text=`➕ <b>Add Product · Step 2/5: Name</b>\n\nCategory: <b>${escapeHtml(category.name)}</b>\n\nEnter the product name.`;
+  const buttons=[[{text:'Back to Categories',callback_data:'adm_add_product'}],[{text:'Cancel',callback_data:'admin_panel'}]];
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }

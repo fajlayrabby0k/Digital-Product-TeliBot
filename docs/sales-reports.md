@@ -19,7 +19,7 @@ API profit uses saved selling totals and saved costs for each order, so both per
 
 ## Local purchase and selling prices
 
-**Admin Panel → Add New Product** asks for icon, name, description, purchase cost per item in USD and selling price per item in USD. Example: purchase $4, sale $5 gives $1 gross profit and 25% markup on cost. This markup is distinct from gross profit as a percentage of revenue (20% in this example).
+**Admin Panel → Add New Product** asks for a saved category, name, description, purchase cost per item in USD and selling price per item in USD. Example: purchase $4, sale $5 gives $1 gross profit and 25% markup on cost. This markup is distinct from gross profit as a percentage of revenue (20% in this example).
 
 Existing products: **Manage Products → product → Set Purchase Cost**. Selling price remains editable through Set Custom Price. Local percentage shortcut buttons use purchase cost when available. Purchase cost can be zero; selling price must be positive. Loss-making prices are accepted and show negative gross profit. Cost information is visible to the admin, not customer product details.
 

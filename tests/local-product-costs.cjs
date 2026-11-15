@@ -8,7 +8,7 @@ const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{fir
 const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
 (async()=>{
  await c.api.ensureDbReady(DB);db.prepare("INSERT INTO users(user_id,username) VALUES(1,'@admin')").run();
- await cb('adm_add_product');await cb('adm_newicon_NONE');await text('Local Test');await text('Account product');await text('4');await text('5');
+ await cb('adm_add_product');await cb('adm_newcategory_0');await text('Local Test');await text('Account product');await text('4');await text('5');
  const product=db.prepare("SELECT * FROM products WHERE name='Local Test'").get();assert(product);assert.equal(product.purchase_cost_usd,4);assert.equal(product.price_usd,5);assert(last().text.includes('Gross profit per item: <b>$1.00</b>'));assert(last().text.includes('25.00%'));assert.equal(db.prepare('SELECT * FROM admin_states WHERE user_id=1').get(),undefined);
  const add=(price,qty=1,status='completed')=>db.prepare("INSERT INTO orders(user_id,product_id,quantity,payment_method,amount_usd,status) VALUES(1,?,?,'WALLET',?,?)").run(product.id,qty,price,status).lastInsertRowid;
  const first=add(10,2);assert.equal(db.prepare('SELECT purchase_unit_cost_usd FROM orders WHERE id=?').get(first).purchase_unit_cost_usd,4);
@@ -18,8 +18,12 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  await cb('adm_local_cost_'+product.id);for(const invalid of ['-1','20%','abc','4.001']){await text(invalid);assert.equal(db.prepare('SELECT purchase_cost_usd FROM products WHERE id=?').get(product.id).purchase_cost_usd,3);}await text('০');add(5);await cb('adm_sales_all');assert(last().text.includes('Combined gross profit: $9.00'));
  await cb('adm_local_cost_'+product.id,99);assert.equal(db.prepare('SELECT * FROM admin_states WHERE user_id=99').get(),undefined);
  db.prepare('UPDATE products SET is_external=1 WHERE id=1').run();await cb('adm_local_cost_1');assert(last().text.includes('local products only'));
- await cb('adm_newicon_🔑');await text('Loss Product');await text('Description');await text('4');await text('3');assert(last().text.includes('$-1.00'));assert(last().text.includes('-25.00%'));
- await cb('adm_newicon_NONE');await text('Cancelled');await text('/cancel');assert.equal(db.prepare("SELECT COUNT(*) n FROM products WHERE name='Cancelled'").get().n,0);
+ await cb('adm_newcategory_0');await text('Loss Product');await text('Description');await text('4');await text('3');assert(last().text.includes('$-1.00'));assert(last().text.includes('-25.00%'));
+ await cb('adm_newcategory_0');await text('Cancelled');await text('/cancel');assert.equal(db.prepare("SELECT COUNT(*) n FROM products WHERE name='Cancelled'").get().n,0);
  await c.api.ensureDbReady(DB,true);assert.equal(db.prepare('SELECT purchase_unit_cost_usd FROM orders WHERE id=?').get(first).purchase_unit_cost_usd,4);
+ const category=db.prepare("INSERT INTO product_categories(name) VALUES('My Existing Category')").run().lastInsertRowid;
+ await cb('adm_add_product');assert(buttons().some(b=>b.callback_data==='adm_newcategory_'+category));assert(!buttons().some(b=>b.callback_data?.startsWith('adm_newicon_')));await cb('adm_newcategory_'+category);await text('Categorized Product');await text('Description');await text('4');await text('5');const categorized=db.prepare("SELECT * FROM products WHERE name='Categorized Product'").get();assert.equal(categorized.shop_category_id,category);assert.equal(categorized.category_override,1);
+ await cb('adm_add_product');await cb('adm_newcategory_create');await text('Created During Product');assert.equal(db.prepare('SELECT state FROM admin_states WHERE user_id=1').get().state,'awaiting_prod_name');await text('Wizard Created');await text('Description');await text('2');await text('3');assert(db.prepare("SELECT p.id FROM products p JOIN product_categories c ON c.id=p.shop_category_id WHERE p.name='Wizard Created' AND c.name='Created During Product'").get());
+ await cb('adm_newcategory_'+category);await text('Deleted Category Draft');await text('Description');await text('2');db.prepare('UPDATE product_categories SET is_deleted=1 WHERE id=?').run(category);await text('3');assert.equal(db.prepare("SELECT COUNT(*) n FROM products WHERE name='Deleted Category Draft'").get().n,0);
  console.log('PASS: product wizard purchase/sale prices, profit/markup, local cost edits, immutable quantity costs, sales aggregation, zero/loss/Bangla/invalid inputs, admin-only access, cancellation and migration');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
