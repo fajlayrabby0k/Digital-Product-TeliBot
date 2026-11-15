@@ -56,3 +56,10 @@ Unassigned products are separated from category buttons by a spacer row and an *
 Add New Product now starts with the actual saved category list (two columns, ten categories per page), replacing the old preset icon buttons. Choosing a category starts the name → description → purchase cost → selling price flow. The category is saved atomically with the product as an admin choice. No Category keeps it in Others Product below the category list.
 
 Create New Category is available in this picker; after entering the name, product creation continues in that new category. A selected category deleted before saving is rejected without creating the product. Old icon-selection buttons redirect to the category picker; product icons remain editable separately from Manage Products.
+
+
+## Current layout: Subscription default category
+
+Shop now displays category buttons only. The previous Others Product section and direct unassigned product buttons are removed. Products without a selected category appear inside **Subscription**, ten per page. The default Subscription button remains visible with (0) when empty, has no automatic icon, and uses the same two-column layout and Back to Categories navigation.
+
+No product data is moved or deleted: unassigned products retain NULL shop_category_id and are grouped into Subscription at display time. No-category choices in admin assignment and product creation are labeled Subscription (Default). Deleting a category moves its products to this default group. If a saved/provider category is itself named Subscription, it is merged with the default group in the customer shop instead of creating duplicate buttons. Existing category IDs and manual overrides remain intact. Older unassigned-product pagination links open Subscription.

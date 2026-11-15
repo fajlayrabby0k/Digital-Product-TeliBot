@@ -14,12 +14,12 @@ const ids=()=>Array.from(buttons().filter(b=>/^prod_\d+$/.test(b.callback_data))
  sqlite.prepare('INSERT INTO users(user_id) VALUES(99)').run();
  const plan=sqlite.prepare('EXPLAIN QUERY PLAN SELECT id FROM products WHERE is_active=1 ORDER BY id LIMIT 10 OFFSET 10').all();assert(plan.some(row=>row.detail.includes('products_shop_active')));
  await api.handleUpdate({message:{chat:{id:99},from:{first_name:'Buyer'},text:'/shop'}},env);
- assert.equal(last().method,'sendMessage');assert(last().text.includes('Page 1/3'));assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+1));assert(!buttons().some(b=>b.callback_data==='shopcat_0_0'));assert(buttons().some(b=>b.callback_data==='shoploose_0_1'));
+ assert.equal(last().method,'sendMessage');assert.equal(ids().length,0);assert(buttons().some(b=>b.text==='Subscription (23)'));await cb('shopcat_0_0');assert(last().text.includes('Page 1/3'));assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+1));assert(buttons().some(b=>b.callback_data==='shopcat_0_1'));
  assert.equal(buttons().find(b=>b.callback_data==='prod_1').style,'success');assert.equal(buttons().find(b=>b.callback_data==='prod_2').style,'danger');
- await cb('shoploose_0_1');assert(last().text.includes('Page 2/3'));assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+11));await cb('shoploose_0_2');assert.deepEqual(ids(),[21,22,23]);
- await cb('shoploose_0_999');assert.deepEqual(ids(),[21,22,23]);await cb('shoploose_0_9999999999999999999999');assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+1));
- await cb('prod_15');await cb('shop_return_15');assert(last().text.includes('Page 2/3'));assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+11));await cb('shoplooserefresh_0_1');assert(last().text.includes('Page 2/3'));
- sqlite.exec('UPDATE products SET is_active=0 WHERE id>10');await cb('shoploose_0_2');assert(last().text.includes('Page 1/1'));assert.equal(ids().length,10);
- sqlite.exec('UPDATE products SET is_active=0');await cb('shop');assert.equal(ids().length,0);assert(last().text.includes('No products'));assert(!buttons().some(b=>b.callback_data==='shopcat_0_0'));
+ await cb('shopcat_0_1');assert(last().text.includes('Page 2/3'));assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+11));await cb('shopcat_0_2');assert.deepEqual(ids(),[21,22,23]);
+ await cb('shopcat_0_999');assert.deepEqual(ids(),[21,22,23]);await cb('shopcat_0_9999999999999999999999');assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+1));
+ await cb('prod_15');await cb('shop_return_15');assert(last().text.includes('Page 2/3'));assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+11));await cb('shopcatrefresh_0_1');assert(last().text.includes('Page 2/3'));
+ sqlite.exec('UPDATE products SET is_active=0 WHERE id>10');await cb('shopcat_0_2');assert(last().text.includes('Page 1/1'));assert.equal(ids().length,10);
+ sqlite.exec('UPDATE products SET is_active=0');await cb('shop');assert.equal(ids().length,0);assert(buttons().some(b=>b.text==='Subscription (0)'));
  console.log('PASS: 10-item pages, active-only indexed queries, fresh Shop message, previous/next, last/empty pages, safe bounds, page-preserving refresh, product return and stock button styles');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sqlite.close());
