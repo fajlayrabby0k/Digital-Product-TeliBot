@@ -4,7 +4,7 @@
 
 ## Admin setup
 
-- **Admin Panel → Categories → Create Category** creates a category.
+- **Admin Panel → Categories → Create New Category** creates a category.
 - **Manage Products → product → Set Category** assigns any local or API product to a category. Create Category on this screen also assigns the new category to that product.
 - After adding a local product, **Set Category** is available on its success screen. Until assigned, the product appears in **অন্যান্য**.
 - **অন্যান্য** explicitly pins a product to the uncategorized group.
@@ -17,3 +17,10 @@ Only active categories with active products are shown to customers. Admins can s
 The additive migration creates `product_categories`, adds nullable product category/provider-category fields and an admin-override flag, plus a shop index. No existing products are deleted or assigned by guessing their names.
 
 `node tests/shop-categories.cjs` verifies provider metadata/defaults, manual overrides across sync and restart, reset, creation/assignment, isolated listings, category pagination and access control. `node tests/shop-pagination.cjs` covers ten-product pages, return navigation, refresh and stock styles. The full suite also checks unchanged checkout, payment, pricing and report behavior.
+
+
+## Delete a category
+
+Open **Admin Panel → Categories → category → Delete Category**, then confirm. Products remain in the store and move to **অন্যান্য**. Their prices, stock, orders and margins are preserved. Category removal is recorded internally so provider sync cannot recreate the deleted category automatically. Choosing Create New Category with the same name restores that category; moved products stay in অন্যান্য until assigned again or reset to the API/default rule. The built-in অন্যান্য group cannot be deleted.
+
+The Create New Category button is at the top of the admin category list and product-category picker. Opening an admin category shows its active product count, View Products and Delete Category. Customers cannot delete categories. Deletion and product reassignment happen in one database transaction.
