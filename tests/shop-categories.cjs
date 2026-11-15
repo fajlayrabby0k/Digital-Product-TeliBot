@@ -1,0 +1,31 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+let catalog=[{id:"a",name:"Percent",price:5,stock:10},{id:"b",name:"Fixed",price:5,stock:10},{id:"c",name:"Default",price:5,stock:10},{id:"d",name:"Legacy",price:5,stock:10}];
+const c=vm.createContext({fetch:async()=>({ok:true,status:200,json:async()=>({products:catalog})}),console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,syncExternalProducts,saveProductMargin,handlePricingText};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);for(const id of [1,99])db.prepare('INSERT INTO users(user_id,username) VALUES(?,?)').run(id,'@buyer'+id);
+ for(const[k,v]of [['external_api_url','https://provider.test'],['external_api_key','fixture-key']])db.prepare('UPDATE settings SET value=? WHERE key=?').run(v,k);
+ catalog=[{id:'a',name:'AI product',price:5,stock:10,category:{id:'remote',name:'AI Tools'}},{id:'b',name:'Other product',price:2,stock:5}];
+ const sync=()=>c.api.syncExternalProducts(env,null,null,false,null,true),row=id=>db.prepare('SELECT * FROM products WHERE external_id=?').get(id);
+ await sync();const a=row('a').id,ai=row('a').category_id;assert(ai);assert.equal(row('b').category_id,null);assert.equal(db.prepare('SELECT name FROM product_categories WHERE id=?').get(ai).name,'AI Tools');
+ await cb('shop',99);assert(last().text.includes('Shop Categories'));assert(!buttons().some(b=>/^prod_/.test(b.callback_data)));assert(buttons().some(b=>b.callback_data==='shopcat_'+ai+'_0'));assert(buttons().some(b=>b.callback_data==='shopcat_0_0'));
+ await cb('shopcat_'+ai+'_0',99);assert(buttons().some(b=>b.callback_data==='prod_'+a));assert(!buttons().some(b=>b.callback_data==='prod_'+row('b').id));
+ await cb('adm_cat_create_'+a);await text('VPN');let vpn=db.prepare("SELECT id FROM product_categories WHERE name='VPN'").get().id;assert.equal(row('a').category_id,vpn);assert.equal(row('a').category_override,1);
+ catalog[0]={...catalog[0],price:7,stock:3,category_name:'Streaming'};await sync();assert.equal(row('a').category_id,vpn);assert.notEqual(row('a').provider_category_id,ai);assert.equal(row('a').price_usd,8.4);assert.equal(row('a').api_stock,3);
+ await cb('adm_cat_default_'+a);assert.equal(row('a').category_id,row('a').provider_category_id);assert.equal(row('a').category_override,0);
+ delete catalog[0].category_name;delete catalog[0].category;await sync();assert.equal(row('a').category_id,null);
+ await cb('adm_cat_assign_'+a+'_'+vpn);await sync();assert.equal(row('a').category_id,vpn);await cb('adm_cat_assign_'+a+'_0');await sync();assert.equal(row('a').category_id,null);assert.equal(row('a').category_override,1);
+ const before=JSON.stringify(row('a'));await cb('adm_cat_assign_'+a+'_'+ai,99);assert.equal(JSON.stringify(row('a')),before);
+ await cb('adm_cat_create_0');await text('VPN');assert.equal(db.prepare("SELECT COUNT(*) n FROM product_categories WHERE name='VPN' COLLATE NOCASE").get().n,1);
+ await cb('adm_cat_create_0');await text('bad\nname');assert.equal(db.prepare('SELECT state FROM admin_states WHERE user_id=1').get().state,'awaiting_category_name');await text('/cancel');
+ const local=1;await cb('adm_cat_assign_'+local+'_'+vpn);await sync();assert.equal(db.prepare('SELECT category_id FROM products WHERE id=?').get(local).category_id,vpn);
+ for(let i=0;i<12;i++){db.prepare('INSERT INTO product_categories(name) VALUES(?)').run('Category '+i);const id=db.prepare('SELECT id FROM product_categories WHERE name=?').get('Category '+i).id;db.prepare("INSERT INTO products(name,price_usd,price_bdt,category_id) VALUES('Local',1,125,?)").run(id);}
+ await cb('shop',99);assert(buttons().some(b=>b.callback_data==='shop_page_1'));await cb('shop_page_1',99);assert(!buttons().some(b=>/^prod_/.test(b.callback_data)));
+ await c.api.ensureDbReady(DB,true);assert.equal(row('a').category_override,1);assert.equal(db.prepare('SELECT category_id FROM products WHERE id=?').get(local).category_id,vpn);
+ console.log('PASS: category-first Shop, provider metadata/default, admin create/assign/reset, API sync preserves overrides and updates price/stock, isolated listings, category pagination and access controls');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

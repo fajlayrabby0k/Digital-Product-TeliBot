@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-15-audit-fixes-1";
+const BOT_BUILD="2026-11-15-shop-categories-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -130,7 +130,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-audit-fixes-1";
+const DB_SCHEMA_VERSION = "2026-11-shop-categories-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -153,6 +153,7 @@ async function initializeDatabase(db, force) {
       } catch (_) { /* First installation has no settings table yet. */ }
     }
     const schema = [
+      `CREATE TABLE IF NOT EXISTS product_categories(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL COLLATE NOCASE UNIQUE);`,
       `CREATE TABLE IF NOT EXISTS checkout_quotes(user_id INTEGER NOT NULL,product_id INTEGER NOT NULL,quantity INTEGER NOT NULL,total_usd REAL NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(user_id,product_id,quantity));`,
       `CREATE TABLE IF NOT EXISTS broadcast_jobs(id TEXT PRIMARY KEY,body TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'ready',sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS manual_deposit_credits(deposit_id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_usd REAL NOT NULL,amount_bdt REAL NOT NULL,token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
@@ -191,6 +192,9 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE preorders ADD COLUMN status TEXT DEFAULT 'pending';",
       "ALTER TABLE users ADD COLUMN wallet_change_reason TEXT DEFAULT NULL;",
       "ALTER TABLE users ADD COLUMN wallet_change_ref TEXT DEFAULT NULL;",
+      "ALTER TABLE products ADD COLUMN category_id INTEGER DEFAULT NULL;",
+      "ALTER TABLE products ADD COLUMN provider_category_id INTEGER DEFAULT NULL;",
+      "ALTER TABLE products ADD COLUMN category_override INTEGER DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN purchase_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN purchase_unit_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN sale_origin TEXT DEFAULT NULL;",
@@ -268,6 +272,7 @@ async function initializeDatabase(db, force) {
     orderWriteSchemaCache.delete(db);
     await db.prepare("UPDATE mobile_payment_invoices SET expires_ms=created_ms+3600000 WHERE status='pending' AND expires_ms=created_ms+600000").run();
     const indexes = [
+      "CREATE INDEX IF NOT EXISTS products_category_shop ON products(is_active,category_id,id)",
       "CREATE INDEX IF NOT EXISTS wallet_user_history ON wallet_history(user_id,id DESC)",
       "CREATE UNIQUE INDEX IF NOT EXISTS support_one_active_order ON support_tickets(order_id,user_id) WHERE status<>'closed'",
       "CREATE INDEX IF NOT EXISTS support_user_list ON support_tickets(user_id,id DESC)",
@@ -1287,6 +1292,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
+        if (await handleCategoryText(env,chatId,text,adminState))return;
         if (await handleAdminCoreText(env,chatId,text,adminState))return;
         if (await handleOrderSearchText(env,chatId,text,adminState))return;
         if (await handleTicketText(env,chatId,text,adminState,true))return;
@@ -1426,7 +1432,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (text.startsWith("/start") || text === "/home") { await sendHomeDashboard(env, chatId, user, firstName); return; }
     if (text === "/shop") {
       try {
-        await sendProductsDirectly(env, chatId);
+        await showShopCategories(env, chatId);
       } catch (e) {
         console.error("Error in /shop command:", e);
         await sendMsg(env, chatId, `⚠️ <b>Error opening shop:</b> <code>${escapeHtml(e.message)}</code>`);
@@ -1587,6 +1593,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       return;
     }
 
+    if(await handleCategoryCallback(env,chatId,data,messageId))return;
     // Navigation Callbacks
     if (data === "home") { await clearAdminState(env, chatId); await sendHomeDashboard(env, chatId, user, firstName, messageId); return; }
     const shopPage=data.match(/^shop_(page|refresh)_(\d+)$/);
@@ -1595,7 +1602,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         const page=shopPage?Number(shopPage[2]):0;
         const refresh=data==='shop_refresh'||shopPage?.[1]==='refresh';
         // Opening Shop sends a new message; page navigation edits that catalog message.
-        await sendProductsDirectly(env,chatId,data==='shop'?null:messageId,refresh,page);
+        await showShopCategories(env,chatId,data==='shop'?null:messageId,refresh,page);
       } catch (e) {
         console.error("Error in shop callback:", e);
         await sendMsg(env, chatId, `⚠️ <b>Error opening shop:</b> <code>${escapeHtml(e.message)}</code>`);
@@ -1604,8 +1611,10 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
     const shopReturn=data.match(/^shop_return_(\d+)$/);
     if(shopReturn){
-      const rank=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active = 1 AND id < ?').bind(shopReturn[1]).first();
-      await sendProductsDirectly(env,chatId,messageId,false,Math.floor(Number(rank?.count||0)/SHOP_PAGE_SIZE));
+      const product=await env.DB.prepare('SELECT category_id FROM products WHERE id=?').bind(shopReturn[1]).first();
+      const category=Number(product?.category_id||0);
+      const rank=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND COALESCE(category_id,0)=? AND id<?').bind(category,shopReturn[1]).first();
+      await sendCategoryProducts(env,chatId,category,Math.floor(Number(rank?.count||0)/10),messageId);
       return;
     }
     if (data === "profile") { await sendProfile(env, chatId, user, messageId); return; }
@@ -2060,6 +2069,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         [{ text: "💰 Set Custom Price", callback_data: `adm_setprice_${prod.id}` }],
         prod.is_external?[]:[{text:"💵 Set Purchase Cost",callback_data:`adm_local_cost_${prod.id}`}],
         [{ text: "🎨 Set Product Icon", callback_data: `adm_icon_${prod.id}` }],
+        [{text:"📂 Set Category",callback_data:`adm_cat_product_${prod.id}_0`}],
         prod.is_external ? [] : [{ text: "➕ Add Stock", callback_data: `adm_addstock_${prod.id}` }],
         [{ text: "🗑️ Delete Product", callback_data: `adm_del_prod_${prod.id}` }],
         [{ text: "🔙 Back", callback_data: "adm_manage_products" }]
@@ -2471,6 +2481,8 @@ async function fetchProviderCatalog(baseUrl, key) {
           items = vData.products.map(p => ({
             id: p.id,
             name: p.name,
+            category: p.category,
+            category_name: p.category_name,
             emoji: p.emoji,
             icon: p.icon,
             icon_custom_emoji_id: p.icon_custom_emoji_id,
@@ -2530,6 +2542,7 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       ? await env.DB.prepare("SELECT * FROM products WHERE is_external = 1").all()
       : await env.DB.prepare("SELECT * FROM products WHERE is_external = 1 AND external_id = ?").bind(targetExternalId).all();
     const existingByExternalId = new Map(externalProducts.map(p => [String(p.external_id), p]));
+    const categoryNames=new Map();
     const seenIds = new Set();
     let importedCount = 0;
     for (const item of items) {
@@ -2544,6 +2557,12 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       const baseCostPrice=(typeof rawCost==='number'||typeof rawCost==='string'&&/^\d+(?:\.\d+)?$/.test(rawCost.trim()))?Number(rawCost):NaN;
       if(!Number.isFinite(baseCostPrice)||baseCostPrice<=0)continue;
       const apiStock = providerStock(item);
+      const rawCategory=item.category_name ?? (typeof item.category==='object'?item.category?.name:item.category);
+      const normalizedCategory=typeof rawCategory==='string'?rawCategory.replace(/\s+/g,' ').trim().slice(0,60):'';
+      const categoryName=normalizedCategory==='অন্যান্য'?'':normalizedCategory;
+      let providerCategoryId=null;
+      if(categoryName){if(!categoryNames.has(categoryName.toLowerCase()))categoryNames.set(categoryName.toLowerCase(),await ensureCategory(env,categoryName));providerCategoryId=categoryNames.get(categoryName.toLowerCase());}
+
 
       const existing = existingByExternalId.get(extId);
       const finalPrice=externalSellingPrice(baseCostPrice,existing,margin,configuredMarginType);
@@ -2569,6 +2588,9 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
         targetId = ins.meta ? ins.meta.last_row_id : null;
       }
 
+      if(targetId&&(Number(existing?.provider_category_id||0)!==Number(providerCategoryId||0)||!existing&&providerCategoryId)){
+        await env.DB.prepare('UPDATE products SET provider_category_id=?,category_id=CASE WHEN category_override=1 THEN category_id ELSE ? END WHERE id=?').bind(providerCategoryId,providerCategoryId,targetId).run();
+      }
       importedCount++;
     }
 
@@ -3002,6 +3024,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
     [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
     [{text:'🎫 Support Tickets',callback_data:'adm_tickets_open_0'}],
+    [{text:'📂 Categories',callback_data:'adm_categories_0'}],
     [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'}],
     [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
     [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
@@ -3648,7 +3671,7 @@ async function handleLocalProductText(env,chatId,text,state){
   ]);
   if(!result[0].meta?.changes){await sendMsg(env,chatId,'Product draft was already saved or cancelled.');return true;}
   const info=localProfitInfo(draft.cost,value),id=result[0].meta.last_row_id;
-  await sendMsg(env,chatId,`✅ <b>Product Added</b>\n${escapeHtml(name)}\n\nPurchase cost: <b>$${draft.cost.toFixed(2)}</b>\nSelling price: <b>$${value.toFixed(2)}</b>\nGross profit per item: <b>$${info.profit}</b>\nMarkup on cost: <b>${info.markup}</b>\n\nCompleted sales will appear in Sales & Profit Reports.`,[[{text:'Add Stock',callback_data:`adm_addstock_${id}`}],[{text:'Product',callback_data:`adm_prod_details_${id}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]]);return true;
+  await sendMsg(env,chatId,`✅ <b>Product Added</b>\n${escapeHtml(name)}\n\nPurchase cost: <b>$${draft.cost.toFixed(2)}</b>\nSelling price: <b>$${value.toFixed(2)}</b>\nGross profit per item: <b>$${info.profit}</b>\nMarkup on cost: <b>${info.markup}</b>\n\nCompleted sales will appear in Sales & Profit Reports.`,[[{text:'Add Stock',callback_data:`adm_addstock_${id}`}],[{text:'Set Category',callback_data:`adm_cat_product_${id}_0`}],[{text:'Product',callback_data:`adm_prod_details_${id}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]]);return true;
 }
 
 
@@ -3957,5 +3980,63 @@ async function guardCheckoutQuote(env,chatId,product,quantity,total){
   if(quote&&(Math.round(Number(quote.total_usd)*100)!==Math.round(total*100)||Date.now()-quote.created_ms>15*60000)){
     await sendMsg(env,chatId,'The price changed or this preview expired. Review the updated total and confirm again. No payment was taken.');await sendOrderPreview(env,chatId,product.id,quantity);return false;
   }
+  return true;
+}
+
+
+async function ensureCategory(env,name){
+  await env.DB.prepare('INSERT OR IGNORE INTO product_categories(name) VALUES(?)').bind(name).run();
+  return (await env.DB.prepare('SELECT id FROM product_categories WHERE name=? COLLATE NOCASE').bind(name).first()).id;
+}
+async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
+  await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
+  const {results}=await env.DB.prepare("SELECT COALESCE(c.id,0) AS id,COALESCE(c.name,'অন্যান্য') AS name,COUNT(*) AS count FROM products p LEFT JOIN product_categories c ON c.id=p.category_id WHERE p.is_active=1 GROUP BY COALESCE(c.id,0) ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
+  const buttons=results.slice(0,10).map(c=>[{text:`📂 ${c.name} (${c.count})`,callback_data:`shopcat_${c.id}_0`}]),pager=[];
+  if(page>0)pager.push({text:'Previous',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'Main Menu',callback_data:'home'}]);
+  const text=`📂 <b>Shop Categories</b>\n\n${results.length?'Choose a category to browse its products.':'No products are available yet.'}`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,force=false){
+  const sync=await syncExternalProducts(env,null,null,false,null,force);
+  const cat=category?await env.DB.prepare('SELECT name FROM product_categories WHERE id=?').bind(category).first():{name:'অন্যান্য'};
+  if(!cat){await showShopCategories(env,chatId,messageId);return;}
+  const count=await env.DB.prepare('SELECT COUNT(*) AS count FROM products WHERE is_active=1 AND COALESCE(category_id,0)=?').bind(category).first();
+  const pages=Math.max(1,Math.ceil(Number(count.count)/10));page=Math.min(pages-1,adminUserPage(Number.isSafeInteger(Number(page))?page:0));
+  const {results}=await env.DB.prepare('SELECT p.*,CASE WHEN is_external=1 THEN COALESCE(api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS stock_qty FROM products p WHERE is_active=1 AND COALESCE(category_id,0)=? ORDER BY p.id LIMIT 10 OFFSET ?').bind(category,page*10).all();
+  const buttons=results.map(p=>[productListButton(p,`prod_${p.id}`,!(p.is_external&&!sync.success))]),pager=[];
+  if(page>0)pager.push({text:'Previous',callback_data:`shopcat_${category}_${page-1}`});if(page<pages-1)pager.push({text:'Next',callback_data:`shopcat_${category}_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'🔄 Refresh Stock',callback_data:`shopcatrefresh_${category}_${page}`}],[{text:'📂 Categories',callback_data:'shop'},{text:'Main Menu',callback_data:'home'}]);
+  const text=`🛍️ <b>${escapeHtml(cat.name)}</b>\nPage ${page+1}/${pages} · ${count.count} products\n\n${results.length?'Click any product below to view details and order:':'No products in this category yet.'}`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function showAdminCategories(env,chatId,productId=null,page=0,messageId=null){
+  if(!adminUserAccess(env,chatId))return;await clearAdminState(env,chatId);page=adminUserPage(page);
+  const product=productId?await env.DB.prepare('SELECT * FROM products WHERE id=?').bind(productId).first():null;
+  if(productId&&!product){await sendMsg(env,chatId,'Product not found.');return;}
+  const {results}=await env.DB.prepare('SELECT * FROM product_categories ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?').bind(page*10).all();
+  const buttons=results.slice(0,10).map(c=>[{text:c.name,callback_data:product?`adm_cat_assign_${productId}_${c.id}`:`adm_cat_view_${c.id}`}]),prefix=product?`adm_cat_product_${productId}_`:'adm_categories_',pager=[];
+  if(page>0)pager.push({text:'Previous',callback_data:prefix+(page-1)});if(results.length>10)pager.push({text:'Next',callback_data:prefix+(page+1)});if(pager.length)buttons.push(pager);
+  if(product)buttons.push([{text:'অন্যান্য',callback_data:`adm_cat_assign_${productId}_0`}],[{text:'Use API Category / Default',callback_data:`adm_cat_default_${productId}`}]);
+  buttons.push([{text:'➕ Create Category',callback_data:`adm_cat_create_${productId||0}`}],[{text:product?'Product':'Admin Panel',callback_data:product?`adm_prod_details_${productId}`:'admin_panel'}]);
+  let current='';if(product){const c=product.category_id?await env.DB.prepare('SELECT name FROM product_categories WHERE id=?').bind(product.category_id).first():null;current=`\nProduct: ${adminSnippet(productDisplayName(product),100)}\nCurrent: ${escapeHtml(c?.name||'অন্যান্য')}\nRule: ${product.category_override?'Admin choice (kept after API sync)':'API category / default'}\n`;}
+  const text=`📂 <b>${product?'Choose Product Category':'Manage Categories'}</b>\n${current}\n${product?'Choose a category below.':'Create categories here. To assign products, open Manage Products → product → Set Category.'}`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function handleCategoryCallback(env,chatId,data,messageId){
+  let match=data.match(/^(shopcat|shopcatrefresh)_(\d+)_(\d+)$/);if(match){await clearBinanceInput(env,chatId);await clearTicketInput(env,chatId);await sendCategoryProducts(env,chatId,Number(match[2]),Number(match[3]),messageId,match[1]==='shopcatrefresh');return true;}
+  if(!adminUserAccess(env,chatId))return false;
+  match=data.match(/^adm_categories_(\d+)$/);if(match){await showAdminCategories(env,chatId,null,match[1],messageId);return true;}
+  match=data.match(/^adm_cat_product_(\d+)_(\d+)$/);if(match){await showAdminCategories(env,chatId,match[1],match[2],messageId);return true;}
+  match=data.match(/^adm_cat_create_(\d+)$/);if(match){await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_name',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,'Enter a category name (1–60 characters), e.g. AI Tools, VPN or Streaming.',[[{text:'Cancel',callback_data:match[1]==='0'?'adm_categories_0':`adm_cat_product_${match[1]}_0`}]]);return true;}
+  match=data.match(/^adm_cat_assign_(\d+)_(\d+)$/);if(match){const category=Number(match[2]);if(category&&!await env.DB.prepare('SELECT id FROM product_categories WHERE id=?').bind(category).first())return true;await env.DB.prepare('UPDATE products SET category_id=?,category_override=1 WHERE id=?').bind(category||null,match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
+  match=data.match(/^adm_cat_default_(\d+)$/);if(match){await env.DB.prepare('UPDATE products SET category_id=provider_category_id,category_override=0 WHERE id=?').bind(match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
+  match=data.match(/^adm_cat_view_(\d+)$/);if(match){await sendCategoryProducts(env,chatId,Number(match[1]),0,messageId);return true;}return false;
+}
+async function handleCategoryText(env,chatId,text,state){
+  if(!adminUserAccess(env,chatId)||state.state!=='awaiting_category_name')return false;
+  const name=String(text).trim();if(!name||name.length>60||/[\r\n]/.test(name)||name==='অন্যান্য'){await sendMsg(env,chatId,'Enter a unique category name of 1–60 characters. অন্যান্য is the built-in default.');return true;}
+  const id=await ensureCategory(env,name);await clearAdminState(env,chatId);
+  if(Number(state.data)){await env.DB.prepare('UPDATE products SET category_id=?,category_override=1 WHERE id=?').bind(id,state.data).run();await showAdminCategories(env,chatId,state.data);}else await showAdminCategories(env,chatId);
   return true;
 }
