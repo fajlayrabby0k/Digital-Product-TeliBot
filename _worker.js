@@ -4040,7 +4040,7 @@ async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
   for(let i=0;i<choices.length;i+=2)buttons.push(choices.slice(i,i+2));
   const pager=[];if(page>0)pager.push({text:'Previous Categories',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next Categories',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'🏠 Main Menu',callback_data:'home'}]);
-  const text=`🛍️ <b>Shop Categories</b>\n<i>${totals?.categories||0} categories · ${totals?.products||0} products · ${totals?.stock||0} in stock</i>${pages>1?`\nPage ${page+1}/${pages}`:''}`;
+  const text=`🛍️ <b>Shop Categories</b>\n<b>${totals?.categories||0}</b> Categories  •  <b>${totals?.products||0}</b> Products  •  <b>${totals?.stock||0}</b> Stock${pages>1?`\nPage ${page+1}/${pages}`:''}`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,force=false){
