@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-guide-design-1";
+const BOT_BUILD="2026-11-16-english-interface-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-guide-design-1";
+const DB_SCHEMA_VERSION = "2026-11-english-interface-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -271,6 +271,7 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      ...Object.entries(GUIDE_BENGALI_DEFAULTS).map(([key,value])=>db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS[key],key,value)),
       db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS.guide_intro,'guide_intro',GUIDE_PREVIOUS_INTRO),
       ...Object.entries(GUIDE_LEGACY_DEFAULTS).map(([key,value])=>db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS[key],key,value)),
       db.prepare('CREATE INDEX IF NOT EXISTS orders_user_sequence_lookup ON orders(user_id,id)'),
@@ -3399,7 +3400,7 @@ async function processBotUpdate(update,env,origin,ctx){
     const reference='ERR-'+crypto.randomUUID().slice(0,8),detail=await safeDiagnostic(scoped,error?.message||error);
     console.error(`Bot error ${reference} at ${trace.stage}: ${detail}`);
     try{await ensureDiagnosticTable(env.DB);await env.DB.prepare('INSERT INTO bot_runtime_errors(reference,stage,chat_id,order_id,detail) VALUES(?,?,?,?,?)').bind(reference,trace.stage,String(chatId||''),trace.orderId,detail).run();}catch{console.error('Could not persist runtime diagnostic');}
-    if(chatId)await sendMsg(env,chatId,`⚠️ কাজটি সম্পন্ন হয়নি। রেফারেন্স: <code>${reference}</code>\n${trace.orderId?'Order #'+trace.orderId+'\n':''}অ্যাডমিনকে জানানো হয়েছে। অর্ডার আবার দিয়ে বা টাকা পাঠিয়ে চেষ্টা করবেন না।`).catch(()=>{});
+    if(chatId)await sendMsg(env,chatId,`⚠️ Unable to complete this action. Reference: <code>${reference}</code>\n${trace.orderId?'Order #'+trace.orderId+'\n':''}Admin has been notified. Do not place the order or send payment again.`).catch(()=>{});
     if(env.ADMIN_ID)await sendMsg(env,env.ADMIN_ID,`⚠️ <b>Bot error ${reference}</b>\nBuild: <code>${BOT_BUILD}</code>\nStage: <code>${trace.stage}</code>\nOrder: ${trace.orderId||'not created'}\nReason: <code>${escapeHtml(detail)}</code>\nSend /diagnostics to check configuration and recent orders.`).catch(()=>{});
   }
 }
@@ -4135,7 +4136,7 @@ async function handleCategoryText(env,chatId,text,state,msg=null){
     await env.DB.prepare('UPDATE product_categories SET custom_icon=? WHERE id=? AND is_deleted=0').bind(icon,state.data).run();await clearAdminState(env,chatId);await showCategoryAdminDetail(env,chatId,state.data);return true;
   }
   if(state.state!=='awaiting_category_name')return false;
-  const name=String(text).trim();if(!name||name.length>60||/[\r\n]/.test(name)||name==='অন্যান্য'){await sendMsg(env,chatId,'Enter a unique category name of 1–60 characters. অন্যান্য is the built-in default.');return true;}
+  const name=String(text).trim();if(!name||name.length>60||/[\r\n]/.test(name)||name==='অন্যান্য'){await sendMsg(env,chatId,'Enter a unique category name of 1–60 characters. This name is reserved for the default category.');return true;}
   const id=await ensureCategory(env,name,true);providerCatalogCache.delete(env.DB);await clearAdminState(env,chatId);
   if(state.data==='new_product'){await beginProductInCategory(env,chatId,id);return true;}
   if(Number(state.data)){await env.DB.prepare('UPDATE products SET shop_category_id=?,category_override=1 WHERE id=?').bind(id,state.data).run();await showAdminCategories(env,chatId,state.data);}else await showAdminCategories(env,chatId);
@@ -4308,7 +4309,7 @@ const GUIDE_LEGACY_DEFAULTS={
   guide_faq:'• টাকা কেটেছে, প্রোডাক্ট আসেনি? Orders দেখুন; Check Delivery থাকলে ব্যবহার করুন, না হলে Get Help দিন।\n• ডিপোজিট হয়নি? সঠিক মাধ্যম, পরিমাণ ও রসিদের ID মিলিয়ে দেখুন; PIN/OTP দেবেন না।\n• একই TxID আবার ব্যবহার করা যায়? সম্পন্ন পেমেন্টের ID দ্বিতীয়বার ক্রেডিট হয় না।\n• দাম বদলেছে? API-এর দাম/স্টক sync হলে আপডেট হয়। কেনার আগে সর্বশেষ মোট মূল্য দেখুন।\n• ব্যালেন্সের হিসাব? Profile → Balance History দেখুন।'
 };
 const GUIDE_PREVIOUS_INTRO="প্রথমবার ব্যবহার করছেন? নিচের বিষয়গুলো থেকে প্রয়োজনীয়টি বেছে নিন।\n\nপেমেন্টের নিয়ম → টাকা পাঠানো ও ভেরিফিকেশন\nঅর্ডার ও ডেলিভারি → কেনা ও ফাইল ডাউনলোড\nওয়ারেন্টি → প্রোডাক্টের শর্ত ও সহায়তা\nরিফান্ড → সমস্যা হলে করণীয়\nFAQ → সাধারণ প্রশ্নের উত্তর";
-const GUIDE_DEFAULTS={
+const GUIDE_BENGALI_DEFAULTS={
   "guide_title": "User Guide / FAQ",
   "guide_intro": "কেনাকাটা, পেমেন্ট ও ডেলিভারি—প্রয়োজনীয় নির্দেশনা এক জায়গায়।\n\nনিচের বাটন থেকে আপনার প্রয়োজনীয় বিষয়টি বেছে নিন।",
   "guide_payment": "বর্তমান রেট: 1 USD = {rate} BDT\n\nWallet Payment:\nDeposit থেকে ব্যালেন্স যোগ করুন। প্রোডাক্ট ও পরিমাণ বেছে Wallet Payment চাপুন।\n\nDirect Payment:\nঅর্ডারে দেখানো মাধ্যম, নম্বর/ঠিকানা ও পরিমাণ মিলিয়ে টাকা পাঠান। তারপর সেই পেমেন্টের ID জমা দিন।\n\nbKash / Nagad:\nদেখানো নম্বরে Send Money করুন। ৬০ মিনিটের মধ্যে রসিদের TrxID দিন। টাকা পাওয়ার SMS মিললে ভেরিফাই হবে।\n\nRocket:\n৬০ মিনিটের মধ্যে নির্দেশনায় Reply দিয়ে রসিদের Transaction ID দিন। অ্যাডমিন যাচাই করবেন।\n\nBinance Pay:\nদেখানো Pay ID-তে USDT পাঠান। পেমেন্টের ১০ মিনিটের মধ্যে রসিদের Order/Transaction ID দিন। ডিপোজিটে সর্বোচ্চ $10।\n\nBEP20 USDT:\nশুধু BNB Smart Chain-এ দেখানো ঠিকানায় পাঠান। পুরো পরিমাণ পৌঁছাতে হবে; ফি আলাদা। ১০ মিনিটের মধ্যে TxHash দিন। ১২টি confirmation প্রয়োজন।\n\nRedeem Code:\nDeposit → Redeem Code-এ বৈধ কোড দিন। একই কোড একবার ব্যবহার করা যাবে।\n\nপেমেন্ট আটকে গেলে:\nCheck Payment চাপুন। আবার টাকা পাঠাবেন না; প্রয়োজনে Support নিন। PIN, OTP বা private key দেবেন না।",
@@ -4316,6 +4317,15 @@ const GUIDE_DEFAULTS={
   "guide_warranty": "কেনার আগে:\nপ্রোডাক্টের বিবরণে ওয়ারেন্টির মেয়াদ, শর্ত ও ব্যবহারের নির্দেশনা দেখুন। প্রোডাক্টভেদে শর্ত আলাদা হতে পারে।\n\nশর্ত পরিষ্কার না হলে:\nকেনার আগে Support থেকে নিশ্চিত হয়ে নিন।\n\nসমস্যা হলে:\nসংশ্লিষ্ট অর্ডারের Get Help থেকে কী সমস্যা হচ্ছে লিখুন। অ্যাডমিন সেই প্রোডাক্টের শর্ত অনুযায়ী যাচাই করবেন।\n\nযা পাঠাবেন না:\nPIN, OTP বা অ্যাকাউন্টের পাসওয়ার্ড সাপোর্টে পাঠাবেন না।",
   "guide_refund": "রিফান্ড চাইতে হলে:\nসংশ্লিষ্ট অর্ডারের Get Help চাপুন। কী সমস্যা হয়েছে ও কখন হয়েছে, সংক্ষেপে লিখুন।\n\nযেভাবে যাচাই হবে:\nঅ্যাডমিন অর্ডার, পেমেন্ট ও প্রোডাক্টের শর্ত দেখে সিদ্ধান্ত জানাবেন। টিকিট করলেই রিফান্ড নিশ্চিত হয় না।\n\nউত্তর কোথায় পাবেন:\nMy Support Tickets থেকে টিকিটের অবস্থা ও অ্যাডমিনের উত্তর দেখুন।\n\nপেমেন্ট আটকে থাকলে:\nএকই অর্ডারে আবার টাকা পাঠাবেন না। পেমেন্টের রসিদ সংরক্ষণ করুন এবং Support নিন।",
   "guide_faq": "• টাকা কেটেছে, প্রোডাক্ট আসেনি? My Orders-এ অবস্থা দেখুন। Check Delivery থাকলে চাপুন। প্রয়োজন হলে সংশ্লিষ্ট অর্ডারের Get Help থেকে সমস্যা জানান।\n• কেনা প্রোডাক্ট আবার ডাউনলোড করব কীভাবে? My Orders খুলে সংশ্লিষ্ট অর্ডারের Download বাটন চাপুন। নতুন করে পেমেন্ট লাগবে না।\n• ডিপোজিট যোগ হয়নি, কী করব? মাধ্যম, পরিমাণ ও রসিদের ID মিলিয়ে Check Payment চাপুন। না হলে Support নিন; আবার টাকা পাঠাবেন না।\n• একই TrxID আবার ব্যবহার করা যায়? না। একবার ভেরিফাই হওয়া পেমেন্টের ID দিয়ে আবার ব্যালেন্স যোগ বা অন্য অর্ডার পেমেন্ট করা যায় না।\n• প্রোডাক্টের দাম বদলায় কেন? সাপ্লায়ার দাম বদলালে এখানে আপডেট হয়। পেমেন্টের আগে সর্বশেষ মোট দাম দেখে নিন।\n• ব্যালেন্সের হিসাব কোথায় পাব? Profile → Balance History-তে টাকা যোগ ও কাটার হিসাব দেখুন।"
+};
+const GUIDE_DEFAULTS={
+  "guide_title": "User Guide / FAQ",
+  "guide_intro": "Everything you need to know about shopping, payments and delivery.\n\nChoose a topic below to get started.",
+  "guide_payment": "Current rate: 1 USD = {rate} BDT\n\nWallet Payment:\nAdd funds through Deposit. Select a product and quantity, then confirm with Wallet Payment.\n\nDirect Payment:\nUse the method, account and exact amount shown on your order. Submit the ID from that payment receipt.\n\nbKash / Nagad:\nUse Send Money to the number shown. Submit the TrxID within 60 minutes. Verification uses the SMS received by the store.\n\nRocket:\nReply to the payment instructions with your Transaction ID within 60 minutes. Admin approval is required.\n\nBinance Pay:\nSend USDT to the Pay ID shown. Submit the receipt Order/Transaction ID within 10 minutes of payment. Maximum deposit: $10.\n\nBEP20 USDT:\nUse BNB Smart Chain only. The full amount must arrive; pay fees separately. Submit the TxHash within 10 minutes. Requires 12 confirmations.\n\nRedeem Code:\nOpen Deposit → Redeem Code and enter a valid code. Each code can be used once.\n\nPayment not confirmed?\nTap Check Payment. Do not pay again. Contact Support if needed. Never share PINs, OTPs or private keys.",
+  "guide_delivery": "Place an order:\n1. Open Browse Shop and select a category and product.\n2. Check the description, price and stock. Tap Buy Now.\n3. Choose the quantity and confirm your payment.\n\nReceive your product:\nAfter payment confirmation, available products are sent as a .txt document containing your purchased accounts, codes or links.\n\nDownload again:\nOpen My Orders and tap the order’s Download button. No new payment is needed. Use Copy Order ID below the document to copy your ID.\n\nDelivery pending?\nCheck the status in My Orders. Tap Check Delivery if available. Supplier or stock issues may cause a delay. Do not pay for the same order again.\n\nNeed help?\nTap Get Help below the document and describe the issue. Admin can see your order and product, and reply through the ticket.",
+  "guide_warranty": "Before buying:\nRead the product description for warranty duration, terms and usage instructions. Terms may differ by product.\n\nUnsure about the terms?\nContact Support before purchasing.\n\nHaving a problem?\nUse Get Help on the relevant order and describe the issue. Admin will review it against the product’s terms.\n\nKeep your account safe:\nDo not send PINs, OTPs or account passwords to support.",
+  "guide_refund": "Request a review:\nTap Get Help on the relevant order. Briefly describe what happened and when.\n\nHow requests are reviewed:\nAdmin checks your order, payment and product terms before giving a decision. Opening a ticket does not guarantee a refund.\n\nFind the reply:\nOpen My Support Tickets to check the ticket status and admin’s response.\n\nPayment pending?\nDo not pay for the same order again. Keep your receipt and contact Support.",
+  "guide_faq": "• Payment taken but no product? Check My Orders. Tap Check Delivery if available, or use Get Help on the relevant order.\n• How do I download my product again? Open My Orders and tap the order’s Download button. No new payment is needed.\n• My deposit has not arrived. What should I do? Check the payment method, amount and receipt ID, then tap Check Payment. Contact Support if needed. Do not pay again.\n• Can I reuse a TrxID? No. A verified payment ID cannot credit your balance again or pay for another order.\n• Why did the price change? Supplier price changes are reflected in the store. Check the latest total before paying.\n• Where can I check my balance history? Open Profile → Balance History to see funds added and deducted."
 };
 function formatGuideBody(value){
   return escapeHtml(value).replace(/^([^\n]+[:：])$/gm,'<b>$1</b>');
@@ -4325,25 +4335,25 @@ function formatGuideFaq(value){
     const plain=block.trim().replace(/^[•●]\s*/,''),end=plain.search(/[?؟]/);
     if(end<0)return escapeHtml(plain);
     const question=plain.slice(0,end+1).replace(/^(?:প্রশ্ন|Question|Q)\s*[:：]\s*/i,''),answer=plain.slice(end+1).trim().replace(/^(?:উত্তর|Answer|A)\s*[:：]\s*/i,'');
-    return `<b>প্রশ্ন: ${escapeHtml(question)}</b>${answer?'\nউত্তর: '+escapeHtml(answer):''}`;
+    return `<b>Question: ${escapeHtml(question)}</b>${answer?'\nAnswer: '+escapeHtml(answer):''}`;
   }).join('\n\n');
 }
 async function showUserGuide(env,chatId,section='menu',messageId=null){
-  const labels={payment:'পেমেন্টের নিয়ম',delivery:'অর্ডার ও ডেলিভারি',warranty:'ওয়ারেন্টি',refund:'রিফান্ড',faq:'FAQ'};
+  const labels={payment:'Payment Rules',delivery:'Orders & Delivery',warranty:'Warranty',refund:'Refund Policy',faq:'FAQ'};
   const title=await getSetting(env,'guide_title',GUIDE_DEFAULTS.guide_title),intro=await getSetting(env,'guide_intro',GUIDE_DEFAULTS.guide_intro);
   let text=`📖 <b>${escapeHtml(title)}</b>\n\n<blockquote>${escapeHtml(intro)}</blockquote>`;
   if(section==='payment'){
     const rate=await getSetting(env,'usd_to_bdt_rate','125'),body=await getSetting(env,'guide_payment',GUIDE_DEFAULTS.guide_payment);
-    text=`💳 <b>পেমেন্টের নিয়ম</b>\n\n${formatGuideBody(body.replaceAll('{rate}',String(rate)))}`;
+    text=`💳 <b>Payment Rules</b>\n\n${formatGuideBody(body.replaceAll('{rate}',String(rate)))}`;
   }else if(section==='faq'){
     text=`📖 <b>FAQ</b>\n\n${formatGuideFaq(await getSetting(env,'guide_faq',GUIDE_DEFAULTS.guide_faq))}`;
   }else if(labels[section])text=`📖 <b>${labels[section]}</b>\n\n${formatGuideBody(await getSetting(env,'guide_'+section,GUIDE_DEFAULTS['guide_'+section]))}`;
   const buttons=section==='menu'?[
-    [{text:'💳 পেমেন্টের নিয়ম',callback_data:'guide_payment',style:'primary'},{text:'📦 অর্ডার ও ডেলিভারি',callback_data:'guide_delivery',style:'primary'}],
-    [{text:'🛡️ ওয়ারেন্টি',callback_data:'guide_warranty'},{text:'↩️ রিফান্ড নীতি',callback_data:'guide_refund'}],
-    [{text:'❓ সাধারণ প্রশ্ন ও উত্তর',callback_data:'guide_faq',style:'primary'}]
-  ]:[[{text:'‹ গাইডে ফিরে যান',callback_data:'user_guide'}]];
-  buttons.push([{text:'🛍️ শপ দেখুন',callback_data:'shop'},{text:'💬 সাপোর্ট',callback_data:'support'}],[{text:'🏠 মেইন মেনু',callback_data:'home'}]);
+    [{text:'💳 Payment Rules',callback_data:'guide_payment',style:'primary'},{text:'📦 Orders & Delivery',callback_data:'guide_delivery',style:'primary'}],
+    [{text:'🛡️ Warranty',callback_data:'guide_warranty'},{text:'↩️ Refund Policy',callback_data:'guide_refund'}],
+    [{text:'❓ Questions & Answers',callback_data:'guide_faq',style:'primary'}]
+  ]:[[{text:'‹ Back to Guide',callback_data:'user_guide'}]];
+  buttons.push([{text:'🛍️ Browse Shop',callback_data:'shop'},{text:'💬 Support',callback_data:'support'}],[{text:'🏠 Main Menu',callback_data:'home'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleGuideCallback(env,chatId,data,messageId){
