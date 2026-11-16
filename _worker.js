@@ -3152,9 +3152,10 @@ async function sendOrders(env,chatId,editMessageId=null){
   let orderText='📦 <b>Your Orders:</b>\n\n';const buttons=[];
   if(!results?.length)orderText+='You have no paid orders yet.';
   for(const order of results||[]){
-    buttons.push([{text:`Order - ${String(order.user_order_number).padStart(2,'0')} Order ID- ${orderDisplayId(order)}`,callback_data:`ticket_new_${order.id}`}]);
+    const orderLabel=`Order - ${String(order.user_order_number).padStart(2,'0')} Order ID- ${orderDisplayId(order)}`;
+    buttons.push([{text:`${order.status==='completed'?'📄 Download':'🎫 Get Help'} · ${orderLabel}`,callback_data:order.status==='completed'?`order_document_${order.id}`:`ticket_new_${order.id}`}]);
     orderText+=`<b>${escapeHtml(order.product_name)}</b>\nOrder - ${String(order.user_order_number).padStart(2,'0')} Order ID- <code>${orderDisplayId(order)}</code>\nQuantity: ${order.quantity||1} | Amount: $${Number(order.amount_usd).toFixed(2)}\n`;
-    if(order.status==='completed'){orderText+='Delivery: Text document\n\n';buttons.push([{text:`📄 Download · ${orderDisplayId(order)}`,callback_data:`order_document_${order.id}`}]);}
+    if(order.status==='completed')orderText+='Delivery: Text document\n\n';
     else if(order.status==='refunded')orderText+='Status: Wallet payment refunded.\n\n';
     else{
       orderText+='Status: Payment recorded; delivery pending. Do not pay again.\n\n';
