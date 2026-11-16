@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-payment-health-1";
+const BOT_BUILD="2026-11-16-mobile-retry-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1272,8 +1272,9 @@ async function renderDepositInstructions(env, chatId, username, method, neededAm
     mTitle = "Nagad Personal";
     accNum = await getSetting(env, "nagad_num", "017XXXXXXXX");
   } else if (method === "rocket") {
-    mTitle = "Rocket Personal";
+    mTitle = "Rocket Personal · Admin Verification";
     accNum = await getSetting(env, "rocket_num", "017XXXXXXXX");
+    promptDetails="Rocket currently requires <b>admin verification</b>. "+promptDetails;
   }
 
   const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
@@ -1908,9 +1909,9 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         accNum = await getSetting(env, "nagad_num", "017XXXXXXXX");
         customInstructions = `👉 <b>Send Money (Personal) to:</b>\n<code>${accNum}</code>\n\n⚠️ After payment, please <b>REPLY to this message</b> with your <b>Nagad Transaction ID</b>.`;
       } else if (method === "rocket") {
-        mTitle = "Rocket Personal";
+        mTitle = "Rocket Personal · Admin Verification";
         accNum = await getSetting(env, "rocket_num", "017XXXXXXXX");
-        customInstructions = `👉 <b>Send Money to:</b>\n<code>${accNum}</code>\n\n⚠️ After payment, please <b>REPLY to this message</b> with your <b>Rocket Transaction ID within 60 minutes</b>.`;
+        customInstructions = `👉 <b>Send Money to:</b>\n<code>${accNum}</code>\n\n⚠️ After payment, please <b>REPLY to this message</b> with your <b>Rocket Transaction ID within 60 minutes</b>.\n\nRocket requires admin verification. Delivery follows payment approval.`;
       }
 
       if(['bkash','nagad'].includes(method)) {
@@ -2321,7 +2322,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       const binanceAuto = (await getSetting(env, "binance_auto_verify", "1")) === "1";
       const bep20 = await getSetting(env, "bep20_addr", "0x71C...YourAddress");
 
-      await editMsg(env, chatId, messageId, `⚙️ <b>Payment Accounts & Auto-Verification Settings:</b>\n\n• bKash: <code>${bkash}</code>\n• Nagad: <code>${nagad}</code>\n• Rocket: <code>${rocket}</code>\n• Binance Pay ID: <code>${binance}</code>\n• Binance Auto-Verify: <b>${binanceAuto ? "🟢 Enabled (Personal Pay History API)" : "⚪ Manual Verification"}</b>\n• BEP20 USDT (BSC): <code>${bep20}</code> <i>(Auto-verified via Blockchain)</i>`, [
+      await editMsg(env, chatId, messageId, `⚙️ <b>Payment Accounts & Auto-Verification Settings:</b>\n\n• bKash: <code>${bkash}</code>\n• Nagad: <code>${nagad}</code>\n• Rocket: <code>${rocket}</code> · Manual approval\n• Binance Pay ID: <code>${binance}</code>\n• Binance Auto-Verify: <b>${binanceAuto ? "🟢 Enabled (Personal Pay History API)" : "⚪ Manual Verification"}</b>\n• BEP20 USDT (BSC): <code>${bep20}</code> <i>(Auto-verified via Blockchain)</i>`, [
         [{ text: "✏️ Change bKash", callback_data: "adm_set_bkash" }, { text: "✏️ Change Nagad", callback_data: "adm_set_nagad" }],
         [{ text: "✏️ Change Rocket", callback_data: "adm_set_rocket" }, { text: "✏️ Change Binance Pay ID", callback_data: "adm_set_binance" }],
         [{ text: `🤖 Binance Auto-Verify: ${binanceAuto ? "ON" : "OFF"}`, callback_data: "adm_toggle_binance_auto" }],
@@ -4566,8 +4567,8 @@ async function showPaymentHealth(env,chatId,messageId=null){
   if(sms.results?.length){text+='\n<b>Latest server SMS records</b>\n';for(const row of sms.results)text+=`${row.method.toUpperCase()} · ${(row.amount_minor/100).toFixed(2)} BDT · <code>${escapeHtml(row.trx_id)}</code> · ${row.status==='claimed'?'Matched':'Not matched'}\n`;}
   else text+='\nNo payment SMS records stored for the enrolled phone.\n';
   if(issues.results?.length){text+='\n<b>Recent verification issues</b>\n';for(const issue of issues.results)text+=`${issue.invoice_type==='order'?'Order':'Deposit'} ${issue.public_order_id||issue.invoice_id} · ${escapeHtml(issue.method)}: ${escapeHtml(paymentDashboardReason(issue.reason))}\n`;}
-  text+='\nBridge v0.8 is required for periodic phone status; older apps can still send payment receipts. Heartbeat updates approximately every 15 minutes; Android may delay background jobs. A recent report does not prove the phone is online now. Configuration checks do not test live Binance/RPC access.';
-  const buttons=[[{text:'🔄 Refresh Status',callback_data:'adm_payment_health'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Pending Payments',callback_data:'adm_paydash_pending_0'}],[{text:'Payment Settings',callback_data:'adm_payment_settings'},{text:'Admin Panel',callback_data:'admin_panel'}],[{text:'📱 Bridge v0.8 APK',url:'https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.8.apk'}]];
+  text+='\nBridge v0.8 or later is required for periodic phone status; older apps can still send payment receipts. Heartbeat updates approximately every 15 minutes; Android may delay background jobs. A recent report does not prove the phone is online now. Configuration checks do not test live Binance/RPC access.';
+  const buttons=[[{text:'🔄 Refresh Status',callback_data:'adm_payment_health'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Pending Payments',callback_data:'adm_paydash_pending_0'}],[{text:'Payment Settings',callback_data:'adm_payment_settings'},{text:'Admin Panel',callback_data:'admin_panel'}],[{text:'📱 Bridge v0.9 APK',url:'https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.9.apk'}]];
   for(const issue of issues.results||[])buttons.splice(1,0,[{text:`Inspect ${issue.invoice_type==='order'?'Order':'Deposit'} ${issue.public_order_id||issue.invoice_id}`,callback_data:`adm_paydetail_${issue.invoice_type}_${issue.invoice_id}`}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }

@@ -6,7 +6,7 @@ Payment method rows are configuration checks, not live Binance API or BSC RPC pr
 
 ## Bridge v0.8
 
-Install [v0.8](../downloads/telibot-receipt-bridge-v0.8.apk) over the installed app with Update. Do not uninstall or clear data. The APK uses the same verified release certificate as v0.7; existing encrypted receipts, signing secret and device identity remain in the app's storage. No new Cloudflare variables, Worker or permissions are required.
+Install [v0.9](../downloads/telibot-receipt-bridge-v0.9.apk) over the installed app with Update. Do not uninstall or clear data. The APK uses the same verified release certificate as v0.7; existing encrypted receipts, signing secret and device identity remain in the app's storage. No new Cloudflare variables, Worker or permissions are required.
 
 Open the app and use Save and Start / Connection Check, then open the admin status page. v0.8 signs a minimal `type: heartbeat` payload using the existing HMAC protocol, enrolled device ID and endpoint. It sends app version, forwarding/permission/battery flags, queue count, configured receiving numbers, last company-SMS capture time/method and an allowlisted capture result. It sends no raw SMS, OTP, PIN, sender number, contacts or inbox contents. A heartbeat cannot create a payment receipt or settle an invoice. Unknown fields and unauthenticated/wrong-device requests are rejected.
 

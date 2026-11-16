@@ -1,12 +1,16 @@
-# TeliBot Receipt Bridge v0.8 — সহজ ব্যবহার ও Admin Status
+# TeliBot Receipt Bridge v0.9 — সহজ ব্যবহার ও Admin Status
 
-[APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.8.apk)
+[APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.9.apk)
 
 Android 8+। আগের অ্যাপের ওপর **Update** করুন। Uninstall/Clear data করবেন না: একই signing certificate-এ update করলে চাবি, Device ID এবং encrypted pending queue থাকবে। Payment receipt protocol অপরিবর্তিত; নতুন Cloudflare variable লাগে না।
 
-## v0.8: ফোনের অবস্থা অ্যাডমিন প্যানেলে
+## v0.9: সংযোগ ব্যর্থ হলেও স্বয়ংক্রিয় retry
 
-1. আগে বটের নতুন deploy শেষ হতে দিন। ওপরের v0.8 APK ডাউনলোড করে আগের অ্যাপের ওপর **Update** করুন—Uninstall বা Clear data করবেন না। একই release certificate ব্যবহার করা হয়েছে; পুরোনো চাবি, Device ID ও encrypted queue থাকবে।
+ইন্টারনেট/সংযোগ পরীক্ষা ব্যর্থ হলেও forwarding চালু থাকলে encrypted queue upload এবং health report schedule হবে। ইন্টারনেট ফিরলে Android সুযোগ দিলে আবার চেষ্টা করবে। Heartbeat pending queue দেখলে হারিয়ে যাওয়া upload job-ও ফিরিয়ে আনবে। বিদ্যমান retry/backoff বারবার reset করবে না। রকেটের incoming SMS format না পাওয়া পর্যন্ত Rocket অটো নয়।
+
+## v0.8 থেকে থাকা Admin Status
+
+1. আগে বটের নতুন deploy শেষ হতে দিন। ওপরের v0.9 APK ডাউনলোড করে আগের অ্যাপের ওপর **Update** করুন—Uninstall বা Clear data করবেন না। একই release certificate ব্যবহার করা হয়েছে; পুরোনো চাবি, Device ID ও encrypted queue থাকবে।
 2. অ্যাপ খুলে **সেভ করে চালু করুন / সংযোগ পরীক্ষা** চাপুন। নতুন কোনো Secret বা Cloudflare variable লাগবে না।
 3. বটে **Admin Panel → Payment & SMS Status** খুলুন। Last contact, Last heartbeat, app version, forwarding, SMS permission, pending queue, battery restriction এবং শেষ company SMS capture-এর ফল দেখুন।
 4. Android অনুমতি দিলে প্রায় ১৫ মিনিট পরপর background report যায়। Android battery/Doze-এর কারণে দেরি হতে পারে। Stale heartbeat মানেই নিশ্চিত offline নয়; ফোন খুলে internet, permission এবং battery settings দেখুন।
