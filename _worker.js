@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-clear-user-guide-1";
+const BOT_BUILD="2026-11-16-guide-design-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-clear-user-guide-1";
+const DB_SCHEMA_VERSION = "2026-11-guide-design-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -271,6 +271,7 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS.guide_intro,'guide_intro',GUIDE_PREVIOUS_INTRO),
       ...Object.entries(GUIDE_LEGACY_DEFAULTS).map(([key,value])=>db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS[key],key,value)),
       db.prepare('CREATE INDEX IF NOT EXISTS orders_user_sequence_lookup ON orders(user_id,id)'),
       db.prepare('UPDATE orders AS target SET user_order_number=(SELECT COUNT(*) FROM orders previous WHERE previous.user_id=target.user_id AND previous.id<=target.id) WHERE user_order_number IS NULL'),
@@ -4306,9 +4307,10 @@ const GUIDE_LEGACY_DEFAULTS={
   guide_refund:'রিফান্ডের আবেদন অর্ডারের সমস্যা ও সংশ্লিষ্ট প্রোডাক্টের শর্ত অনুযায়ী অ্যাডমিন যাচাই করবেন। Orders → Get Help থেকে টিকিট দিন। শুধু আবেদন করলেই স্বয়ংক্রিয় রিফান্ড নিশ্চিত নয়। পেমেন্ট আটকে থাকলে আবার টাকা না পাঠিয়ে একই Order ID দিয়ে সাপোর্ট নিন।',
   guide_faq:'• টাকা কেটেছে, প্রোডাক্ট আসেনি? Orders দেখুন; Check Delivery থাকলে ব্যবহার করুন, না হলে Get Help দিন।\n• ডিপোজিট হয়নি? সঠিক মাধ্যম, পরিমাণ ও রসিদের ID মিলিয়ে দেখুন; PIN/OTP দেবেন না।\n• একই TxID আবার ব্যবহার করা যায়? সম্পন্ন পেমেন্টের ID দ্বিতীয়বার ক্রেডিট হয় না।\n• দাম বদলেছে? API-এর দাম/স্টক sync হলে আপডেট হয়। কেনার আগে সর্বশেষ মোট মূল্য দেখুন।\n• ব্যালেন্সের হিসাব? Profile → Balance History দেখুন।'
 };
+const GUIDE_PREVIOUS_INTRO="প্রথমবার ব্যবহার করছেন? নিচের বিষয়গুলো থেকে প্রয়োজনীয়টি বেছে নিন।\n\nপেমেন্টের নিয়ম → টাকা পাঠানো ও ভেরিফিকেশন\nঅর্ডার ও ডেলিভারি → কেনা ও ফাইল ডাউনলোড\nওয়ারেন্টি → প্রোডাক্টের শর্ত ও সহায়তা\nরিফান্ড → সমস্যা হলে করণীয়\nFAQ → সাধারণ প্রশ্নের উত্তর";
 const GUIDE_DEFAULTS={
   "guide_title": "User Guide / FAQ",
-  "guide_intro": "প্রথমবার ব্যবহার করছেন? নিচের বিষয়গুলো থেকে প্রয়োজনীয়টি বেছে নিন।\n\nপেমেন্টের নিয়ম → টাকা পাঠানো ও ভেরিফিকেশন\nঅর্ডার ও ডেলিভারি → কেনা ও ফাইল ডাউনলোড\nওয়ারেন্টি → প্রোডাক্টের শর্ত ও সহায়তা\nরিফান্ড → সমস্যা হলে করণীয়\nFAQ → সাধারণ প্রশ্নের উত্তর",
+  "guide_intro": "কেনাকাটা, পেমেন্ট ও ডেলিভারি—প্রয়োজনীয় নির্দেশনা এক জায়গায়।\n\nনিচের বাটন থেকে আপনার প্রয়োজনীয় বিষয়টি বেছে নিন।",
   "guide_payment": "বর্তমান রেট: 1 USD = {rate} BDT\n\nWallet Payment:\nDeposit থেকে ব্যালেন্স যোগ করুন। প্রোডাক্ট ও পরিমাণ বেছে Wallet Payment চাপুন।\n\nDirect Payment:\nঅর্ডারে দেখানো মাধ্যম, নম্বর/ঠিকানা ও পরিমাণ মিলিয়ে টাকা পাঠান। তারপর সেই পেমেন্টের ID জমা দিন।\n\nbKash / Nagad:\nদেখানো নম্বরে Send Money করুন। ৬০ মিনিটের মধ্যে রসিদের TrxID দিন। টাকা পাওয়ার SMS মিললে ভেরিফাই হবে।\n\nRocket:\n৬০ মিনিটের মধ্যে নির্দেশনায় Reply দিয়ে রসিদের Transaction ID দিন। অ্যাডমিন যাচাই করবেন।\n\nBinance Pay:\nদেখানো Pay ID-তে USDT পাঠান। পেমেন্টের ১০ মিনিটের মধ্যে রসিদের Order/Transaction ID দিন। ডিপোজিটে সর্বোচ্চ $10।\n\nBEP20 USDT:\nশুধু BNB Smart Chain-এ দেখানো ঠিকানায় পাঠান। পুরো পরিমাণ পৌঁছাতে হবে; ফি আলাদা। ১০ মিনিটের মধ্যে TxHash দিন। ১২টি confirmation প্রয়োজন।\n\nRedeem Code:\nDeposit → Redeem Code-এ বৈধ কোড দিন। একই কোড একবার ব্যবহার করা যাবে।\n\nপেমেন্ট আটকে গেলে:\nCheck Payment চাপুন। আবার টাকা পাঠাবেন না; প্রয়োজনে Support নিন। PIN, OTP বা private key দেবেন না।",
   "guide_delivery": "যেভাবে কিনবেন:\n১. Browse Shop থেকে ক্যাটেগরি ও প্রোডাক্ট বেছে নিন।\n২. বিবরণ, দাম ও স্টক দেখুন। Buy Now চাপুন।\n৩. পরিমাণ বেছে পেমেন্ট নিশ্চিত করুন।\n\nযেভাবে ডেলিভারি পাবেন:\nপেমেন্ট নিশ্চিত হলে উপলব্ধ প্রোডাক্ট .txt ডকুমেন্টে পাঠানো হবে। এতে আপনার কেনা অ্যাকাউন্ট, কোড বা লিংক থাকবে।\n\nআবার ফাইল নিতে চাইলে:\nMy Orders খুলে সংশ্লিষ্ট অর্ডারের Download বাটন চাপুন। আবার পেমেন্ট করতে হবে না। ডকুমেন্টের Copy Order ID দিয়ে অর্ডার ID কপি করতে পারবেন।\n\nডেলিভারি না এলে:\nMy Orders-এ অবস্থা দেখুন। Check Delivery থাকলে চাপুন। সাপ্লায়ার বা স্টকের সমস্যায় সময় লাগতে পারে। একই অর্ডারে আবার টাকা পাঠাবেন না।\n\nসহায়তা লাগলে:\nডকুমেন্টের Get Help চাপুন। সমস্যাটি লিখে পাঠান। অ্যাডমিন আপনার অর্ডার ও প্রোডাক্টসহ অভিযোগ দেখবেন এবং টিকিটে উত্তর দিতে পারবেন।",
   "guide_warranty": "কেনার আগে:\nপ্রোডাক্টের বিবরণে ওয়ারেন্টির মেয়াদ, শর্ত ও ব্যবহারের নির্দেশনা দেখুন। প্রোডাক্টভেদে শর্ত আলাদা হতে পারে।\n\nশর্ত পরিষ্কার না হলে:\nকেনার আগে Support থেকে নিশ্চিত হয়ে নিন।\n\nসমস্যা হলে:\nসংশ্লিষ্ট অর্ডারের Get Help থেকে কী সমস্যা হচ্ছে লিখুন। অ্যাডমিন সেই প্রোডাক্টের শর্ত অনুযায়ী যাচাই করবেন।\n\nযা পাঠাবেন না:\nPIN, OTP বা অ্যাকাউন্টের পাসওয়ার্ড সাপোর্টে পাঠাবেন না।",
@@ -4329,15 +4331,19 @@ function formatGuideFaq(value){
 async function showUserGuide(env,chatId,section='menu',messageId=null){
   const labels={payment:'পেমেন্টের নিয়ম',delivery:'অর্ডার ও ডেলিভারি',warranty:'ওয়ারেন্টি',refund:'রিফান্ড',faq:'FAQ'};
   const title=await getSetting(env,'guide_title',GUIDE_DEFAULTS.guide_title),intro=await getSetting(env,'guide_intro',GUIDE_DEFAULTS.guide_intro);
-  let text=`📖 <b>${escapeHtml(title)}</b>\n\n${escapeHtml(intro)}`;
+  let text=`📖 <b>${escapeHtml(title)}</b>\n\n<blockquote>${escapeHtml(intro)}</blockquote>`;
   if(section==='payment'){
     const rate=await getSetting(env,'usd_to_bdt_rate','125'),body=await getSetting(env,'guide_payment',GUIDE_DEFAULTS.guide_payment);
     text=`💳 <b>পেমেন্টের নিয়ম</b>\n\n${formatGuideBody(body.replaceAll('{rate}',String(rate)))}`;
   }else if(section==='faq'){
     text=`📖 <b>FAQ</b>\n\n${formatGuideFaq(await getSetting(env,'guide_faq',GUIDE_DEFAULTS.guide_faq))}`;
   }else if(labels[section])text=`📖 <b>${labels[section]}</b>\n\n${formatGuideBody(await getSetting(env,'guide_'+section,GUIDE_DEFAULTS['guide_'+section]))}`;
-  const buttons=section==='menu'?[[{text:'Payment Rules',callback_data:'guide_payment'},{text:'Order / Delivery',callback_data:'guide_delivery'}],[{text:'Warranty',callback_data:'guide_warranty'},{text:'Refund Policy',callback_data:'guide_refund'}],[{text:'FAQ',callback_data:'guide_faq'}]]:[[{text:'Back to Guide',callback_data:'user_guide'}]];
-  buttons.push([{text:'Shop',callback_data:'shop'},{text:'Support',callback_data:'support'}],[{text:'Main Menu',callback_data:'home'}]);
+  const buttons=section==='menu'?[
+    [{text:'💳 পেমেন্টের নিয়ম',callback_data:'guide_payment',style:'primary'},{text:'📦 অর্ডার ও ডেলিভারি',callback_data:'guide_delivery',style:'primary'}],
+    [{text:'🛡️ ওয়ারেন্টি',callback_data:'guide_warranty'},{text:'↩️ রিফান্ড নীতি',callback_data:'guide_refund'}],
+    [{text:'❓ সাধারণ প্রশ্ন ও উত্তর',callback_data:'guide_faq',style:'primary'}]
+  ]:[[{text:'‹ গাইডে ফিরে যান',callback_data:'user_guide'}]];
+  buttons.push([{text:'🛍️ শপ দেখুন',callback_data:'shop'},{text:'💬 সাপোর্ট',callback_data:'support'}],[{text:'🏠 মেইন মেনু',callback_data:'home'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleGuideCallback(env,chatId,data,messageId){
