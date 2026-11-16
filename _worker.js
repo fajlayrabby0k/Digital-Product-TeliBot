@@ -3933,7 +3933,8 @@ async function handleTicketText(env,chatId,text,state,isAdminState){
   ]);
   if(!result[0].meta?.changes){await sendMsg(env,chatId,'Message was already submitted, cancelled or the ticket closed.');return true;}
   const target=isAdminState?ticket.user_id:env.ADMIN_ID;
-  const sent=await sendMsg(env,target,`🎫 <b>${isAdminState?'Admin Reply':'Customer Support Message'} · Ticket #${ticket.id}</b>\nOrder ID ${ticket.public_order_id||await getPublicOrderId(env,ticket.order_id)}\n\n${escapeHtml(body)}`,[[{text:'Open Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);
+  const ticketOrder=await env.DB.prepare('SELECT o.*,p.name AS current_product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=?').bind(ticket.order_id).first();
+  const sent=await sendMsg(env,target,`🎫 <b>${isAdminState?'Admin Reply':'Customer Support Message'} · Ticket #${ticket.id}</b>\nOrder ID: <code>${ticketOrder?orderDisplayId(ticketOrder):await getPublicOrderId(env,ticket.order_id)}</code>\nProduct: ${adminSnippet(ticketOrder?.product_name||ticketOrder?.current_product_name||'Product unavailable',100)}\nCustomer: <code>${ticket.user_id}</code>\n\n${escapeHtml(body)}`,[[{text:'Open Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);
   await sendMsg(env,chatId,`✅ Message saved to Ticket #${ticket.id}.${sent?.ok?'':' The notification could not be confirmed; the message is available in the ticket.'}`,[[{text:'View Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);return true;
 }
 
