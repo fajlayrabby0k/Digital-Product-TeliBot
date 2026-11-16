@@ -483,12 +483,12 @@ async function callTg(env, method, payload) {
 }
 async function sendMsg(env, chatId, text, keyboard = null) {
   const p = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
-  if (keyboard) p.reply_markup = { inline_keyboard: keyboard };
+  if (keyboard) p.reply_markup = { inline_keyboard: walletFooterKeyboard(chatId,keyboard) };
   return await callTg(env, "sendMessage", p);
 }
 async function editMsg(env, chatId, messageId, text, keyboard = null) {
   const p = { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", disable_web_page_preview: true };
-  if (keyboard) p.reply_markup = { inline_keyboard: keyboard };
+  if (keyboard) p.reply_markup = { inline_keyboard: walletFooterKeyboard(chatId,keyboard) };
   const res = await callTg(env, "editMessageText", p);
   if (!res || !res.ok) {
     const desc = (res && res.description) || "";
@@ -1652,6 +1652,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if(await handleProductNoticeCallback(env,chatId,data,messageId))return;
     if(await handleGuideCallback(env,chatId,data,messageId))return;
     if(await handlePeriodicCallback(env,chatId,data,messageId))return;
+    if(['profile','deposit'].includes(data)){await env.DB.prepare('DELETE FROM user_states WHERE user_id=?').bind(chatId).run();if(adminUserAccess(env,chatId))await clearAdminState(env,chatId);}
     // Navigation Callbacks
     if (data === "home") { await clearAdminState(env, chatId); await sendHomeDashboard(env, chatId, user, firstName, messageId); return; }
     const shopPage=data.match(/^shop_(page|refresh)_(\d+)$/);
@@ -4323,4 +4324,14 @@ async function handlePeriodicCallback(env,chatId,data,messageId){
   if(data==='adm_periodic_toggle')await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('periodic_sync_enabled',CASE WHEN COALESCE((SELECT value FROM settings WHERE key='periodic_sync_enabled'),'1')='1' THEN '0' ELSE '1' END)").run();
   if(data==='adm_periodic_run'){await runPeriodicSync(env,true);if(env.__executionContext?.waitUntil)env.__executionContext.waitUntil(drainAllNotices(env).catch(()=>{}));}
   await showPeriodicStatus(env,chatId,messageId);return true;
+}
+
+
+function walletFooterKeyboard(chatId,keyboard){
+  if(!Array.isArray(keyboard)||!/^\d+$/.test(String(chatId))||Number(chatId)<=0)return keyboard;
+  const hasUserNavigation=keyboard.some(row=>row.some(button=>typeof button.callback_data==='string'&&!/^(adm_|admin_)/.test(button.callback_data)&&button.callback_data!=='admin_panel'));
+  if(!hasUserNavigation)return keyboard;
+  const rows=keyboard.map(row=>row.filter(button=>!['profile','deposit'].includes(button.callback_data))).filter(row=>row.length);
+  rows.push([{text:'👛 Wallet',callback_data:'profile',style:'primary'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}]);
+  return rows;
 }
