@@ -16,5 +16,11 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  await cb('adm_edit_guide_delivery');await text('/help');assert(last().text.includes('User Guide'));assert.equal(db.prepare('SELECT * FROM admin_states WHERE user_id=1').get(),undefined);
  await cb('adm_edit_guide_faq',99);assert.equal(db.prepare('SELECT * FROM admin_states WHERE user_id=99').get(),undefined);assert.equal(await c.api.handleGuideText(env,99,'Change',{state:'awaiting_guide_text',data:'guide_faq'}),false);
  await cb('guide_faq',99);assert(last().text.includes('FAQ'));assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,20);
+ await cb('adm_guide');for(const key of ['title','intro','payment','delivery','warranty','refund','faq'])assert(buttons().some(b=>b.callback_data==='adm_edit_guide_'+key));
+ await cb('adm_edit_guide_title');await text('My Store Guide');await cb('adm_edit_guide_intro');await text('Welcome <everyone>');await cb('user_guide',99);assert(last().text.includes('My Store Guide'));assert(last().text.includes('&lt;everyone&gt;'));
+ await cb('adm_edit_guide_payment');await text('নিজস্ব পেমেন্ট নির্দেশনা। 1 USD = {rate} BDT');db.prepare("UPDATE settings SET value='130' WHERE key='usd_to_bdt_rate'").run();await cb('guide_payment',99);assert(last().text.includes('নিজস্ব পেমেন্ট নির্দেশনা'));assert(last().text.includes('130 BDT'));assert(!last().text.includes('{rate}'));
+ await cb('adm_edit_guide_title');await text('x'.repeat(81));assert.equal(db.prepare("SELECT value FROM settings WHERE key='guide_title'").get().value,'My Store Guide');await cb('adm_guide');
+ await cb('adm_reset_guide_payment',99);assert(db.prepare("SELECT value FROM settings WHERE key='guide_payment'").get().value.includes('নিজস্ব'));await cb('adm_reset_guide_payment');await cb('guide_payment',99);assert(last().text.includes('৬০ মিনিট'));assert(last().text.includes('$10'));
+ await c.api.ensureDbReady(DB,true);await cb('user_guide',99);assert(last().text.includes('My Store Guide'));assert(last().text.includes('&lt;everyone&gt;'));
  console.log('PASS: user guide/payment rules, editable policies, HTML escaping, cancellation/navigation, admin-only editing and unchanged finances');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

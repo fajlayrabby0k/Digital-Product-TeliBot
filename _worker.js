@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-auto-sync-guides-1";
+const BOT_BUILD="2026-11-16-custom-user-guide-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-auto-sync-guides-1";
+const DB_SCHEMA_VERSION = "2026-11-custom-user-guide-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -4263,6 +4263,9 @@ function normalizeNoticeChannel(value){
 
 
 const GUIDE_DEFAULTS={
+  guide_title:'User Guide / FAQ',
+  guide_intro:'প্রয়োজনীয় বিষয়টি বেছে নিন।',
+  guide_payment:"বর্তমান রেট: 1 USD = {rate} BDT\n\n• Wallet Pay: আগে ডিপোজিট করুন, তারপর Wallet Payment দিয়ে কেনা নিশ্চিত করুন।\n• Direct Payment: অর্ডারের পেমেন্ট মাধ্যম বেছে দেখানো পরিমাণ পাঠান।\n• bKash/Nagad: দেখানো নম্বরে ঠিক পরিমাণ Send Money করুন। ৬০ মিনিটের মধ্যে রসিদের TrxID দিন। গ্রহণকারী ফোনের SMS-এর সঙ্গে মিললে ভেরিফাই হবে।\n• Rocket: রসিদের Transaction ID নির্দেশনায় Reply দিয়ে ৬০ মিনিটের মধ্যে জমা দিন; অ্যাডমিনের অনুমোদন লাগে।\n• Binance Pay: Pay ID-তে USDT পাঠিয়ে রসিদের Order/Transaction ID দিন। পেমেন্টের ১০ মিনিটের মধ্যে ID জমা দিন। ডিপোজিটে সর্বোচ্চ $10।\n• BEP20: শুধু USDT, BNB Smart Chain নেটওয়ার্কে দেখানো ঠিকানায় পুরো পরিমাণ পৌঁছাতে হবে। ফি আলাদা বহন করুন। পেমেন্টের ১০ মিনিটের মধ্যে TxHash দিন; ১২টি confirmation প্রয়োজন।\n• Redeem Code: ডিপোজিটের Redeem Code অপশনে বৈধ একবার-ব্যবহারযোগ্য কোড দিন।\n\nPIN, OTP বা private key দেবেন না। পেমেন্ট নিশ্চিত না হলে আবার টাকা পাঠাবেন না।",
   guide_delivery:'পেমেন্ট নিশ্চিত হলে উপলব্ধ প্রোডাক্ট স্বয়ংক্রিয়ভাবে ডেলিভারি হয়। সাপ্লায়ারের অর্ডার বা স্টক আটকে থাকলে সময় লাগতে পারে। Orders থেকে অবস্থা দেখুন। Check Delivery থাকলে ব্যবহার করুন অথবা Get Help দিয়ে সাপোর্ট টিকিট করুন। একই অর্ডারের জন্য আবার পেমেন্ট করবেন না।',
   guide_warranty:'ওয়ারেন্টি প্রোডাক্টভেদে আলাদা। কেনার আগে প্রোডাক্টের বিবরণে মেয়াদ, শর্ত ও নির্দেশনা পড়ুন। স্পষ্টভাবে উল্লেখ না থাকলে কেনার আগে সাপোর্টে নিশ্চিত করুন। সমস্যায় Order ID-সহ সাপোর্ট টিকিট দিন; PIN, OTP বা পাসওয়ার্ড পাঠাবেন না।',
   guide_refund:'রিফান্ডের আবেদন অর্ডারের সমস্যা ও সংশ্লিষ্ট প্রোডাক্টের শর্ত অনুযায়ী অ্যাডমিন যাচাই করবেন। Orders → Get Help থেকে টিকিট দিন। শুধু আবেদন করলেই স্বয়ংক্রিয় রিফান্ড নিশ্চিত নয়। পেমেন্ট আটকে থাকলে আবার টাকা না পাঠিয়ে একই Order ID দিয়ে সাপোর্ট নিন।',
@@ -4270,10 +4273,11 @@ const GUIDE_DEFAULTS={
 };
 async function showUserGuide(env,chatId,section='menu',messageId=null){
   const labels={payment:'পেমেন্টের নিয়ম',delivery:'অর্ডার ও ডেলিভারি',warranty:'ওয়ারেন্টি',refund:'রিফান্ড',faq:'FAQ'};
-  let text='📖 <b>User Guide / FAQ</b>\n\nপ্রয়োজনীয় বিষয়টি বেছে নিন।';
+  const title=await getSetting(env,'guide_title',GUIDE_DEFAULTS.guide_title),intro=await getSetting(env,'guide_intro',GUIDE_DEFAULTS.guide_intro);
+  let text=`📖 <b>${escapeHtml(title)}</b>\n\n${escapeHtml(intro)}`;
   if(section==='payment'){
-    const rate=await getSetting(env,'usd_to_bdt_rate','125');
-    text=`💳 <b>পেমেন্টের নিয়ম</b>\n\nবর্তমান রেট: 1 USD = ${escapeHtml(rate)} BDT\n\n• Wallet Pay: আগে ডিপোজিট করুন, তারপর Wallet Payment দিয়ে কেনা নিশ্চিত করুন।\n• Direct Payment: অর্ডারের পেমেন্ট মাধ্যম বেছে দেখানো পরিমাণ পাঠান।\n• bKash/Nagad: দেখানো নম্বরে ঠিক পরিমাণ Send Money করুন। ৬০ মিনিটের মধ্যে রসিদের TrxID দিন। গ্রহণকারী ফোনের SMS-এর সঙ্গে মিললে ভেরিফাই হবে।\n• Rocket: রসিদের Transaction ID নির্দেশনায় Reply দিয়ে ৬০ মিনিটের মধ্যে জমা দিন; অ্যাডমিনের অনুমোদন লাগে।\n• Binance Pay: Pay ID-তে USDT পাঠিয়ে রসিদের Order/Transaction ID দিন। পেমেন্টের ১০ মিনিটের মধ্যে ID জমা দিন। ডিপোজিটে সর্বোচ্চ $10।\n• BEP20: শুধু USDT, BNB Smart Chain নেটওয়ার্কে দেখানো ঠিকানায় পুরো পরিমাণ পৌঁছাতে হবে। ফি আলাদা বহন করুন। পেমেন্টের ১০ মিনিটের মধ্যে TxHash দিন; ১২টি confirmation প্রয়োজন।\n• Redeem Code: ডিপোজিটের Redeem Code অপশনে বৈধ একবার-ব্যবহারযোগ্য কোড দিন।\n\nPIN, OTP বা private key দেবেন না। পেমেন্ট নিশ্চিত না হলে আবার টাকা পাঠাবেন না।`;
+    const rate=await getSetting(env,'usd_to_bdt_rate','125'),body=await getSetting(env,'guide_payment',GUIDE_DEFAULTS.guide_payment);
+    text=`💳 <b>পেমেন্টের নিয়ম</b>\n\n${escapeHtml(body.replaceAll('{rate}',String(rate)))}`;
   }else if(labels[section])text=`📖 <b>${labels[section]}</b>\n\n${escapeHtml(await getSetting(env,'guide_'+section,GUIDE_DEFAULTS['guide_'+section]))}`;
   const buttons=section==='menu'?[[{text:'Payment Rules',callback_data:'guide_payment'},{text:'Order / Delivery',callback_data:'guide_delivery'}],[{text:'Warranty',callback_data:'guide_warranty'},{text:'Refund Policy',callback_data:'guide_refund'}],[{text:'FAQ',callback_data:'guide_faq'}]]:[[{text:'Back to Guide',callback_data:'user_guide'}]];
   buttons.push([{text:'Shop',callback_data:'shop'},{text:'Support',callback_data:'support'}],[{text:'Main Menu',callback_data:'home'}]);
@@ -4283,13 +4287,14 @@ async function handleGuideCallback(env,chatId,data,messageId){
   if(data==='user_guide'){await clearBinanceInput(env,chatId);await clearTicketInput(env,chatId);if(adminUserAccess(env,chatId))await clearAdminState(env,chatId);await showUserGuide(env,chatId,'menu',messageId);return true;}
   let match=data.match(/^guide_(payment|delivery|warranty|refund|faq)$/);if(match){await showUserGuide(env,chatId,match[1],messageId);return true;}
   if(!adminUserAccess(env,chatId))return false;
-  if(data==='adm_guide'){await clearAdminState(env,chatId);await editMsg(env,chatId,messageId,'📖 <b>User Guide Settings</b>\n\nSet your actual delivery, warranty, refund and FAQ text. Do not promise terms that your store cannot honor. Payment instructions follow the bot’s verification rules.',Object.keys(GUIDE_DEFAULTS).map(key=>[{text:'Edit '+key.slice(6),callback_data:'adm_edit_'+key}]).concat([[{text:'Preview Guide',callback_data:'user_guide'},{text:'Admin Panel',callback_data:'admin_panel'}]]));return true;}
-  match=data.match(/^adm_edit_(guide_(delivery|warranty|refund|faq))$/);if(match){const current=await getSetting(env,match[1],GUIDE_DEFAULTS[match[1]]);await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_guide_text',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,`Current text:\n${escapeHtml(current)}\n\nSend replacement plain text (up to 1200 characters).`,[[{text:'Cancel',callback_data:'adm_guide'}]]);return true;}return false;
+  if(data==='adm_guide'){await clearAdminState(env,chatId);await editMsg(env,chatId,messageId,'📖 <b>User Guide Settings</b>\n\nCustomize the guide title, introduction, payment instructions, delivery, warranty, refund and FAQ text. Editing these descriptions does not change payment verification rules.',Object.keys(GUIDE_DEFAULTS).map(key=>[{text:'Edit '+key.slice(6),callback_data:'adm_edit_'+key}]).concat([[{text:'Preview Guide',callback_data:'user_guide'},{text:'Admin Panel',callback_data:'admin_panel'}]]));return true;}
+  match=data.match(/^adm_edit_(guide_(title|intro|payment|delivery|warranty|refund|faq))$/);if(match){const current=await getSetting(env,match[1],GUIDE_DEFAULTS[match[1]]);await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_guide_text',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,`Current text:\n${escapeHtml(current)}\n\nSend replacement plain text (up to ${match[1]==='guide_title'?80:1200} characters).${match[1]==='guide_payment'?' Use {rate} to show the current BDT rate.':''}`,[[{text:'Reset to Default',callback_data:`adm_reset_${match[1]}`}],[{text:'Cancel',callback_data:'adm_guide'}]]);return true;}
+  match=data.match(/^adm_reset_(guide_(title|intro|payment|delivery|warranty|refund|faq))$/);if(match){await env.DB.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(match[1],GUIDE_DEFAULTS[match[1]]).run();await clearAdminState(env,chatId);await sendMsg(env,chatId,'Guide section restored to default.',[[{text:'Preview',callback_data:['guide_title','guide_intro'].includes(match[1])?'user_guide':match[1]},{text:'Guide Settings',callback_data:'adm_guide'}]]);return true;}return false;
 }
 async function handleGuideText(env,chatId,text,state){
   if(!adminUserAccess(env,chatId)||state.state!=='awaiting_guide_text')return false;
-  const value=String(text).trim();if(!Object.hasOwn(GUIDE_DEFAULTS,state.data)||!value||value.length>1200||escapeHtml(value).length>2800){await sendMsg(env,chatId,'Send a non-empty plain text guide of up to 1200 characters.');return true;}
-  await env.DB.batch([env.DB.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(state.data,value),env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='awaiting_guide_text' AND data=?").bind(chatId,state.data)]);await sendMsg(env,chatId,'Guide text saved.',[[{text:'Preview',callback_data:state.data},{text:'Guide Settings',callback_data:'adm_guide'}]]);return true;
+  const value=String(text).trim();if(!Object.hasOwn(GUIDE_DEFAULTS,state.data)||!value||value.length>(state.data==='guide_title'?80:1200)||escapeHtml(value).length>2800){await sendMsg(env,chatId,'Send non-empty plain text: title up to 80 characters, other sections up to 1200 characters.');return true;}
+  await env.DB.batch([env.DB.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(state.data,value),env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='awaiting_guide_text' AND data=?").bind(chatId,state.data)]);await sendMsg(env,chatId,'Guide text saved.',[[{text:'Preview',callback_data:['guide_title','guide_intro'].includes(state.data)?'user_guide':state.data},{text:'Guide Settings',callback_data:'adm_guide'}]]);return true;
 }
 async function runPeriodicSync(env,force=false){
   try{
