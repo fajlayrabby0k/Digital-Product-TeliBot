@@ -1,6 +1,6 @@
 # Product and stock notifications
 
-**Admin Panel → Product Notifications** controls all private alerts and each event type separately: new products, stock added, stock finished, follower price drops and follower price increases. They default to ON. Customers manage their preferences from **My Profile → Product Alerts**, and each alert links to Notification Settings. The configured admin is excluded from customer campaigns.
+**Admin Panel → Product Notifications** controls all private alerts and each event type separately: new products, stock added, stock finished, price drops and price increases. They default to ON. Customers manage their preferences from **My Profile → Product Alerts**, and each alert links to Notification Settings. The configured admin is excluded from customer campaigns.
 
 Both local products and API products are supported. New product insertion creates a new-product event. Any available-stock increase creates a stock-added event, and positive stock becoming zero creates a stock-finished event. Local inventory additions, sales, deletions and allocation changes are covered; supplier stock is detected when API sync/detail/checkout observes a new quantity. An unchanged sync creates no event.
 
@@ -8,13 +8,21 @@ Events and stock state are recorded by SQLite triggers in the same transaction a
 
 ## Following products
 
-Both local and API product details include **Follow Stock & Price / Unfollow Product**. Following enables private alerts and selects **Followed Only**, so unrelated store events stop. Existing accounts keep **All Products** until they choose another preference. **All Products** receives new-product and stock campaigns; private price alerts require following that product in either enabled mode. **Turn Off Alerts** pauses private alerts without deleting follows. Following again enables Followed Only.
+Both local and API product details include **Follow Stock & Price / Unfollow Product**. Customers choose one of three preferences:
 
-**Home / My Profile → Followed Products** lists ten favorites per page with product and Unfollow buttons. Every query and write uses the current Telegram chat ID; users cannot manage another customer's follows. Profile includes a count and preview of three followed products. Unfollowing and muting are checked when selecting recipients for pending batches. Preferences survive schema initialization. Followed-only with an empty list sends no product campaigns. Channel posts use their existing independent settings and queue.
+- **Followed Only**: private product alerts require following that product. With no follows, there are no private product campaigns.
+- **All Products**: new-product, stock and price campaigns across the store, including products not followed.
+- **Turn Off Alerts**: pause private campaigns without deleting follows or the saved scope.
 
-Selling-price changes enqueue follower events transactionally, independently of channel setup. Unchanged cent prices do not create events. Multiple changes while a campaign is pending retain their individual prices rather than overwriting a pending snapshot. Product, stock and price updates are detected when local changes or supplier sync occur; following itself does not run continuous supplier polling.
+New accounts default to Followed Only, including legacy databases whose column default previously used All Products. Existing choices are preserved. Following enables private alerts and retains the selected scope; it does not replace an explicit All Products choice. Unfollowing removes the favorite, but All Products still receives store-wide campaigns until the customer changes scope.
 
-`node tests/product-follows.cjs` verifies local/API updates, recipient filtering, follow/unfollow, preferences, raw-stock privacy, exact rapid price snapshots, duplicate suppression, pagination and unchanged balances. Existing queue tests cover retry, batch limits and concurrency.
+**Home / My Profile → Followed Products** lists ten favorites per page with full-width product buttons. Open an active product to unfollow it; unavailable products retain a removal button. Navigation and settings buttons use two columns. Every query and write uses the current Telegram chat ID; users cannot manage another customer's follows. Profile includes a count and preview of three followed products. Current scope, follows and mute settings are checked when selecting recipients for pending batches. Preferences survive schema initialization. Channel posts use their independent settings and queue, regardless of customer preferences.
+
+Registering a local pre-order stock alert explicitly follows that product and enables private alerts. Legacy pre-order restock notices also enforce follow and mute preferences; normal All Products campaigns still include catalog-wide stock updates.
+
+Selling-price changes enqueue events transactionally when followers or enabled All Products subscribers exist, independently of channel setup. Unchanged cent prices do not create events. Multiple changes while a campaign is pending retain individual old/new cent snapshots rather than overwriting the pending snapshot. Product, stock and price updates are detected when local changes or supplier sync occur; following itself does not run continuous supplier polling.
+
+`node tests/product-follows.cjs` verifies both enabled scopes and Off, new-product updates, local/API stock and price updates, recipient filtering, follow/unfollow, saved choices, raw-stock privacy, exact rapid price snapshots, duplicate suppression, pagination and unchanged balances. Existing queue tests cover retry, batch limits and concurrency.
 
 ## Background delivery
 
