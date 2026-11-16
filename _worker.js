@@ -2795,11 +2795,9 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
     `Choose an option below:`;
 
   const keyboard = [
-    [{text:'🛍️ Browse Shop',callback_data:'shop',style:'primary'}],
-    [{text:'👤 My Profile',callback_data:'profile'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}],
+    [{text:'🛍️ Browse Shop',callback_data:'shop',style:'primary'},{text:'💬 Support',callback_data:'support'}],
     [{text:'📦 My Orders',callback_data:'my_orders'},{text:'⏳ Pre-Orders',callback_data:'my_preorders'}],
-    [{text:'🎁 Refer & Earn',callback_data:'refer'},{text:'📖 Guide / FAQ',callback_data:'user_guide'}],
-    [{text:'💬 Contact Support',callback_data:'support'}]
+    [{text:'🎁 Refer & Earn',callback_data:'refer'},{text:'📖 Guide / FAQ',callback_data:'user_guide'}]
   ];
   if(String(chatId)===String(env.ADMIN_ID))keyboard.push([{text:'⚙️ Admin Panel',callback_data:'admin_panel',style:'primary'}]);
 
@@ -4332,6 +4330,8 @@ function walletFooterKeyboard(chatId,keyboard){
   const hasUserNavigation=keyboard.some(row=>row.some(button=>typeof button.callback_data==='string'&&!/^(adm_|admin_)/.test(button.callback_data)&&button.callback_data!=='admin_panel'));
   if(!hasUserNavigation)return keyboard;
   const rows=keyboard.map(row=>row.filter(button=>!['profile','deposit'].includes(button.callback_data))).filter(row=>row.length);
-  rows.push([{text:'👛 Wallet',callback_data:'profile',style:'primary'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}]);
-  return rows;
+  const adminRows=rows.filter(row=>row.length===1&&row[0].callback_data==='admin_panel');
+  const content=rows.filter(row=>!(row.length===1&&row[0].callback_data==='admin_panel'));
+  content.push([{text:'👛 Wallet',callback_data:'profile',style:'primary'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}],...adminRows);
+  return content;
 }
