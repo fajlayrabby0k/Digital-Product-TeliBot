@@ -4366,7 +4366,7 @@ async function sendOrderDocument(env,chatId,order,content){
   const displayId=orderDisplayId(order);
   if(!content){await sendMsg(env,chatId,'Delivery file unavailable. Please contact support with your Order ID.');return {ok:false};}
   const document={filename:`Order-${displayId}.txt`,content:`Order ID: ${displayId}\nProduct: ${order.product_name||order.name||'Product'}\nQuantity: ${order.quantity||1}\n\n${content}`};
-  const result=await callTg(env,'sendDocument',{chat_id:chatId,document,caption:`📄 Your purchased product · Order ID ${displayId}`,reply_markup:{inline_keyboard:[[{text:'📦 View Orders',callback_data:'my_orders'},{text:'🎫 Get Help',callback_data:`ticket_new_${order.id}`}]]}});
+  const result=await callTg(env,'sendDocument',{chat_id:chatId,document,caption:`📄 Your purchased product · Order ID <code>${displayId}</code>`,parse_mode:'HTML',reply_markup:{inline_keyboard:[[{text:'📋 Copy Order ID',copy_text:{text:displayId}}],[{text:'📦 View Orders',callback_data:'my_orders'},{text:'🎫 Get Help',callback_data:`ticket_new_${order.id}`}]]}});
   if(!result?.ok)await sendMsg(env,chatId,`Your payment and product are saved. Telegram could not confirm the file for Order ID ${displayId}. Download it again from My Orders; do not pay again.`,[[{text:'📄 Download Document',callback_data:`order_document_${order.id}`}]]);
   return result;
 }
