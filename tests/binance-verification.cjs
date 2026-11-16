@@ -70,7 +70,7 @@ const verify=(settings=env,inv=invoice,expected=5)=>context.api.verifyBinancePay
  messages.length=0;updates.length=0;
  vm.runInContext('dispatchExternalOrder=async()=>({success:true,credentials:"TEST-KEY"});processReferralCommission=async()=>{};',context);
  await context.api.completeSuccessfulOrder({DB:deliveryDB,ADMIN_ID:1},{id:10,is_external:1,quantity:1,product_id:4,product_name:'Test'},incoming.transactionId,99);
- assert(messages.some(text=>text.includes('Your Order is Delivered')&&text.includes('TEST-KEY')));
+ assert(messages.some(text=>text.includes('Your Order is Delivered')&&text.includes('text document')));
  assert(updates.some(sql=>sql.includes("status = 'completed'")));
  console.log('PASS: signed personal Pay API request, incoming USDT, exact amount, invoice age/status, outgoing/refund rejection, credential/API failure, duplicate/concurrent claims, deposit amount and failed delivery messaging');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-public-order-ids-1";
+const BOT_BUILD="2026-11-16-document-delivery-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -468,10 +468,19 @@ async function repairTelegramWebhook(env, recoveryUrl = null) {
 async function callTg(env, method, payload) {
   if (!env.BOT_TOKEN) return { ok: false, error: "BOT_TOKEN missing" };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), method === "answerCallbackQuery" ? 2500 : 8000);
+  const timer = setTimeout(() => controller.abort(), method === "answerCallbackQuery" ? 2500 : method === "sendDocument" ? 30000 : 8000);
   try {
+    const upload=method==='sendDocument'&&payload.document?.content!==undefined;
+    let body=JSON.stringify(payload),headers={"Content-Type":"application/json"};
+    if(upload){
+      body=new FormData();headers={};
+      for(const [key,value] of Object.entries(payload)){
+        if(key==='document')body.append(key,new Blob([value.content],{type:'text/plain;charset=utf-8'}),value.filename);
+        else if(value!==undefined&&value!==null)body.append(key,typeof value==='object'?JSON.stringify(value):String(value));
+      }
+    }
     const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal
+      method: "POST", headers, body, signal: controller.signal
     });
     const data = await res.json();
     if (!data.ok) {
@@ -768,10 +777,11 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
     if (apiRes.success) {
       await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(orderQty, order.product_id).run();
     }
-    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: ${displayId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${escapeHtml(creds)}</code></blockquote>`, [
+    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: ${displayId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n📄 Your product is delivered as a text document.`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
+    await sendOrderDocument(env,chatId,{...order,public_order_id:displayId},creds);
     await notifyAdminForUser(env,chatId, `✅ <b>Order ID ${displayId} Auto-Verified & Delivered via API!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
     await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
     return;
@@ -785,10 +795,11 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
   if (items && items.length >= orderQty) {
     await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     const lines = items.map(item => item.item_data);
-    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: ${displayId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${escapeHtml(lines.join("\n\n"))}</code></blockquote>`, [
+    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: ${displayId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n📄 Your product is delivered as a text document.`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
+    await sendOrderDocument(env,chatId,order,lines.join('\n\n'));
     await notifyAdminForUser(env,chatId, `✅ <b>Order ID ${displayId} Auto-Verified & Delivered from Stock!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
     await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
   } else {
@@ -845,10 +856,11 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     await env.DB.prepare("UPDATE orders SET status='completed',delivery_data=? WHERE id=?").bind(creds,orderId).run();
     await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(qty, prod.id).run();
 
-    await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder ID: ${displayId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${escapeHtml(creds)}</code></blockquote>`, [
+    await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder ID: ${displayId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n📄 Your product is delivered as a text document.`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
+    await sendOrderDocument(env,chatId,{id:orderId,public_order_id:displayId,product_name:prod.name,quantity:qty},creds);
     await notifyAdminForUser(env,chatId,`✅ Wallet Order ID ${displayId} delivered. Customer: <code>${chatId}</code> · $${totalUsd.toFixed(2)} USD · ${escapeHtml(prod.name)}`);
   await processReferralCommission(env, chatId, totalUsd, prod.name);
     return;
@@ -873,12 +885,12 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   const orderId=localBooking[0].meta.last_row_id;
   const displayId=await getPublicOrderId(env,orderId);
   const {results:allocated}=await env.DB.prepare('SELECT item_data FROM inventory WHERE order_id=? AND is_sold=1 ORDER BY id').bind(orderId).all();
-  const itemStrings=allocated.map(it=>escapeHtml(it.item_data));
 
-  await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder ID: ${displayId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${itemStrings.join("\n\n")}</code></blockquote>`, [
+  await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder ID: ${displayId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n📄 Your product is delivered as a text document.`, [
     [{ text: "📦 View Orders", callback_data: "my_orders" }],
     [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
   ]);
+  await sendOrderDocument(env,chatId,{id:orderId,public_order_id:displayId,product_name:prod.name,quantity:qty},allocated.map(it=>it.item_data).join('\n\n'));
   await notifyAdminForUser(env,chatId,`✅ Wallet Order ID ${displayId} delivered. Customer: <code>${chatId}</code> · $${totalUsd.toFixed(2)} USD · ${escapeHtml(prod.name)}`);
   await processReferralCommission(env, chatId, totalUsd, prod.name);
 }
@@ -1568,6 +1580,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await clearBinanceInput(env, chatId);
       await sendDeposit(env, chatId, messageId);
       return;
+    }
+    const documentRequest=data.match(/^order_document_(\d+)$/);
+    if(documentRequest){
+      const order=await env.DB.prepare("SELECT * FROM orders WHERE id=? AND user_id=? AND status='completed'").bind(documentRequest[1],chatId).first();
+      if(!order){await sendMsg(env,chatId,'Completed order not found in your account.');return;}
+      await sendSavedOrderDocument(env,chatId,order);return;
     }
     const providerRetry=data.match(/^provider_retry_(\d+)$/);
     if(providerRetry){
@@ -3130,7 +3148,7 @@ async function sendOrders(env,chatId,editMessageId=null){
   for(const order of results||[]){
     buttons.push([{text:`🎫 Get Help · ${orderDisplayId(order)}`,callback_data:`ticket_new_${order.id}`}]);
     orderText+=`<b>${escapeHtml(order.product_name)}</b>\nOrder ID: <code>${orderDisplayId(order)}</code> | Quantity: ${order.quantity||1} | Amount: $${Number(order.amount_usd).toFixed(2)}\n`;
-    if(order.status==='completed')orderText+=`Credentials: <code>${escapeHtml(order.delivery_data||order.item_data||'Delivery details unavailable. Contact admin.')}</code>\n\n`;
+    if(order.status==='completed'){orderText+='Delivery: Text document\n\n';buttons.push([{text:`📄 Download · ${orderDisplayId(order)}`,callback_data:`order_document_${order.id}`}]);}
     else if(order.status==='refunded')orderText+='Status: Wallet payment refunded.\n\n';
     else{
       orderText+='Status: Payment recorded; delivery pending. Do not pay again.\n\n';
@@ -3814,17 +3832,10 @@ async function resendSavedDelivery(env,chatId,id,messageId){
   if(!adminUserAccess(env,chatId))return;
   const order=await env.DB.prepare("SELECT * FROM orders WHERE id=? AND status='completed'").bind(id).first();
   if(!order){await sendMsg(env,chatId,'Only completed orders can resend saved delivery.');return;}
-  let content=order.delivery_data;
-  if(!content){const {results}=await env.DB.prepare('SELECT item_data FROM inventory WHERE order_id=? AND is_sold=1 ORDER BY id').bind(id).all();content=results.map(x=>x.item_data).join('\n\n');}
-  if(!content){await sendMsg(env,chatId,'No saved delivery content found. Check the original order and supplier history.');return;}
   const claim=await env.DB.prepare("UPDATE orders SET provider_retry_at=? WHERE id=? AND status='completed' AND COALESCE(provider_retry_at,0)<?").bind(Date.now()+30000,id,Date.now()).run();
   if(!claim.meta?.changes){await sendMsg(env,chatId,'Please wait 30 seconds before resending.');return;}
-  const chunks=[];let chunk='';for(const char of String(content)){const escaped=escapeHtml(char);if(chunk.length+escaped.length>2800){chunks.push(chunk);chunk='';}chunk+=escaped;}if(chunk)chunks.push(chunk);
-  for(let i=0;i<chunks.length;i++){
-    const sent=await sendMsg(env,order.user_id,`📦 <b>Saved delivery · Order ID ${orderDisplayId(order)}</b> (${i+1}/${chunks.length})\n\n<code>${chunks[i]}</code>`);
-    if(!sent?.ok){await sendMsg(env,chatId,'Telegram did not confirm the delivery message. Saved order data is unchanged; retry after cooldown.');return;}
-  }
-  await sendMsg(env,chatId,`Saved delivery for Order ID ${orderDisplayId(order)} sent to customer ${order.user_id}. No new purchase or wallet charge was made.`);
+  const sent=await sendSavedOrderDocument(env,order.user_id,order);
+  await sendMsg(env,chatId,sent?.ok?`Saved delivery for Order ID ${orderDisplayId(order)} sent as a text document. No new purchase or wallet charge was made.`:'Telegram did not confirm the document. Saved order data is unchanged; retry after cooldown.');
 }
 async function handleDeliveryAdminCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
@@ -4343,3 +4354,17 @@ async function handlePeriodicCallback(env,chatId,data,messageId){
 
 function orderDisplayId(order){return /^[1-9]\d{4}$/.test(String(order?.public_order_id||''))?String(order.public_order_id):String(order?.id||'').padStart(5,'0');}
 async function getPublicOrderId(env,id){const row=await env.DB.prepare('SELECT id,public_order_id FROM orders WHERE id=?').bind(id).first();return orderDisplayId(row||{id});}
+
+async function sendOrderDocument(env,chatId,order,content){
+  const displayId=orderDisplayId(order);
+  if(!content){await sendMsg(env,chatId,'Delivery file unavailable. Please contact support with your Order ID.');return {ok:false};}
+  const document={filename:`Order-${displayId}.txt`,content:`Order ID: ${displayId}\nProduct: ${order.product_name||order.name||'Product'}\nQuantity: ${order.quantity||1}\n\n${content}`};
+  const result=await callTg(env,'sendDocument',{chat_id:chatId,document,caption:`📄 Your purchased product · Order ID ${displayId}`,reply_markup:{inline_keyboard:[[{text:'📦 View Orders',callback_data:'my_orders'},{text:'🎫 Get Help',callback_data:`ticket_new_${order.id}`}]]}});
+  if(!result?.ok)await sendMsg(env,chatId,`Your payment and product are saved. Telegram could not confirm the file for Order ID ${displayId}. Download it again from My Orders; do not pay again.`,[[{text:'📄 Download Document',callback_data:`order_document_${order.id}`}]]);
+  return result;
+}
+async function sendSavedOrderDocument(env,chatId,order){
+  let content=order.delivery_data;
+  if(!content){const {results}=await env.DB.prepare('SELECT item_data FROM inventory WHERE order_id=? AND is_sold=1 ORDER BY id').bind(order.id).all();content=results.map(item=>item.item_data).join('\n\n');}
+  return sendOrderDocument(env,chatId,order,content);
+}
