@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-audit-repairs-1";
+const BOT_BUILD="2026-11-16-payment-health-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-audit-repairs-1";
+const DB_SCHEMA_VERSION = "2026-11-payment-health-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -176,6 +176,7 @@ async function initializeDatabase(db, force) {
       `CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state TEXT, data TEXT);`,
       `CREATE TABLE IF NOT EXISTS redeem_codes (code_hash TEXT PRIMARY KEY, amount_cents INTEGER NOT NULL CHECK(amount_cents > 0), created_by INTEGER NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, redeemed_by INTEGER DEFAULT NULL, redeemed_at DATETIME DEFAULT NULL, redemption_token TEXT UNIQUE DEFAULT NULL, redeemed_bdt INTEGER DEFAULT NULL);`,
       `CREATE TABLE IF NOT EXISTS bep20_payment_claims (tx_hash TEXT PRIMARY KEY, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_wei TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(invoice_type, invoice_id));`,
+      MOBILE_BRIDGE_HEALTH_SCHEMA,
       `CREATE TABLE IF NOT EXISTS mobile_bridge_receipts (event_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, method TEXT NOT NULL, account TEXT NOT NULL, trx_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, received_at INTEGER NOT NULL, paid_at INTEGER NOT NULL, body_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unverified_sms', created_at TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(method,trx_id));`,
       `CREATE TABLE IF NOT EXISTS mobile_payment_invoices (invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, method TEXT NOT NULL, account TEXT NOT NULL, amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), amount_cents INTEGER NOT NULL CHECK(amount_cents > 0), created_ms INTEGER NOT NULL, expires_ms INTEGER NOT NULL, trx_id TEXT, submitted_at INTEGER, status TEXT NOT NULL DEFAULT 'pending', PRIMARY KEY(invoice_type,invoice_id));`,
       `CREATE TABLE IF NOT EXISTS mobile_payment_claims (method TEXT NOT NULL, trx_id TEXT NOT NULL, event_id TEXT NOT NULL UNIQUE, invoice_type TEXT NOT NULL, invoice_id INTEGER NOT NULL, user_id INTEGER NOT NULL, amount_minor INTEGER NOT NULL, amount_cents INTEGER NOT NULL, token TEXT NOT NULL UNIQUE, created_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(method,trx_id), UNIQUE(invoice_type,invoice_id));`,
@@ -2324,6 +2325,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         [{ text: "✏️ Change bKash", callback_data: "adm_set_bkash" }, { text: "✏️ Change Nagad", callback_data: "adm_set_nagad" }],
         [{ text: "✏️ Change Rocket", callback_data: "adm_set_rocket" }, { text: "✏️ Change Binance Pay ID", callback_data: "adm_set_binance" }],
         [{ text: `🤖 Binance Auto-Verify: ${binanceAuto ? "ON" : "OFF"}`, callback_data: "adm_toggle_binance_auto" }],
+        [{text:"📡 Payment & SMS Status",callback_data:"adm_payment_health"}],
         [{ text: "Payment Custom Emojis", callback_data: "adm_payment_icons" }],
         [{ text: "✏️ Change BEP20 Address", callback_data: "adm_set_bep20" }],
         [{ text: "🔙 Admin Panel", callback_data: "admin_panel" }]
@@ -3103,7 +3105,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{text:'⏱️ Automatic Sync',callback_data:'adm_periodic'},{text:'📖 User Guide Settings',callback_data:'adm_guide'}],
     [{text:'👥 Users / Find Customer',callback_data:'adm_users'},{text:'🔎 Find Order',callback_data:'adm_order_find'}],
     [{text:'📊 Sales & Profit Reports',callback_data:'adm_sales_today'}],
-    [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
+    [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'},{text:'📡 Payment & SMS Status',callback_data:'adm_payment_health'}],
     [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
     [{text:'🎫 Support Tickets',callback_data:'adm_tickets_open_0'}],
     [{text:'🔔 Product Notifications',callback_data:'adm_product_notices'},{text:'📢 Channel Alerts',callback_data:'adm_channel_notices'}],
@@ -3255,16 +3257,35 @@ async function receiveMobileBridgeReceipt(request, env, ctx) {
         const number=b[method+'Account'];if(!number)continue;
         if(!/^01[3-9][0-9]{8}$/.test(number))return reply(400,{error:'invalid_account'});
         const setting=await env.DB.prepare('SELECT value FROM settings WHERE key=?').bind(method+'_num').first();
-        if(setting?.value!==number)return reply(409,{error:'receiving_account_mismatch'});
+        if(setting?.value!==number){await recordBridgeHealth(env,'receiving_account_mismatch',{last_check_ms:Date.now()});return reply(409,{error:'receiving_account_mismatch'});}
       }
+      await recordBridgeHealth(env,'ok',{last_check_ms:Date.now()});
       return reply(200,{connected:true,deviceId:b.deviceId});
     }catch{return reply(503,{error:'bridge_storage_unavailable'});}
   }
+  if(b?.type==='heartbeat'){
+    if(b.deviceId!==env.MOBILE_BRIDGE_DEVICE_ID)return reply(403,{error:'device_mismatch'});
+    const keys=['type','version','deviceId','appVersion','enabled','smsPermission','queuePending','batteryExempt','lastCaptureAt','lastCaptureState','lastCaptureMethod','bkashAccount','nagadAccount'];
+    const states=['none','unknown','forwarding_off','format_mismatch','time_mismatch','invalid_account','queued','queue_full','capture_failed'];
+    if(b.version!==1||Object.keys(b).some(k=>!keys.includes(k))||!/^\d{1,2}\.\d{1,2}$/.test(b.appVersion||'')||typeof b.enabled!=='boolean'||typeof b.smsPermission!=='boolean'||typeof b.batteryExempt!=='boolean'||!Number.isSafeInteger(b.queuePending)||b.queuePending<0||b.queuePending>10000||!Number.isSafeInteger(b.lastCaptureAt)||b.lastCaptureAt<0||b.lastCaptureAt>Date.now()+60000||!states.includes(b.lastCaptureState)||!['none','bkash','nagad'].includes(b.lastCaptureMethod)||typeof b.bkashAccount!=='string'||typeof b.nagadAccount!=='string')return reply(400,{error:'invalid_heartbeat'});
+    let result='ok';
+    try{for(const method of ['bkash','nagad']){
+      const number=b[method+'Account'];if(!number)continue;
+      if(!/^01[3-9][0-9]{8}$/.test(number)){result='invalid_account';break;}
+      const configured=await env.DB.prepare('SELECT value FROM settings WHERE key=?').bind(method+'_num').first();
+      if(configured?.value!==number){result='receiving_account_mismatch';break;}
+    }
+    if(b.enabled&&!b.bkashAccount&&!b.nagadAccount)result='invalid_setup';
+    }catch{return reply(503,{error:'bridge_storage_unavailable'});}
+    const stored=await recordBridgeHealth(env,result,{last_heartbeat_ms:Date.now(),app_version:b.appVersion,forwarding_enabled:b.enabled?1:0,sms_permission:b.smsPermission?1:0,queue_pending:b.queuePending,battery_exempt:b.batteryExempt?1:0,last_capture_ms:b.lastCaptureAt,capture_state:b.lastCaptureState,capture_method:b.lastCaptureMethod});
+    if(!stored)return reply(503,{error:'bridge_storage_unavailable'});
+    return reply(200,{connected:true,heartbeat:true,deviceId:b.deviceId,configuration:result});
+  }
   const allowed=['version','eventId','deviceId','method','account','trxId','amountMinor','receivedAt','paidAt'];
-  if(!b||Array.isArray(b)||Object.keys(b).some(k=>!allowed.includes(k))||b.version!==1||b.deviceId!==env.MOBILE_BRIDGE_DEVICE_ID||!['bkash','nagad'].includes(b.method)||!/^[a-f0-9-]{36}$/.test(b.eventId||'')||!/^[A-Z0-9]{6,40}$/.test(b.trxId||'')||typeof b.account!=='string'||!Number.isSafeInteger(b.amountMinor)||b.amountMinor<=0||b.amountMinor>100000000||!Number.isSafeInteger(b.receivedAt)||b.receivedAt>Date.now()+60000||b.receivedAt<Date.now()-86400000||!Number.isSafeInteger(b.paidAt)||b.paidAt>b.receivedAt+300000||b.paidAt<b.receivedAt-86400000)return reply(400,{error:'invalid_receipt'});
+  if(!b||Array.isArray(b)||Object.keys(b).some(k=>!allowed.includes(k))||b.version!==1||b.deviceId!==env.MOBILE_BRIDGE_DEVICE_ID||!['bkash','nagad'].includes(b.method)||!/^[a-f0-9-]{36}$/.test(b.eventId||'')||!/^[A-Z0-9]{6,40}$/.test(b.trxId||'')||typeof b.account!=='string'||!Number.isSafeInteger(b.amountMinor)||b.amountMinor<=0||b.amountMinor>100000000||!Number.isSafeInteger(b.receivedAt)||b.receivedAt>Date.now()+60000||b.receivedAt<Date.now()-86400000||!Number.isSafeInteger(b.paidAt)||b.paidAt>b.receivedAt+300000||b.paidAt<b.receivedAt-86400000){if(b?.deviceId===env.MOBILE_BRIDGE_DEVICE_ID)await recordBridgeHealth(env,'invalid_receipt');return reply(400,{error:'invalid_receipt'});}
   try{
     const configured=await env.DB.prepare('SELECT value FROM settings WHERE key=?').bind(b.method+'_num').first();
-    if(!configured?.value||configured.value!==b.account)return reply(409,{error:'receiving_account_mismatch'});
+    if(!configured?.value||configured.value!==b.account){await recordBridgeHealth(env,'receiving_account_mismatch');return reply(409,{error:'receiving_account_mismatch'});}
     await env.DB.prepare(`CREATE TABLE IF NOT EXISTS mobile_bridge_receipts (
       event_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, method TEXT NOT NULL, account TEXT NOT NULL,
       trx_id TEXT NOT NULL, amount_minor INTEGER NOT NULL, received_at INTEGER NOT NULL, paid_at INTEGER NOT NULL,
@@ -3273,7 +3294,8 @@ async function receiveMobileBridgeReceipt(request, env, ctx) {
     const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');
     await env.DB.prepare(`INSERT INTO mobile_bridge_receipts(event_id,device_id,method,account,trx_id,amount_minor,received_at,paid_at,body_hash) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING`).bind(b.eventId,b.deviceId,b.method,b.account,b.trxId,b.amountMinor,b.receivedAt,b.paidAt,digest).run();
     const saved=await env.DB.prepare('SELECT event_id,body_hash FROM mobile_bridge_receipts WHERE event_id=?').bind(b.eventId).first();
-    if(!saved||saved.body_hash!==digest)return reply(409,{error:'receipt_conflict'});
+    if(!saved||saved.body_hash!==digest){await recordBridgeHealth(env,'receipt_conflict');return reply(409,{error:'receipt_conflict'});}
+    await recordBridgeHealth(env,'ok',{last_receipt_ms:Date.now()});
     const resume=()=>resumeMobilePayments(env,b.method,b.trxId).catch(()=>console.error('Mobile receipt settlement needs retry'));
     if(ctx?.waitUntil)ctx.waitUntil(resume());else await resume();
     return reply(200,{accepted:true,eventId:b.eventId,status:'stored'});
@@ -3392,8 +3414,11 @@ async function resumeMobilePayments(env,method,trx) {
   // On first deployment, the receiving phone may upload before bot migrations run.
   const exists=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mobile_payment_invoices'").first();
   if(!exists)return;
-  const {results}=await env.DB.prepare("SELECT invoice_type,invoice_id FROM mobile_payment_invoices WHERE method=? AND trx_id=? AND status='pending' AND submitted_at IS NOT NULL ORDER BY submitted_at,invoice_id LIMIT 20").bind(method,trx).all();
-  for(const row of results)await settleMobileInvoice(env,row.invoice_type,row.invoice_id);
+  const {results}=await env.DB.prepare("SELECT invoice_type,invoice_id,user_id FROM mobile_payment_invoices WHERE method=? AND trx_id=? AND status='pending' AND submitted_at IS NOT NULL ORDER BY submitted_at,invoice_id LIMIT 20").bind(method,trx).all();
+  for(const row of results){
+    const outcome=await settleMobileInvoice(env,row.invoice_type,row.invoice_id);
+    await recordPaymentVerification(env,row.invoice_type,row.invoice_id,row.user_id,method,trx,['completed','processing'].includes(outcome)?'verified':outcome);
+  }
 }
 
 async function refundRejectedExternalWalletOrder(env,orderId,chatId){
@@ -3806,7 +3831,7 @@ async function showPaymentDashboard(env,chatId,filter='pending',page=0,messageId
   const text=`💳 <b>Payment Dashboard</b>\n\nPending: <b>${summary?.pending||0}</b> · Completed: <b>${summary?.completed||0}</b>\nPaid / delivery pending: <b>${summary?.delivery||0}</b>\n\n<b>${titles[filter]||titles.pending}</b> · Page ${page+1}\n${results.length?'Choose a payment to inspect its status, submitted ID and last verification result.':'No payments in this list.'}\n\nPending instructions do not prove money was received. This dashboard does not approve, retry or charge payments.`;
   const buttons=results.slice(0,10).map(x=>[{text:`${x.kind==='order'?'Order':'Deposit'} #${x.id} · ${x.method} · $${adminMoney(x.amount_usd)} · ${x.user_id}`,callback_data:`adm_paydetail_${x.kind}_${x.id}`}]);
   const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_paydash_${filter}_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_paydash_${filter}_${page+1}`});if(pager.length)buttons.push(pager);
-  buttons.push([{text:'Pending',callback_data:'adm_paydash_pending_0'},{text:'IDs Submitted',callback_data:'adm_paydash_submitted_0'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Completed',callback_data:'adm_paydash_completed_0'}],[{text:'Paid / Delivery Pending',callback_data:'adm_paydash_delivery_0'}],[{text:'🔄 Refresh',callback_data:`adm_paydash_${filter}_${page}`}],[{text:'Find Customer',callback_data:'adm_user_search'},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  buttons.push([{text:'📡 Payment & SMS Status',callback_data:'adm_payment_health'}],[{text:'Pending',callback_data:'adm_paydash_pending_0'},{text:'IDs Submitted',callback_data:'adm_paydash_submitted_0'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Completed',callback_data:'adm_paydash_completed_0'}],[{text:'Paid / Delivery Pending',callback_data:'adm_paydash_delivery_0'}],[{text:'🔄 Refresh',callback_data:`adm_paydash_${filter}_${page}`}],[{text:'Find Customer',callback_data:'adm_user_search'},{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 function paymentDashboardTime(value){const ms=invoiceTimestamp(value);return Number.isFinite(ms)?new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Dhaka',dateStyle:'medium',timeStyle:'short'}).format(new Date(ms)):'Not recorded';}
@@ -3818,12 +3843,14 @@ async function showPaymentDashboardDetail(env,chatId,type,id,messageId=null){
   const receipt=event?.trx_id||mobile?.trx_id||invoice.trx_id||'Not submitted';
   let result=invoice.status==='completed'?'Completed.':['paid_pending_delivery','delivering'].includes(invoice.status)?'Payment recorded; product delivery is pending.':event?paymentDashboardReason(event.reason):mobile?.trx_id?'Transaction ID saved; no verification result was recorded.':'No verification attempt recorded. Older attempts may predate this dashboard.';
   if(mobile?.status==='paid'&&invoice.status==='pending')result='Payment matched by SMS; invoice processing needs review.';
-  const text=`💳 <b>${type==='order'?'Order':'Deposit'} #${invoice.id}</b>\n\nCustomer: <code>${invoice.user_id}</code>\nMethod: ${escapeHtml(invoice.method)}\nAmount: <b>$${adminMoney(invoice.amount_usd)}</b> · ${adminMoney(invoice.amount_bdt)} BDT\nStatus: <b>${escapeHtml(invoice.status)}</b>\nCreated: ${paymentDashboardTime(invoice.created_at)} (Dhaka)\n\nSubmitted ID: <code>${adminSnippet(receipt,100)}</code>\n\n<b>Last verification</b>\n${escapeHtml(result)}\nAttempts recorded: ${event?.attempts||0}\nLast attempt: ${paymentDashboardTime(event?.updated_at)} (Dhaka)${mobile?`\nSMS invoice: ${adminSnippet(mobile.status,20)}\nPayment window: ${Date.now()>mobile.expires_ms?'Ended (not proof of payment failure)':'Open'}`:''}`;
+  const smsEvidence=mobile?await describeMobileEvidence(env,mobile):'';
+  const text=`💳 <b>${type==='order'?'Order':'Deposit'} #${invoice.id}</b>\n\nCustomer: <code>${invoice.user_id}</code>\nMethod: ${escapeHtml(invoice.method)}\nAmount: <b>$${adminMoney(invoice.amount_usd)}</b> · ${adminMoney(invoice.amount_bdt)} BDT\nStatus: <b>${escapeHtml(invoice.status)}</b>\nCreated: ${paymentDashboardTime(invoice.created_at)} (Dhaka)\n\nSubmitted ID: <code>${adminSnippet(receipt,100)}</code>\n\n<b>Last verification</b>\n${escapeHtml(result)}\nAttempts recorded: ${event?.attempts||0}\nLast attempt: ${paymentDashboardTime(event?.updated_at)} (Dhaka)${smsEvidence?`\n\n<b>SMS evidence</b>\n${escapeHtml(smsEvidence)}`:''}${mobile?`\nSMS invoice: ${adminSnippet(mobile.status,20)}\nPayment window: ${Date.now()>mobile.expires_ms?'Ended (not proof of payment failure)':'Open'}`:''}`;
   const buttons=[[adminUserProfileButton(invoice.user_id)],...(type==='order'&&['paid_pending_delivery','delivering','completed'].includes(invoice.status)?[[{text:'Delivery Details',callback_data:`adm_delivery_view_${id}`}]]:[]),[{text:'🔄 Refresh',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'Payment Dashboard',callback_data:'adm_paydash_pending_0'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handlePaymentDashboardCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
+  if(data==='adm_payment_health'){await showPaymentHealth(env,chatId,messageId);return true;}
   let match=data.match(/^adm_paydash_(pending|submitted|issues|delivery|completed)_(\d+)$/);
   if(match){await showPaymentDashboard(env,chatId,match[1],match[2],messageId);return true;}
   match=data.match(/^adm_paydetail_(order|deposit)_(\d+)$/);if(match){await showPaymentDashboardDetail(env,chatId,match[1],match[2],messageId);return true;}return false;
@@ -4486,4 +4513,61 @@ async function handleProductFollowCallback(env,chatId,data,messageId){
     ]);
   }else await env.DB.prepare('DELETE FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,match[2]).run();
   await sendProductDetailView(env,chatId,match[2],messageId);return true;
+}
+
+
+const MOBILE_BRIDGE_HEALTH_SCHEMA=`CREATE TABLE IF NOT EXISTS mobile_bridge_health(device_id TEXT PRIMARY KEY,last_contact_ms INTEGER NOT NULL DEFAULT 0,last_result TEXT,last_check_ms INTEGER NOT NULL DEFAULT 0,last_heartbeat_ms INTEGER NOT NULL DEFAULT 0,last_receipt_ms INTEGER NOT NULL DEFAULT 0,app_version TEXT,forwarding_enabled INTEGER,sms_permission INTEGER,queue_pending INTEGER,battery_exempt INTEGER,last_capture_ms INTEGER NOT NULL DEFAULT 0,capture_state TEXT,capture_method TEXT,last_error TEXT,last_error_ms INTEGER NOT NULL DEFAULT 0)`;
+async function recordBridgeHealth(env,result,fields={}){
+  try{
+    await env.DB.prepare(MOBILE_BRIDGE_HEALTH_SCHEMA).run();
+    const values={last_contact_ms:Date.now(),last_result:result,...fields,...(result==='ok'?{}:{last_error:result,last_error_ms:Date.now()})};
+    const keys=Object.keys(values);
+    await env.DB.prepare(`INSERT INTO mobile_bridge_health(device_id,${keys.join(',')}) VALUES(?,${keys.map(()=>'?').join(',')}) ON CONFLICT(device_id) DO UPDATE SET ${keys.map(key=>`${key}=excluded.${key}`).join(',')}`).bind(env.MOBILE_BRIDGE_DEVICE_ID,...Object.values(values)).run();
+    return true;
+  }catch{console.error('Bridge health recording unavailable; payment handling continues.');return false;}
+}
+function bridgeHealthTime(ms){return Number(ms)>0?paymentDashboardTime(new Date(Number(ms)).toISOString())+' (Dhaka)':'Not received';}
+function bridgeHealthFlag(value){return value===1?'ON':value===0?'OFF':'Unknown';}
+function bridgeIssueDescription(code){return ({receiving_account_mismatch:'App receiving number differs from bot Payment Settings',invalid_account:'Receiving number in app is invalid',invalid_setup:'No receiving account configured in app',receipt_conflict:'An event/transaction conflicts with an existing SMS record',invalid_receipt:'Payment receipt format or timestamps were rejected'})[code]||String(code||'None');}
+function bridgeCaptureDescription(code){return ({none:'No company SMS reported yet',unknown:'Older app capture; update required for details',forwarding_off:'Company SMS arrived while forwarding was OFF',format_mismatch:'Company SMS arrived, but incoming-payment format did not match',time_mismatch:'SMS date/time did not match the phone clock',invalid_account:'Receiving number missing or invalid in app',queued:'Payment SMS parsed and saved to encrypted queue',queue_full:'Phone queue full; payment record could not be saved',capture_failed:'Phone could not process or store the SMS'})[code]||'Not reported';}
+function bridgeMaskedAccount(value){return /^01[3-9]\d{8}$/.test(String(value))?String(value).slice(0,3)+'*****'+String(value).slice(-3):'Not configured';}
+async function describeMobileEvidence(env,invoice){
+  if(!invoice.trx_id)return Date.now()>invoice.expires_ms?'No Transaction ID submitted; payment window has ended.':'Waiting for the customer to submit a Transaction ID.';
+  const receipt=await env.DB.prepare('SELECT * FROM mobile_bridge_receipts WHERE method=? AND trx_id=?').bind(invoice.method,invoice.trx_id).first();
+  if(!receipt)return 'No matching payment SMS has reached the server for this method and Transaction ID.';
+  const prefix=`SMS received by server: ${paymentDashboardTime(receipt.created_at)} (Dhaka). `;
+  const claim=await env.DB.prepare('SELECT invoice_type,invoice_id FROM mobile_payment_claims WHERE method=? AND trx_id=?').bind(invoice.method,invoice.trx_id).first();
+  if(claim)return prefix+(claim.invoice_type===invoice.invoice_type&&Number(claim.invoice_id)===Number(invoice.invoice_id)?'Already matched to this invoice.':'Transaction already used for another invoice.');
+  if(receipt.device_id!==env.MOBILE_BRIDGE_DEVICE_ID)return prefix+'Receiving device does not match the enrolled phone.';
+  if(receipt.account!==invoice.account)return prefix+'Receiving account does not match the invoice.';
+  if(receipt.amount_minor!==invoice.amount_minor)return prefix+`Amount mismatch: expected ${(invoice.amount_minor/100).toFixed(2)} BDT; received ${(receipt.amount_minor/100).toFixed(2)} BDT.`;
+  if(receipt.paid_at<Math.floor(invoice.created_ms/60000)*60000)return prefix+'Payment was made before this invoice was created.';
+  if(receipt.paid_at>invoice.expires_ms)return prefix+'Payment was made after the invoice payment window ended.';
+  if(receipt.received_at<invoice.created_ms-60000)return prefix+'Phone SMS timestamp predates this invoice.';
+  if(!invoice.submitted_at)return prefix+'Transaction ID submission time is missing.';
+  if(invoice.submitted_at>invoice.expires_ms)return prefix+'Transaction ID was submitted after the payment window ended.';
+  return prefix+'SMS fields match. Check the last verification result, invoice status and delivery status; this screen does not approve payments.';
+}
+async function showPaymentHealth(env,chatId,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  const [health,sms,summary,issues,bkash,nagad,rocket,binance,bep20,auto]=await Promise.all([
+    env.DB.prepare('SELECT * FROM mobile_bridge_health WHERE device_id=?').bind(env.MOBILE_BRIDGE_DEVICE_ID||'').first(),
+    env.DB.prepare('SELECT method,trx_id,amount_minor,status,created_at,received_at FROM mobile_bridge_receipts WHERE device_id=? ORDER BY created_at DESC,received_at DESC,event_id DESC LIMIT 3').bind(env.MOBILE_BRIDGE_DEVICE_ID||'').all(),
+    env.DB.prepare(`SELECT COUNT(*) pending,SUM(CASE WHEN NULLIF(m.trx_id,'') IS NOT NULL THEN 1 ELSE 0 END) submitted FROM mobile_payment_invoices m JOIN ${paymentDashboardSource()} x ON x.kind=m.invoice_type AND x.id=m.invoice_id WHERE m.status='pending' AND x.status='pending'`).first(),
+    env.DB.prepare(`SELECT e.*,o.public_order_id FROM payment_verification_events e JOIN ${paymentDashboardSource()} x ON x.kind=e.invoice_type AND x.id=e.invoice_id LEFT JOIN orders o ON e.invoice_type='order' AND o.id=e.invoice_id WHERE e.reason<>'verified' AND x.status='pending' ORDER BY e.updated_at DESC,e.invoice_type,e.invoice_id DESC LIMIT 3`).all(),
+    getSetting(env,'bkash_num',''),getSetting(env,'nagad_num',''),getSetting(env,'rocket_num',''),getSetting(env,'binance_id',''),getSetting(env,'bep20_addr',''),getSetting(env,'binance_auto_verify','1')
+  ]);
+  const configured=Boolean(env.MOBILE_BRIDGE_SECRET?.length>=32&&env.MOBILE_BRIDGE_DEVICE_ID);
+  const fresh=Number(health?.last_heartbeat_ms)>Date.now()-45*60000;
+  const state=!configured?'Not configured':!health?.last_contact_ms?'No authenticated contact recorded since tracking began':!health.last_heartbeat_ms?'Contact recorded; heartbeat unavailable':!fresh?'Heartbeat stale — check the phone':health.last_result!=='ok'?'Phone contacted server; configuration needs attention':health.forwarding_enabled===0?'Phone reported forwarding OFF':health.sms_permission===0?'Phone reported SMS permission missing':'Recent heartbeat received';
+  let text=`📡 <b>Payment &amp; SMS Bridge Status</b>\n\n<b>${escapeHtml(state)}</b>\nLast contact: ${bridgeHealthTime(health?.last_contact_ms)}\nLast heartbeat: ${bridgeHealthTime(health?.last_heartbeat_ms)}\nApp: ${escapeHtml(health?.app_version||'Not reported')} · Queue: ${health?.queue_pending??'Unknown'}\nForwarding: ${bridgeHealthFlag(health?.forwarding_enabled)} · SMS permission: ${bridgeHealthFlag(health?.sms_permission)}\nBattery unrestricted: ${bridgeHealthFlag(health?.battery_exempt)}\n\n<b>Phone SMS capture</b>\n${health?.capture_method==='bkash'?'bKash · ':health?.capture_method==='nagad'?'Nagad · ':''}${escapeHtml(bridgeCaptureDescription(health?.capture_state))}\nReported at: ${bridgeHealthTime(health?.last_capture_ms)}\nLast accepted SMS upload: ${health?.last_receipt_ms?bridgeHealthTime(health.last_receipt_ms):sms.results?.[0]?paymentDashboardTime(sms.results[0].created_at)+' (Dhaka; historical record)':'Not received'}\n`;
+  if(health?.last_error)text+=`Last bridge issue: ${escapeHtml(bridgeIssueDescription(health.last_error))}\nIssue time: ${bridgeHealthTime(health.last_error_ms)}\n`;
+  text+=`\n<b>Payment configuration</b>\nbKash: ${bridgeMaskedAccount(bkash)} · ${configured?'Bridge configured':'Bridge missing'}\nNagad: ${bridgeMaskedAccount(nagad)} · ${configured?'Bridge configured':'Bridge missing'}\nRocket: ${bridgeMaskedAccount(rocket)} · Manual approval\nBinance Pay: ${auto==='1'?(env.BINANCE_API_KEY&&env.BINANCE_API_SECRET&&/^\d+$/.test(binance)?'API credentials configured':'Setup incomplete'):'Manual verification'}\nBEP20: ${/^0x[a-fA-F0-9]{40}$/.test(bep20)?'Receiving address configured':'Setup incomplete'}\n\n<b>Mobile payments</b>\nPending: ${summary?.pending||0} · IDs submitted: ${summary?.submitted||0}\n`;
+  if(sms.results?.length){text+='\n<b>Latest server SMS records</b>\n';for(const row of sms.results)text+=`${row.method.toUpperCase()} · ${(row.amount_minor/100).toFixed(2)} BDT · <code>${escapeHtml(row.trx_id)}</code> · ${row.status==='claimed'?'Matched':'Not matched'}\n`;}
+  else text+='\nNo payment SMS records stored for the enrolled phone.\n';
+  if(issues.results?.length){text+='\n<b>Recent verification issues</b>\n';for(const issue of issues.results)text+=`${issue.invoice_type==='order'?'Order':'Deposit'} ${issue.public_order_id||issue.invoice_id} · ${escapeHtml(issue.method)}: ${escapeHtml(paymentDashboardReason(issue.reason))}\n`;}
+  text+='\nBridge v0.8 is required for periodic phone status; older apps can still send payment receipts. Heartbeat updates approximately every 15 minutes; Android may delay background jobs. A recent report does not prove the phone is online now. Configuration checks do not test live Binance/RPC access.';
+  const buttons=[[{text:'🔄 Refresh Status',callback_data:'adm_payment_health'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Pending Payments',callback_data:'adm_paydash_pending_0'}],[{text:'Payment Settings',callback_data:'adm_payment_settings'},{text:'Admin Panel',callback_data:'admin_panel'}],[{text:'📱 Bridge v0.8 APK',url:'https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.8.apk'}]];
+  for(const issue of issues.results||[])buttons.splice(1,0,[{text:`Inspect ${issue.invoice_type==='order'?'Order':'Deposit'} ${issue.public_order_id||issue.invoice_id}`,callback_data:`adm_paydetail_${issue.invoice_type}_${issue.invoice_id}`}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }

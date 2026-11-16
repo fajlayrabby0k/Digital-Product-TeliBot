@@ -2,7 +2,7 @@
 
 Users choose bKash/Nagad, create an invoice, send the **exact displayed BDT amount**, then tap **Enter Transaction ID** and submit only the receipt's TrxID/TxnID within 60 minutes. Orders trigger direct delivery; deposits credit the wallet. Rocket remains manual because no Rocket SMS template was supplied.
 
-The Android receiving-phone app sends a minimal signed receipt (no raw SMS/OTP). It must remain online with SMS permission/background execution, configured with the same receiving account as Admin → Payment Settings. Existing v0.2 APKs work; v0.3 only updates user guidance. Do not reinstall/clear data, which changes the key/device ID. [APK/setup](../android-bridge/README.md).
+The Android receiving-phone app sends a minimal signed receipt (no raw SMS/OTP). It must remain online with SMS permission/background execution, configured with the same receiving account as Admin → Payment Settings. Existing signed receipt/check formats remain compatible. v0.8 adds periodic phone-health reports for **Admin Panel → Payment & SMS Status**; update over the installed app to enable them. Do not reinstall/clear data, which changes the key/device ID. [APK/setup](../android-bridge/README.md).
 
 ## Deployment
 

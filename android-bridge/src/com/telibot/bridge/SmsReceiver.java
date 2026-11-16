@@ -6,15 +6,17 @@ public final class SmsReceiver extends BroadcastReceiver {
   try{SmsMessage[] parts=Telephony.Sms.Intents.getMessagesFromIntent(i);if(parts.length==0||parts.length>20)return;String sender=parts[0].getOriginatingAddress();if(sender==null)return;
    String method=null;for(String m:new String[]{"bkash","nagad"})if(ReceiptParser.matchesSender(m,sender,p.getString(m+"Sender",""))){method=m;break;}
    if(method==null)return;
-   if(!p.getBoolean("enabled",false)){Store.note(c,"capture",method+": কোম্পানির SMS এসেছে, কিন্তু forwarding বন্ধ।");return;}
+   if(!p.getBoolean("enabled",false)){capture(c,method,"forwarding_off",method+": কোম্পানির SMS এসেছে, কিন্তু forwarding বন্ধ।");return;}
    StringBuilder text=new StringBuilder();for(SmsMessage m:parts){if(!sender.equals(m.getOriginatingAddress()))return;text.append(m.getMessageBody());}
    ReceiptParser.Receipt r=ReceiptParser.parse(text.toString(),method);
-   if(r==null){Store.note(c,"capture",method+": SMS এসেছে, কিন্তু incoming payment format মেলেনি। SMS format ফোনেই পরীক্ষা করুন।");return;}
-   if(r.paidAt>System.currentTimeMillis()+300000L||r.paidAt<System.currentTimeMillis()-86400000L){Store.note(c,"capture",method+": SMS-এর সময় ফোনের সময়ের সঙ্গে মিলছে না। Automatic date/time দেখুন।");return;}
-   String account=p.getString(method+"Account","");if(!account.matches("01[3-9][0-9]{8}")){Store.note(c,"capture",method+": টাকা পাওয়ার নম্বর সেট করা নেই বা ভুল।");return;}
+   if(r==null){capture(c,method,"format_mismatch",method+": SMS এসেছে, কিন্তু incoming payment format মেলেনি। SMS format ফোনেই পরীক্ষা করুন।");return;}
+   if(r.paidAt>System.currentTimeMillis()+300000L||r.paidAt<System.currentTimeMillis()-86400000L){capture(c,method,"time_mismatch",method+": SMS-এর সময় ফোনের সময়ের সঙ্গে মিলছে না। Automatic date/time দেখুন।");return;}
+   String account=p.getString(method+"Account","");if(!account.matches("01[3-9][0-9]{8}")){capture(c,method,"invalid_account",method+": টাকা পাওয়ার নম্বর সেট করা নেই বা ভুল।");return;}
    JSONObject body=new JSONObject();String id=UUID.randomUUID().toString();body.put("version",1);body.put("eventId",id);body.put("deviceId",p.getString("device",""));body.put("method",method);body.put("account",account);body.put("trxId",r.trx);body.put("amountMinor",r.minor);body.put("receivedAt",System.currentTimeMillis());body.put("paidAt",r.paidAt);
    boolean saved;try(Store db=new Store(c)){saved=db.add(id,body.toString());}
-   Store.note(c,"capture",saved?method+": পেমেন্ট শনাক্ত হয়েছে এবং encrypted queue-তে রাখা হয়েছে।":method+": Queue পূর্ণ; নতুন রেকর্ড রাখা যায়নি।");UploadJob.schedule(c);
-  }catch(Exception ignored){Store.note(c,"capture","পেমেন্ট রেকর্ড ফোনে সংরক্ষণ/প্রসেস করা যায়নি। অ্যাপ খুলে রিপোর্ট দেখুন।");}
+   capture(c,method,saved?"queued":"queue_full",saved?method+": পেমেন্ট শনাক্ত হয়েছে এবং encrypted queue-তে রাখা হয়েছে।":method+": Queue পূর্ণ; নতুন রেকর্ড রাখা যায়নি।");UploadJob.schedule(c);
+  }catch(Exception ignored){capture(c,"none","capture_failed","পেমেন্ট রেকর্ড ফোনে সংরক্ষণ/প্রসেস করা যায়নি। অ্যাপ খুলে রিপোর্ট দেখুন।");}
  }
+ private static void capture(Context c,String method,String state,String message){Store.prefs(c).edit().putString("capture_state",state).putString("capture_method",method).apply();Store.note(c,"capture",message);HeartbeatJob.sendOnce(c);}
+
 }

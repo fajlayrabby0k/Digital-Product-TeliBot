@@ -1,0 +1,21 @@
+# Payment and receiving-phone health
+
+**Admin Panel → Payment & SMS Status** is admin-only. Payment Settings and Payment Dashboard also link to it. It shows authenticated last contact, last heartbeat, app version, the phone-reported forwarding/SMS-permission/battery state and pending queue count. It includes company-SMS capture outcomes, accepted SMS uploads, three recent enrolled-device receipt records, current pending mobile payments and recent unresolved verification issues with links to their invoices. Secrets and full account numbers are not displayed.
+
+Payment method rows are configuration checks, not live Binance API or BSC RPC probes. Rocket remains manual. Existing invoice details include read-only SMS evidence: missing server receipt, amount/account/device mismatch, out-of-window timestamps, late ID submission or already-used transaction. Delayed receipt-triggered verification now saves its result too. These screens never approve, credit, debit, retry supplier orders or send test money.
+
+## Bridge v0.8
+
+Install [v0.8](../downloads/telibot-receipt-bridge-v0.8.apk) over the installed app with Update. Do not uninstall or clear data. The APK uses the same verified release certificate as v0.7; existing encrypted receipts, signing secret and device identity remain in the app's storage. No new Cloudflare variables, Worker or permissions are required.
+
+Open the app and use Save and Start / Connection Check, then open the admin status page. v0.8 signs a minimal `type: heartbeat` payload using the existing HMAC protocol, enrolled device ID and endpoint. It sends app version, forwarding/permission/battery flags, queue count, configured receiving numbers, last company-SMS capture time/method and an allowlisted capture result. It sends no raw SMS, OTP, PIN, sender number, contacts or inbox contents. A heartbeat cannot create a payment receipt or settle an invoice. Unknown fields and unauthenticated/wrong-device requests are rejected.
+
+JobScheduler sends periodic reports at Android's minimum interval of 15 minutes, with network constraints and persistence across reboot. The app also attempts reports after capture/upload, opening an enabled app, connection checks and stopping forwarding. Stopping forwarding cancels the periodic report and attempts one final OFF report. Doze/battery restrictions, missing network and force-stop can delay or prevent jobs. A heartbeat older than 45 minutes is shown as stale, not proof that the phone is offline; a recent report does not guarantee current connectivity. Absence of payment SMS alone is never treated as an offline indicator.
+
+v0.7 and earlier signed receipt/check formats remain accepted. Checks and receipt uploads update last contact; older apps do not provide permission/queue/periodic heartbeat fields, so those remain unknown. Historical receipt timestamps are labelled separately and do not fabricate phone presence.
+
+## Storage and verification
+
+`mobile_bridge_health` stores one row per enrolled device. Only authenticated checks, accepted receipts, or validated heartbeat/status failures update it; failed authentication does not create phone presence. Telemetry storage failures do not block accepted payment receipts; heartbeat requests require successful status storage before acknowledging the report. No financial tables are changed by health reports.
+
+`node tests/payment-health.cjs` covers authentication, extra OTP-field rejection, wrong device, no receipt/credit from heartbeats, old checks/receipts, stale/off/permission/configuration states, exact invoice mismatch evidence, late-SMS verification reasons, historical persistence, masking and admin access. All payment suites still apply. Java parser/queue/config tests and APK compilation/signature checks are run separately. Background execution and real receiving-phone connectivity require checking the installed app on the actual phone; these were not live-tested here.
