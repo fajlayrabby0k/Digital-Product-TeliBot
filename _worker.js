@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-custom-user-guide-1";
+const BOT_BUILD="2026-11-16-public-order-ids-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-custom-user-guide-1";
+const DB_SCHEMA_VERSION = "2026-11-public-order-ids-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -184,6 +184,7 @@ async function initializeDatabase(db, force) {
     else for (const q of schema) await db.prepare(q).run();
 
     const alters = [
+      "ALTER TABLE orders ADD COLUMN public_order_id TEXT DEFAULT NULL;",
       "ALTER TABLE channel_notice_events ADD COLUMN old_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE channel_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN price_notice_revision INTEGER DEFAULT 0;",
@@ -267,7 +268,13 @@ async function initializeDatabase(db, force) {
       return `INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id) SELECT 'stock:'||product_id||':'||(revision+1),product_id,${kind},COALESCE((SELECT MAX(user_id) FROM users),0) FROM product_notice_state WHERE product_id=${product} AND ${condition} AND (${stock}>stock OR (stock>0 AND ${stock}=0)) AND COALESCE((SELECT MAX(user_id) FROM users),0)>0 AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='product_notice_'||${kind}),'1')='1'; ${channelEvent('product_id',kind,"'stock:'||product_id||':'||(revision+1)",'FROM product_notice_state',`product_id=${product} AND ${condition} AND (${stock}>stock OR (stock>0 AND ${stock}=0))`)} UPDATE product_notice_state SET stock=${stock},revision=revision+1 WHERE product_id=${product} AND ${condition} AND stock<>${stock};`;
     };
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
+    const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS orders_public_id_unique ON orders(public_order_id) WHERE public_order_id IS NOT NULL'),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_public_id_validate BEFORE UPDATE OF public_order_id ON orders WHEN NEW.public_order_id IS NULL OR NEW.public_order_id NOT GLOB '[1-9][0-9][0-9][0-9][0-9]' OR (OLD.public_order_id IS NOT NULL AND OLD.public_order_id<>NEW.public_order_id) BEGIN SELECT RAISE(ABORT,'Order ID must be unique, immutable and five digits; ID space may be exhausted'); END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_public_id_insert_validate BEFORE INSERT ON orders WHEN NEW.public_order_id IS NOT NULL AND NEW.public_order_id NOT GLOB '[1-9][0-9][0-9][0-9][0-9]' BEGIN SELECT RAISE(ABORT,'Order ID must be five digits'); END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_public_id_assign AFTER INSERT ON orders WHEN NEW.public_order_id IS NULL BEGIN UPDATE orders SET public_order_id=(${publicIdCandidate}) WHERE id=NEW.id; END`),
+      db.prepare(`UPDATE orders AS target SET public_order_id=(${publicIdCandidate.replace("RANDOM()%90000),0", "RANDOM()%90000),0 WHERE target.id IS NOT NULL")}) WHERE public_order_id IS NULL`),
       db.prepare("INSERT OR IGNORE INTO periodic_sync_status(id) VALUES(1)"),
       ...['product_notice_new','product_notice_api_stock','product_notice_inventory_add','product_notice_inventory_remove','product_notice_inventory_change'].map(name=>db.prepare(`DROP TRIGGER IF EXISTS ${name}`)),
       db.prepare(`INSERT OR IGNORE INTO product_notice_state(product_id,stock) SELECT id,CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=products.id AND is_sold=0) END FROM products`),
@@ -737,6 +744,7 @@ async function verifyBinancePayOrder(env, transactionId, expectedUsd, invoice = 
 // ====================================================================
 async function completeSuccessfulOrder(env, order, trxId, chatId) {
   const orderId = order.id;
+  const displayId=orderDisplayId(order);
   const orderQty = order.quantity || 1;
   const dispatchClaim=await env.DB.prepare("UPDATE orders SET status='delivering',trx_id=? WHERE id=? AND status IN ('pending','paid_pending_delivery')").bind(trxId,orderId).run();
   if(!dispatchClaim.meta?.changes)return;
@@ -747,12 +755,12 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
       await env.DB.prepare("UPDATE orders SET status='paid_pending_delivery',provider_error=?,provider_order_id=? WHERE id=? AND status='delivering'").bind(apiRes.message||'Delivery unconfirmed',apiRes.externalOrderId||null,orderId).run();
       if(apiRes.rejected&&order.payment_method==='WALLET'){
         await refundRejectedExternalWalletOrder(env,orderId,chatId);
-        await sendMsg(env,chatId,`Provider rejected Order #${orderId}. Your wallet payment has been refunded.`);
-        await notifyAdminForUser(env,chatId,`⚠️ Wallet Order #${orderId} refunded: ${escapeHtml(apiRes.message||'Provider rejection')}`);
+        await sendMsg(env,chatId,`Provider rejected Order ID ${displayId}. Your wallet payment has been refunded.`);
+        await notifyAdminForUser(env,chatId,`⚠️ Wallet Order ID ${displayId} refunded: ${escapeHtml(apiRes.message||'Provider rejection')}`);
         return;
       }
-      await sendMsg(env, chatId, `✅ Payment verified for Order #${orderId}. Delivery is pending; admin has been notified. Do not pay again.`,[[{text:'Check Delivery',callback_data:`provider_retry_${orderId}`}]]);
-      await notifyAdminForUser(env,chatId, `⚠️ Paid Order #${orderId}: ${escapeHtml(apiRes.message||'Delivery unconfirmed')}. Check provider history before retrying.`,[[{text:'Delivery Details',callback_data:`adm_delivery_view_${orderId}`}]]);
+      await sendMsg(env, chatId, `✅ Payment verified for Order ID ${displayId}. Delivery is pending; admin has been notified. Do not pay again.`,[[{text:'Check Delivery',callback_data:`provider_retry_${orderId}`}]]);
+      await notifyAdminForUser(env,chatId, `⚠️ Paid Order ID ${displayId}: ${escapeHtml(apiRes.message||'Delivery unconfirmed')}. Check provider history before retrying.`,[[{text:'Delivery Details',callback_data:`adm_delivery_view_${orderId}`}]]);
       return;
     }
     const creds = apiRes.credentials;
@@ -760,11 +768,11 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
     if (apiRes.success) {
       await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(orderQty, order.product_id).run();
     }
-    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${escapeHtml(creds)}</code></blockquote>`, [
+    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: ${displayId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${escapeHtml(creds)}</code></blockquote>`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
-    await notifyAdminForUser(env,chatId, `✅ <b>Order #${orderId} Auto-Verified & Delivered via API!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
+    await notifyAdminForUser(env,chatId, `✅ <b>Order ID ${displayId} Auto-Verified & Delivered via API!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
     await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
     return;
   }
@@ -777,16 +785,16 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
   if (items && items.length >= orderQty) {
     await env.DB.prepare("UPDATE orders SET status = 'completed', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     const lines = items.map(item => item.item_data);
-    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: #${orderId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${escapeHtml(lines.join("\n\n"))}</code></blockquote>`, [
+    await sendMsg(env, chatId, `🎉 <b>Payment Verified! Your Order is Delivered</b>\n\nOrder ID: ${displayId}\nProduct: <b>${order.product_name}</b>\nQuantity: <b>${orderQty} item(s)</b>\nPayment Method: <b>${order.payment_method}</b>\nTrxID: <code>${trxId}</code>\n\n🔑 <b>Your License / Credentials:</b>\n<blockquote><code>${escapeHtml(lines.join("\n\n"))}</code></blockquote>`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
-    await notifyAdminForUser(env,chatId, `✅ <b>Order #${orderId} Auto-Verified & Delivered from Stock!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
+    await notifyAdminForUser(env,chatId, `✅ <b>Order ID ${displayId} Auto-Verified & Delivered from Stock!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
     await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
   } else {
     await env.DB.prepare("UPDATE orders SET status = 'paid_pending_delivery', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
-    await sendMsg(env, chatId, `✅ <b>Payment Verified!</b>\n\nOrder ID: #${orderId}\n⚠️ Local stock is being restocked. Admin has been notified to deliver your order immediately!`);
-    await notifyAdminForUser(env,chatId, `🚨 <b>Order #${orderId} Verified but Local Stock Insufficient!</b> Please deliver manually.`,[[{text:'Delivery Details',callback_data:`adm_delivery_view_${orderId}`}]]);
+    await sendMsg(env, chatId, `✅ <b>Payment Verified!</b>\n\nOrder ID: ${displayId}\n⚠️ Local stock is being restocked. Admin has been notified to deliver your order immediately!`);
+    await notifyAdminForUser(env,chatId, `🚨 <b>Order ID ${displayId} Verified but Local Stock Insufficient!</b> Please deliver manually.`,[[{text:'Delivery Details',callback_data:`adm_delivery_view_${orderId}`}]]);
   }
 }
 
@@ -816,6 +824,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     ]);
     if(!booked[0].meta?.changes){await sendMsg(env,chatId,'Insufficient wallet balance. No money was deducted.');return;}
     const orderId=booked[0].meta.last_row_id;
+    const displayId=await getPublicOrderId(env,orderId);
 
     orderStage(env,'provider.order',orderId);
     const apiResult = await dispatchExternalOrder(env, prod, qty, orderId);
@@ -824,11 +833,11 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
       await env.DB.prepare('UPDATE orders SET provider_error=?,provider_order_id=? WHERE id=?').bind(apiResult.message||'Delivery unconfirmed',apiResult.externalOrderId||null,orderId).run();
       if(apiResult.rejected){
         await refundRejectedExternalWalletOrder(env,orderId,chatId);
-        await sendMsg(env,chatId,`Order #${orderId} was rejected by the provider. Your wallet payment has been refunded. Please contact admin before retrying.`);
-        await notifyAdminForUser(env,chatId,`⚠️ Provider rejected wallet Order #${orderId}: ${escapeHtml(apiResult.message)}. Customer wallet refunded. Check the provider API configuration.`);
+        await sendMsg(env,chatId,`Order ID ${displayId} was rejected by the provider. Your wallet payment has been refunded. Please contact admin before retrying.`);
+        await notifyAdminForUser(env,chatId,`⚠️ Provider rejected wallet Order ID ${displayId}: ${escapeHtml(apiResult.message)}. Customer wallet refunded. Check the provider API configuration.`);
       }else{
-        await sendMsg(env,chatId,`Payment recorded for Order #${orderId}. Provider delivery is unconfirmed; admin has been notified. Do not pay again.`,[[{text:'Check Delivery',callback_data:`provider_retry_${orderId}`}]]);
-        await notifyAdminForUser(env,chatId,`⚠️ Wallet Order #${orderId}: ${escapeHtml(apiResult.message||'Delivery unconfirmed')}. Check provider history before retrying; no automatic refund because the provider may have accepted the order.`);
+        await sendMsg(env,chatId,`Payment recorded for Order ID ${displayId}. Provider delivery is unconfirmed; admin has been notified. Do not pay again.`,[[{text:'Check Delivery',callback_data:`provider_retry_${orderId}`}]]);
+        await notifyAdminForUser(env,chatId,`⚠️ Wallet Order ID ${displayId}: ${escapeHtml(apiResult.message||'Delivery unconfirmed')}. Check provider history before retrying; no automatic refund because the provider may have accepted the order.`);
       }
       return;
     }
@@ -836,11 +845,11 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     await env.DB.prepare("UPDATE orders SET status='completed',delivery_data=? WHERE id=?").bind(creds,orderId).run();
     await env.DB.prepare("UPDATE products SET api_stock = MAX(0, api_stock - ?) WHERE id = ?").bind(qty, prod.id).run();
 
-    await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${escapeHtml(creds)}</code></blockquote>`, [
+    await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder ID: ${displayId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${escapeHtml(creds)}</code></blockquote>`, [
       [{ text: "📦 View Orders", callback_data: "my_orders" }],
       [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
     ]);
-    await notifyAdminForUser(env,chatId,`✅ Wallet Order #${orderId} delivered. Customer: <code>${chatId}</code> · $${totalUsd.toFixed(2)} USD · ${escapeHtml(prod.name)}`);
+    await notifyAdminForUser(env,chatId,`✅ Wallet Order ID ${displayId} delivered. Customer: <code>${chatId}</code> · $${totalUsd.toFixed(2)} USD · ${escapeHtml(prod.name)}`);
   await processReferralCommission(env, chatId, totalUsd, prod.name);
     return;
   }
@@ -862,14 +871,15 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   ]);
   if(!localBooking[0].meta?.changes){await sendMsg(env,chatId,'Stock or wallet balance changed. No money was deducted. Refresh the product before trying again.');return;}
   const orderId=localBooking[0].meta.last_row_id;
+  const displayId=await getPublicOrderId(env,orderId);
   const {results:allocated}=await env.DB.prepare('SELECT item_data FROM inventory WHERE order_id=? AND is_sold=1 ORDER BY id').bind(orderId).all();
   const itemStrings=allocated.map(it=>escapeHtml(it.item_data));
 
-  await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder: #${orderId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${itemStrings.join("\n\n")}</code></blockquote>`, [
+  await editMsg(env, chatId, messageId, `🎉 <b>Purchase Successful! Instant Delivery</b>\n\nOrder ID: ${displayId}\nProduct: <b>${productDisplayName(prod)}</b>\nQuantity: <b>${qty} item(s)</b>\nTotal Paid: <b>$${totalUsd.toFixed(2)} USD</b>\n\n🔑 <b>Credentials:</b>\n<blockquote><code>${itemStrings.join("\n\n")}</code></blockquote>`, [
     [{ text: "📦 View Orders", callback_data: "my_orders" }],
     [{ text: "🛒 Continue Shopping", callback_data: "shop" }]
   ]);
-  await notifyAdminForUser(env,chatId,`✅ Wallet Order #${orderId} delivered. Customer: <code>${chatId}</code> · $${totalUsd.toFixed(2)} USD · ${escapeHtml(prod.name)}`);
+  await notifyAdminForUser(env,chatId,`✅ Wallet Order ID ${displayId} delivered. Customer: <code>${chatId}</code> · $${totalUsd.toFixed(2)} USD · ${escapeHtml(prod.name)}`);
   await processReferralCommission(env, chatId, totalUsd, prod.name);
 }
 
@@ -1406,10 +1416,11 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
       // 1. ORDER PAYMENT SUBMISSION
       if (rText.includes("Order ID:")) {
-        const m = rText.match(/Order ID:\s*#(\d+)/);
+        const m = rText.match(/Order ID:\s*(#?)(\d+)/);
         if (m) {
-          const orderId = m[1];
-          const order = await env.DB.prepare("SELECT o.*, p.name as product_name, p.is_external, p.external_id, p.api_stock FROM orders o JOIN products p ON o.product_id = p.id WHERE o.id = ?").bind(orderId).first();
+          const lookup=m[1]==='#'?'o.id':'o.public_order_id';
+          const order = await env.DB.prepare(`SELECT o.*, p.name as product_name, p.is_external, p.external_id, p.api_stock FROM orders o JOIN products p ON o.product_id=p.id WHERE ${lookup}=?`).bind(m[2]).first();
+          const orderId=order?.id;
           if (order) {
             if (String(order.user_id) !== String(chatId) || order.status !== "pending") {
               await sendMsg(env, chatId, "This order is not payable by this account.");
@@ -1434,8 +1445,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
             if(method==='ROCKET'&&Date.now()-invoiceTimestamp(order.created_at)>60*60000){await sendMsg(env,chatId,'The 60-minute Rocket payment window expired. If you paid, contact admin. Do not pay again.');return;}
             // C. Manual Payments (bKash, Nagad, Rocket)
             await env.DB.prepare("UPDATE orders SET trx_id = ? WHERE id = ?").bind(cleanText, orderId).run();
-            await sendMsg(env, chatId, `✅ <b>Payment Details Received!</b>\n\nOrder ID: #${orderId}\nMethod: <b>${order.payment_method}</b>\nTransaction ID: <code>${cleanText}</code>\n\nOur team is verifying your payment. Your product will be delivered automatically upon confirmation.`);
-            await notifyAdminForUser(env,chatId, `🚨 <b>New Order Payment Verification!</b>\n\nOrder ID: #${order.id}\nProduct: <b>${order.product_name}</b> (${order.quantity || 1} items)\nMethod: <b>${order.payment_method}</b>\nAmount: <b>$${order.amount_usd} USD (৳${order.amount_bdt} BDT)</b>\nTrxID: <code>${cleanText}</code>\nCustomer: ${order.username} (ID: <code>${order.user_id}</code>)`, [
+            await sendMsg(env, chatId, `✅ <b>Payment Details Received!</b>\n\nOrder ID: ${orderDisplayId(order)}\nMethod: <b>${order.payment_method}</b>\nTransaction ID: <code>${cleanText}</code>\n\nOur team is verifying your payment. Your product will be delivered automatically upon confirmation.`);
+            await notifyAdminForUser(env,chatId, `🚨 <b>New Order Payment Verification!</b>\n\nOrder ID: ${orderDisplayId(order)}\nProduct: <b>${order.product_name}</b> (${order.quantity || 1} items)\nMethod: <b>${order.payment_method}</b>\nAmount: <b>$${order.amount_usd} USD (৳${order.amount_bdt} BDT)</b>\nTrxID: <code>${cleanText}</code>\nCustomer: ${order.username} (ID: <code>${order.user_id}</code>)`, [
               [{ text: "✅ Approve Order", callback_data: `admin_approve_${orderId}` }, { text: "❌ Reject Order", callback_data: `admin_reject_${orderId}` }]
             ]);
             return;
@@ -1532,7 +1543,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if(data==='adm_order_find'){
       if(!adminUserAccess(env,chatId))return;
       await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_order_search','')").bind(chatId).run();
-      await editMsg(env,chatId,messageId,'🔎 <b>Find Order</b>\n\nSend the order ID, e.g. 123 or #123. This is this store’s order ID, not a payment transaction ID.',[[{text:'Cancel',callback_data:'admin_panel'}]]);return;
+      await editMsg(env,chatId,messageId,'🔎 <b>Find Order</b>\n\nSend the 5-digit Order ID, e.g. 58241. This is this store’s Order ID, not a payment transaction ID. Older #number references are also accepted.',[[{text:'Cancel',callback_data:'admin_panel'}]]);return;
     }
     let walletHistoryMatch=data.match(/^wallet_history_(\d+)$/);
     if(walletHistoryMatch){await showWalletHistory(env,chatId,chatId,walletHistoryMatch[1],messageId);return;}
@@ -1860,7 +1871,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         customInstructions=`👉 <b>Send Money (Personal) to:</b>\n<code>${escapeHtml(accNum)}</code>\n\nSend the exact BDT amount within <b>60 minutes</b>, then tap <b>Enter Transaction ID</b>. Payment is verified against our received transaction record. Never submit a PIN or OTP.`;
       }
       const checkoutText = `💳 <b>Payment Instructions — ${mTitle}</b>\n\n` +
-        `Order ID: <b>#${orderId}</b>\n` +
+        `Order ID: <b>${await getPublicOrderId(env,orderId)}</b>\n` +
         `Product: <b>${productDisplayName(prod)}</b> (${qty} item(s))\n` +
         `Total Payable: <b>$${totalUsd.toFixed(2)} USD (৳${totalBdt} BDT)</b>\n\n` +
         `${customInstructions}`;
@@ -3117,13 +3128,13 @@ async function sendOrders(env,chatId,editMessageId=null){
   let orderText='📦 <b>Your Orders:</b>\n\n';const buttons=[];
   if(!results?.length)orderText+='You have no paid orders yet.';
   for(const order of results||[]){
-    buttons.push([{text:`🎫 Get Help · Order #${order.id}`,callback_data:`ticket_new_${order.id}`}]);
-    orderText+=`<b>${escapeHtml(order.product_name)}</b>\nOrder: #${order.id} | Quantity: ${order.quantity||1} | Amount: $${Number(order.amount_usd).toFixed(2)}\n`;
+    buttons.push([{text:`🎫 Get Help · ${orderDisplayId(order)}`,callback_data:`ticket_new_${order.id}`}]);
+    orderText+=`<b>${escapeHtml(order.product_name)}</b>\nOrder ID: <code>${orderDisplayId(order)}</code> | Quantity: ${order.quantity||1} | Amount: $${Number(order.amount_usd).toFixed(2)}\n`;
     if(order.status==='completed')orderText+=`Credentials: <code>${escapeHtml(order.delivery_data||order.item_data||'Delivery details unavailable. Contact admin.')}</code>\n\n`;
     else if(order.status==='refunded')orderText+='Status: Wallet payment refunded.\n\n';
     else{
       orderText+='Status: Payment recorded; delivery pending. Do not pay again.\n\n';
-      if(order.provider_request_id&&order.status==='paid_pending_delivery')buttons.push([{text:`Check Delivery #${order.id}`,callback_data:`provider_retry_${order.id}`}]);
+      if(order.provider_request_id&&order.status==='paid_pending_delivery')buttons.push([{text:`Check Delivery · ${orderDisplayId(order)}`,callback_data:`provider_retry_${order.id}`}]);
     }
   }
   buttons.push([{text:'🎫 My Support Tickets',callback_data:'tickets_mine_0'}],[{text:'◀️ Main Menu',callback_data:'home'}]);
@@ -3452,7 +3463,7 @@ async function showAdminUserList(env,chatId,mode,page=0,query='',messageId=null)
   else if(mode==='orders'){where='EXISTS(SELECT 1 FROM orders o WHERE o.user_id=u.user_id)';sort='(SELECT MAX(id) FROM orders o WHERE o.user_id=u.user_id) DESC,u.user_id DESC';}
   else if(mode==='search'){
     const invoice=q.match(/^(order|deposit):\s*(\d+)$/i);
-    if(invoice){const table=invoice[1].toLowerCase()==='order'?'orders':'deposits';where=`EXISTS(SELECT 1 FROM ${table} x WHERE x.user_id=u.user_id AND x.id=?)`;args=[invoice[2]];}
+    if(invoice){const table=invoice[1].toLowerCase()==='order'?'orders':'deposits';where=`EXISTS(SELECT 1 FROM ${table} x WHERE x.user_id=u.user_id AND x.${table==='orders'&&invoice[2].length===5?'public_order_id':'id'}=?)`;args=[invoice[2]];}
     else{
       const needle=q.replace(/^@/,'').toLowerCase();
       where=`(CAST(u.user_id AS TEXT)=? OR instr(LOWER(COALESCE(u.username,'')),?)>0 OR instr(LOWER(COALESCE(u.first_name,'')),?)>0 OR EXISTS(SELECT 1 FROM orders o WHERE o.user_id=u.user_id AND UPPER(o.trx_id)=?) OR EXISTS(SELECT 1 FROM deposits d WHERE d.user_id=u.user_id AND UPPER(d.trx_id)=?))`;
@@ -3770,7 +3781,7 @@ async function showDeliveryAdminList(env,chatId,filter='pending',page=0,messageI
   const {results}=await env.DB.prepare('SELECT o.id,o.user_id,o.amount_usd,o.product_name,p.name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.status=? ORDER BY o.id DESC LIMIT 11 OFFSET ?').bind(status,page*10).all();
   const title=filter==='processing'?'Processing':filter==='completed'?'Completed':'Paid / Delivery Pending';
   const text=`📦 <b>Delivery Management</b>\n\n<b>${title}</b> · Page ${page+1}\n\n${results.length?'Choose an order to see its latest delivery status.':'No orders in this list.'}\n\nCheck Delivery resumes the existing paid order. It does not charge the customer again. Processing orders are shown for review and cannot be restarted here.`;
-  const buttons=results.slice(0,10).map(o=>[{text:`#${o.id} · ${String(o.product_name||o.name||'Product').slice(0,28)} · $${adminMoney(o.amount_usd)} · ${o.user_id}`,callback_data:`adm_delivery_view_${o.id}`}]);
+  const buttons=results.slice(0,10).map(o=>[{text:`${orderDisplayId(o)} · ${String(o.product_name||o.name||'Product').slice(0,28)} · $${adminMoney(o.amount_usd)} · ${o.user_id}`,callback_data:`adm_delivery_view_${o.id}`}]);
   const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_delivery_list_${filter}_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_delivery_list_${filter}_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'Pending Delivery',callback_data:'adm_delivery_list_pending_0'},{text:'Processing',callback_data:'adm_delivery_list_processing_0'}],[{text:'Completed',callback_data:'adm_delivery_list_completed_0'},{text:'🔄 Refresh',callback_data:`adm_delivery_list_${filter}_${page}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
@@ -3783,7 +3794,7 @@ async function showDeliveryAdminOrder(env,chatId,id,messageId=null){
   const canRetry=order.status==='paid_pending_delivery'&&order.is_external!=null&&(!order.is_external||order.provider_request_id);
   let help=order.status==='completed'?'Delivered. No further purchase or stock allocation will be performed.':order.status==='delivering'?'Processing or interrupted during delivery. Check supplier history and refresh; automatic restart is blocked to avoid duplicate fulfillment.':order.status==='paid_pending_delivery'?(order.is_external&&!order.provider_request_id?'This older API order has no supplier request ID. Reconcile supplier history before taking further action.':order.is_external?'Check Delivery looks up the existing supplier request and resumes it safely. A provider rejection can refund a wallet order through the existing refund rules.':'Restock this local product, then Check Delivery. Previously allocated items are reused; only missing items are allocated.'):'This order is unpaid or closed; delivery cannot be started here.';
   if(order.is_external==null&&order.status==='paid_pending_delivery')help='Product record is missing. Admin reconciliation is required.';
-  const text=`📦 <b>Delivery · Order #${order.id}</b>\n\nCustomer: <code>${order.user_id}</code>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nOrder total: <b>$${adminMoney(order.amount_usd)}</b>\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
+  const text=`📦 <b>Delivery · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: <code>${order.user_id}</code>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nOrder total: <b>$${adminMoney(order.amount_usd)}</b>\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
   const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
   if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
   buttons.push([adminUserProfileButton(order.user_id)],[{text:'🔄 Refresh',callback_data:`adm_delivery_view_${order.id}`}],[{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'},{text:'Admin Panel',callback_data:'admin_panel'}]);
@@ -3795,7 +3806,7 @@ async function retryDeliveryAdmin(env,chatId,id,messageId){
   if(!order||order.status!=='paid_pending_delivery'||(order.is_external&&!order.provider_request_id)){await showDeliveryAdminOrder(env,chatId,id,messageId);return;}
   const claimed=await env.DB.prepare("UPDATE orders SET provider_retry_at=? WHERE id=? AND status='paid_pending_delivery' AND COALESCE(provider_retry_at,0)<?").bind(Date.now()+30000,id,Date.now()).run();
   if(!claimed.meta?.changes){await sendMsg(env,chatId,'Delivery is being checked or is in cooldown. Please wait before retrying.');return;}
-  await sendMsg(env,chatId,`Checking delivery for Order #${id}…`);
+  await sendMsg(env,chatId,`Checking delivery for Order ID ${orderDisplayId(order)}…`);
   await completeSuccessfulOrder(env,order,order.trx_id,order.user_id);
   await showDeliveryAdminOrder(env,chatId,id,messageId);
 }
@@ -3810,10 +3821,10 @@ async function resendSavedDelivery(env,chatId,id,messageId){
   if(!claim.meta?.changes){await sendMsg(env,chatId,'Please wait 30 seconds before resending.');return;}
   const chunks=[];let chunk='';for(const char of String(content)){const escaped=escapeHtml(char);if(chunk.length+escaped.length>2800){chunks.push(chunk);chunk='';}chunk+=escaped;}if(chunk)chunks.push(chunk);
   for(let i=0;i<chunks.length;i++){
-    const sent=await sendMsg(env,order.user_id,`📦 <b>Saved delivery · Order #${id}</b> (${i+1}/${chunks.length})\n\n<code>${chunks[i]}</code>`);
+    const sent=await sendMsg(env,order.user_id,`📦 <b>Saved delivery · Order ID ${orderDisplayId(order)}</b> (${i+1}/${chunks.length})\n\n<code>${chunks[i]}</code>`);
     if(!sent?.ok){await sendMsg(env,chatId,'Telegram did not confirm the delivery message. Saved order data is unchanged; retry after cooldown.');return;}
   }
-  await sendMsg(env,chatId,`Saved delivery for Order #${id} sent to customer ${order.user_id}. No new purchase or wallet charge was made.`);
+  await sendMsg(env,chatId,`Saved delivery for Order ID ${orderDisplayId(order)} sent to customer ${order.user_id}. No new purchase or wallet charge was made.`);
 }
 async function handleDeliveryAdminCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
@@ -3828,22 +3839,22 @@ async function showTickets(env,chatId,mode='mine',page=0,messageId=null){
   const admin=adminUserAccess(env,chatId);if(mode!=='mine'&&!admin)return;
   page=adminUserPage(page);
   const where=mode==='mine'?'t.user_id=?':mode==='closed'?"t.status='closed'":"t.status<>'closed'",args=mode==='mine'?[chatId]:[];
-  const {results}=await env.DB.prepare(`SELECT t.*,o.product_name,p.name FROM support_tickets t LEFT JOIN orders o ON o.id=t.order_id LEFT JOIN products p ON p.id=o.product_id WHERE ${where} ORDER BY t.updated_at DESC,t.id DESC LIMIT 11 OFFSET ?`).bind(...args,page*10).all();
+  const {results}=await env.DB.prepare(`SELECT t.*,o.product_name,o.public_order_id,p.name FROM support_tickets t LEFT JOIN orders o ON o.id=t.order_id LEFT JOIN products p ON p.id=o.product_id WHERE ${where} ORDER BY t.updated_at DESC,t.id DESC LIMIT 11 OFFSET ?`).bind(...args,page*10).all();
   const prefix=mode==='mine'?'tickets_mine_':`adm_tickets_${mode}_`;
   const text=`🎫 <b>${mode==='mine'?'My Support Tickets':mode==='closed'?'Closed Support Tickets':'Active Support Tickets'}</b> · Page ${page+1}\n\n${results.length?'Choose a ticket to read the conversation or reply.':'No tickets found. Open Your Orders and choose Get Help to create a ticket.'}`;
-  const buttons=results.slice(0,10).map(t=>[{text:`#${t.id} · Order #${t.order_id} · ${t.status} · ${String(t.product_name||t.name||'Product').slice(0,25)}`,callback_data:`ticket_view_${t.id}_0`}]);
+  const buttons=results.slice(0,10).map(t=>[{text:`#${t.id} · Order ID ${t.public_order_id||String(t.order_id).padStart(5,'0')} · ${t.status} · ${String(t.product_name||t.name||'Product').slice(0,25)}`,callback_data:`ticket_view_${t.id}_0`}]);
   const pager=[];if(page>0)pager.push({text:'Previous',callback_data:prefix+(page-1)});if(results.length>10)pager.push({text:'Next',callback_data:prefix+(page+1)});if(pager.length)buttons.push(pager);
   if(admin&&mode!=='mine')buttons.push([{text:'Active',callback_data:'adm_tickets_open_0'},{text:'Closed',callback_data:'adm_tickets_closed_0'},{text:'Admin Panel',callback_data:'admin_panel'}]);
   else buttons.push([{text:'Your Orders',callback_data:'my_orders'},{text:'Main Menu',callback_data:'home'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showTicket(env,chatId,id,page=0,messageId=null){
-  const ticket=await env.DB.prepare('SELECT t.*,o.status AS order_status,o.amount_usd,o.product_name,p.name FROM support_tickets t LEFT JOIN orders o ON o.id=t.order_id LEFT JOIN products p ON p.id=o.product_id WHERE t.id=?').bind(id).first();
+  const ticket=await env.DB.prepare('SELECT t.*,o.status AS order_status,o.amount_usd,o.product_name,o.public_order_id,p.name FROM support_tickets t LEFT JOIN orders o ON o.id=t.order_id LEFT JOIN products p ON p.id=o.product_id WHERE t.id=?').bind(id).first();
   if(!ticket||(!adminUserAccess(env,chatId)&&String(ticket.user_id)!==String(chatId))){await sendMsg(env,chatId,'Ticket unavailable.');return;}
   page=adminUserPage(page);
   const {results}=await env.DB.prepare('SELECT * FROM support_ticket_messages WHERE ticket_id=? ORDER BY id DESC LIMIT 2 OFFSET ?').bind(id,page).all();
   const msg=results[0];
-  const text=`🎫 <b>Ticket #${ticket.id} · ${escapeHtml(ticket.status)}</b>\nOrder #${ticket.order_id} · ${escapeHtml(ticket.order_status||'Unavailable')} · $${adminMoney(ticket.amount_usd)}\nProduct: ${adminSnippet(ticket.product_name||ticket.name||'Product unavailable',100)}\nCustomer: <code>${ticket.user_id}</code>\n\n${msg?`<b>${msg.is_admin?'Admin':'Customer'}</b> · ${paymentDashboardTime(msg.created_at)} (Dhaka)\n\n${escapeHtml(msg.body)}`:'No messages.'}`;
+  const text=`🎫 <b>Ticket #${ticket.id} · ${escapeHtml(ticket.status)}</b>\nOrder ID ${ticket.public_order_id||await getPublicOrderId(env,ticket.order_id)} · ${escapeHtml(ticket.order_status||'Unavailable')} · $${adminMoney(ticket.amount_usd)}\nProduct: ${adminSnippet(ticket.product_name||ticket.name||'Product unavailable',100)}\nCustomer: <code>${ticket.user_id}</code>\n\n${msg?`<b>${msg.is_admin?'Admin':'Customer'}</b> · ${paymentDashboardTime(msg.created_at)} (Dhaka)\n\n${escapeHtml(msg.body)}`:'No messages.'}`;
   const buttons=[],pager=[];if(page>0)pager.push({text:'Newer Message',callback_data:`ticket_view_${id}_${page-1}`});if(results.length>1)pager.push({text:'Older Message',callback_data:`ticket_view_${id}_${page+1}`});if(pager.length)buttons.push(pager);
   if(ticket.status!=='closed')buttons.push([{text:'✏️ Reply',callback_data:`ticket_reply_${id}`}],...(adminUserAccess(env,chatId)?[[{text:'✅ Close Ticket',callback_data:`adm_ticket_close_${id}`}]]:[]));
   if(adminUserAccess(env,chatId))buttons.push([adminUserProfileButton(ticket.user_id),{text:'Order Details',callback_data:`adm_delivery_view_${ticket.order_id}`}]);
@@ -3865,7 +3876,7 @@ async function handleTicketCallback(env,chatId,data,messageId){
     if(!order){await sendMsg(env,chatId,'Choose one of your paid orders to open a ticket.');return true;}
     const existing=await env.DB.prepare("SELECT id FROM support_tickets WHERE order_id=? AND user_id=? AND status<>'closed'").bind(order.id,chatId).first();if(existing){await showTicket(env,chatId,existing.id,0,messageId);return true;}
     await env.DB.prepare("INSERT OR REPLACE INTO user_states(user_id,state,data) VALUES(?,'awaiting_ticket_body',?)").bind(chatId,JSON.stringify({orderId:order.id,token:crypto.randomUUID()})).run();
-    await editMsg(env,chatId,messageId,`🎫 <b>Get Help · Order #${order.id}</b>\n\nDescribe your issue in one text message (up to 500 characters). Do not send payment PINs, OTPs or account passwords.`,[[{text:'Cancel',callback_data:'my_orders'}]]);return true;
+    await editMsg(env,chatId,messageId,`🎫 <b>Get Help · Order ID ${orderDisplayId(order)}</b>\n\nDescribe your issue in one text message (up to 500 characters). Do not send payment PINs, OTPs or account passwords.`,[[{text:'Cancel',callback_data:'my_orders'}]]);return true;
   }
   match=data.match(/^ticket_reply_(\d+)$/);
   if(match){
@@ -3879,7 +3890,7 @@ async function handleTicketCallback(env,chatId,data,messageId){
   if(match){
     if(!adminUserAccess(env,chatId))return true;
     const ticket=await env.DB.prepare("SELECT * FROM support_tickets WHERE id=? AND status<>'closed'").bind(match[1]).first();
-    if(ticket){const changed=await env.DB.prepare("UPDATE support_tickets SET status='closed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'closed'").bind(ticket.id).run();if(changed.meta?.changes)await sendMsg(env,ticket.user_id,`✅ Support Ticket #${ticket.id} for Order #${ticket.order_id} was closed by admin.`,[[{text:'View Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);}
+    if(ticket){const changed=await env.DB.prepare("UPDATE support_tickets SET status='closed',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'closed'").bind(ticket.id).run();if(changed.meta?.changes)await sendMsg(env,ticket.user_id,`✅ Support Ticket #${ticket.id} for Order ID ${ticket.public_order_id||await getPublicOrderId(env,ticket.order_id)} was closed by admin.`,[[{text:'View Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);}
     await showTicket(env,chatId,match[1],0,messageId);return true;
   }
   return false;
@@ -3904,7 +3915,7 @@ async function handleTicketText(env,chatId,text,state,isAdminState){
   ]);
   if(!result[0].meta?.changes){await sendMsg(env,chatId,'Message was already submitted, cancelled or the ticket closed.');return true;}
   const target=isAdminState?ticket.user_id:env.ADMIN_ID;
-  const sent=await sendMsg(env,target,`🎫 <b>${isAdminState?'Admin Reply':'Customer Support Message'} · Ticket #${ticket.id}</b>\nOrder #${ticket.order_id}\n\n${escapeHtml(body)}`,[[{text:'Open Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);
+  const sent=await sendMsg(env,target,`🎫 <b>${isAdminState?'Admin Reply':'Customer Support Message'} · Ticket #${ticket.id}</b>\nOrder ID ${ticket.public_order_id||await getPublicOrderId(env,ticket.order_id)}\n\n${escapeHtml(body)}`,[[{text:'Open Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);
   await sendMsg(env,chatId,`✅ Message saved to Ticket #${ticket.id}.${sent?.ok?'':' The notification could not be confirmed; the message is available in the ticket.'}`,[[{text:'View Ticket',callback_data:`ticket_view_${ticket.id}_0`}]]);return true;
 }
 
@@ -3933,8 +3944,9 @@ async function showWalletHistory(env,chatId,userId,page=0,messageId=null){
 async function handleOrderSearchText(env,chatId,text,state){
   if(!adminUserAccess(env,chatId)||state.state!=='awaiting_order_search')return false;
   const match=String(text).trim().match(/^(?:order[:# -]*|#)?(\d{1,15})$/i);
-  if(!match){await sendMsg(env,chatId,'Enter this store’s order number, e.g. 123 or #123.');return true;}
-  const order=await env.DB.prepare('SELECT id FROM orders WHERE id=?').bind(match[1]).first();
+  if(!match){await sendMsg(env,chatId,'Enter this store’s 5-digit Order ID, e.g. 58241.');return true;}
+  const digits=match[1],legacy=String(text).trim().startsWith('#')||digits.length!==5;
+  const order=await env.DB.prepare(legacy?'SELECT id FROM orders WHERE id=?':'SELECT id FROM orders WHERE public_order_id=?').bind(digits).first();
   if(!order){await sendMsg(env,chatId,'No order found with this ID. Check the number and try again.');return true;}
   await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,order.id);return true;
 }
@@ -4327,3 +4339,7 @@ async function handlePeriodicCallback(env,chatId,data,messageId){
   if(data==='adm_periodic_run'){await runPeriodicSync(env,true);if(env.__executionContext?.waitUntil)env.__executionContext.waitUntil(drainAllNotices(env).catch(()=>{}));}
   await showPeriodicStatus(env,chatId,messageId);return true;
 }
+
+
+function orderDisplayId(order){return /^[1-9]\d{4}$/.test(String(order?.public_order_id||''))?String(order.public_order_id):String(order?.id||'').padStart(5,'0');}
+async function getPublicOrderId(env,id){const row=await env.DB.prepare('SELECT id,public_order_id FROM orders WHERE id=?').bind(id).first();return orderDisplayId(row||{id});}
