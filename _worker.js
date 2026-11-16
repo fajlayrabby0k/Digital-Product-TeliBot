@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-document-delivery-1";
+const BOT_BUILD="2026-11-16-user-order-numbers-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-public-order-ids-1";
+const DB_SCHEMA_VERSION = "2026-11-user-order-numbers-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -185,6 +185,7 @@ async function initializeDatabase(db, force) {
 
     const alters = [
       "ALTER TABLE orders ADD COLUMN public_order_id TEXT DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN user_order_number INTEGER DEFAULT NULL;",
       "ALTER TABLE channel_notice_events ADD COLUMN old_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE channel_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN price_notice_revision INTEGER DEFAULT 0;",
@@ -270,6 +271,11 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      db.prepare('CREATE INDEX IF NOT EXISTS orders_user_sequence_lookup ON orders(user_id,id)'),
+      db.prepare('UPDATE orders AS target SET user_order_number=(SELECT COUNT(*) FROM orders previous WHERE previous.user_id=target.user_id AND previous.id<=target.id) WHERE user_order_number IS NULL'),
+      db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS orders_user_number_unique ON orders(user_id,user_order_number) WHERE user_order_number IS NOT NULL'),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_user_number_assign AFTER INSERT ON orders WHEN NEW.user_order_number IS NULL BEGIN UPDATE orders SET user_order_number=(SELECT COALESCE(MAX(user_order_number),0)+1 FROM orders WHERE user_id=NEW.user_id) WHERE id=NEW.id; END`),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_user_number_immutable BEFORE UPDATE OF user_order_number ON orders WHEN NEW.user_order_number IS NULL OR NEW.user_order_number<1 OR (OLD.user_order_number IS NOT NULL AND OLD.user_order_number<>NEW.user_order_number) BEGIN SELECT RAISE(ABORT,'User order number must be positive and immutable'); END`),
       db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS orders_public_id_unique ON orders(public_order_id) WHERE public_order_id IS NOT NULL'),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_public_id_validate BEFORE UPDATE OF public_order_id ON orders WHEN NEW.public_order_id IS NULL OR NEW.public_order_id NOT GLOB '[1-9][0-9][0-9][0-9][0-9]' OR (OLD.public_order_id IS NOT NULL AND OLD.public_order_id<>NEW.public_order_id) BEGIN SELECT RAISE(ABORT,'Order ID must be unique, immutable and five digits; ID space may be exhausted'); END`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_public_id_insert_validate BEFORE INSERT ON orders WHEN NEW.public_order_id IS NOT NULL AND NEW.public_order_id NOT GLOB '[1-9][0-9][0-9][0-9][0-9]' BEGIN SELECT RAISE(ABORT,'Order ID must be five digits'); END`),
@@ -3146,8 +3152,8 @@ async function sendOrders(env,chatId,editMessageId=null){
   let orderText='📦 <b>Your Orders:</b>\n\n';const buttons=[];
   if(!results?.length)orderText+='You have no paid orders yet.';
   for(const order of results||[]){
-    buttons.push([{text:`🎫 Get Help · ${orderDisplayId(order)}`,callback_data:`ticket_new_${order.id}`}]);
-    orderText+=`<b>${escapeHtml(order.product_name)}</b>\nOrder ID: <code>${orderDisplayId(order)}</code> | Quantity: ${order.quantity||1} | Amount: $${Number(order.amount_usd).toFixed(2)}\n`;
+    buttons.push([{text:`Order - ${String(order.user_order_number).padStart(2,'0')} Order ID- ${orderDisplayId(order)}`,callback_data:`ticket_new_${order.id}`}]);
+    orderText+=`<b>${escapeHtml(order.product_name)}</b>\nOrder - ${String(order.user_order_number).padStart(2,'0')} Order ID- <code>${orderDisplayId(order)}</code>\nQuantity: ${order.quantity||1} | Amount: $${Number(order.amount_usd).toFixed(2)}\n`;
     if(order.status==='completed'){orderText+='Delivery: Text document\n\n';buttons.push([{text:`📄 Download · ${orderDisplayId(order)}`,callback_data:`order_document_${order.id}`}]);}
     else if(order.status==='refunded')orderText+='Status: Wallet payment refunded.\n\n';
     else{
