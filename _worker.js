@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-english-interface-1";
+const BOT_BUILD="2026-11-16-product-follows-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-english-interface-1";
+const DB_SCHEMA_VERSION = "2026-11-product-follows-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -154,6 +154,7 @@ async function initializeDatabase(db, force) {
     const schema = [
       `CREATE TABLE IF NOT EXISTS periodic_sync_status(id INTEGER PRIMARY KEY CHECK(id=1),lease_until INTEGER NOT NULL DEFAULT 0,lease_token TEXT,last_attempt_ms INTEGER,last_success_ms INTEGER,last_error TEXT);`,
       `CREATE TABLE IF NOT EXISTS channel_notice_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,product_id INTEGER,order_id INTEGER,deposit_id INTEGER,kind TEXT NOT NULL,channel_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',next_at INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0,lease_token TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,sent_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
+      `CREATE TABLE IF NOT EXISTS product_follows(user_id INTEGER NOT NULL,product_id INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(user_id,product_id));`,
       `CREATE TABLE IF NOT EXISTS product_notice_state(product_id INTEGER PRIMARY KEY,stock INTEGER NOT NULL,revision INTEGER NOT NULL DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS product_notice_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,product_id INTEGER NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,retries INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS product_categories(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL COLLATE NOCASE UNIQUE);`,
@@ -190,6 +191,9 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE channel_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN price_notice_revision INTEGER DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN product_alerts INTEGER DEFAULT 1;",
+      "ALTER TABLE users ADD COLUMN product_alert_scope TEXT NOT NULL DEFAULT 'all';",
+      "ALTER TABLE product_notice_events ADD COLUMN old_price_cents INTEGER DEFAULT NULL;",
+      "ALTER TABLE product_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE product_categories ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE product_categories ADD COLUMN is_deleted INTEGER DEFAULT 0;",
       // Historical preorder tables stored product names without a numeric product_id.
@@ -271,6 +275,13 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      db.prepare('CREATE INDEX IF NOT EXISTS product_follows_recipients ON product_follows(product_id,user_id)'),
+      db.prepare('DROP INDEX IF EXISTS product_notice_coalesce'),
+      db.prepare("CREATE UNIQUE INDEX product_notice_coalesce ON product_notice_events(product_id,kind) WHERE status='pending' AND kind NOT IN ('price_drop','price_increase')"),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_price AFTER UPDATE OF price_usd ON products WHEN NEW.is_active=1 AND OLD.price_usd>0 AND NEW.price_usd>0 AND ROUND(OLD.price_usd*100)<>ROUND(NEW.price_usd*100) BEGIN
+        INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id,old_price_cents,new_price_cents)
+        SELECT 'price:'||NEW.id||':'||(COALESCE(OLD.price_notice_revision,0)+1),NEW.id,CASE WHEN NEW.price_usd<OLD.price_usd THEN 'price_drop' ELSE 'price_increase' END,COALESCE((SELECT MAX(user_id) FROM users),0),ROUND(OLD.price_usd*100),ROUND(NEW.price_usd*100)
+        WHERE EXISTS(SELECT 1 FROM product_follows WHERE product_id=NEW.id) AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key=CASE WHEN NEW.price_usd<OLD.price_usd THEN 'product_notice_price_drop' ELSE 'product_notice_price_increase' END),'1')='1'; END`),
       ...Object.entries(GUIDE_BENGALI_DEFAULTS).map(([key,value])=>db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS[key],key,value)),
       db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS.guide_intro,'guide_intro',GUIDE_PREVIOUS_INTRO),
       ...Object.entries(GUIDE_LEGACY_DEFAULTS).map(([key,value])=>db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS[key],key,value)),
@@ -333,7 +344,7 @@ async function initializeDatabase(db, force) {
     const indexes = [
       "CREATE INDEX IF NOT EXISTS channel_notice_pending ON channel_notice_events(status,next_at,id)",
       "CREATE UNIQUE INDEX IF NOT EXISTS channel_notice_coalesce ON channel_notice_events(product_id,kind) WHERE status='pending' AND product_id IS NOT NULL AND kind IN ('new_product','restock','sold_out','low_stock')",
-      "CREATE UNIQUE INDEX IF NOT EXISTS product_notice_coalesce ON product_notice_events(product_id,kind) WHERE status='pending'",
+      "CREATE UNIQUE INDEX IF NOT EXISTS product_notice_coalesce ON product_notice_events(product_id,kind) WHERE status='pending' AND kind NOT IN ('price_drop','price_increase')",
       "CREATE INDEX IF NOT EXISTS product_notice_pending ON product_notice_events(status,next_at,id)",
       "CREATE INDEX IF NOT EXISTS products_shop_category_v2 ON products(is_active,shop_category_id,id)",
       "CREATE INDEX IF NOT EXISTS wallet_user_history ON wallet_history(user_id,id DESC)",
@@ -377,7 +388,7 @@ async function initializeDatabase(db, force) {
       ['external_api_url', 'https://207-148-64-141.sslip.io'],
       ['external_api_key', ''],
       ['channel_notice_price_drop','1'],['channel_notice_price_increase','1'],['channel_notifications_enabled','1'],['channel_notice_new_product','1'],['channel_notice_restock','1'],['channel_notice_sold_out','1'],['channel_notice_low_stock','1'],['channel_notice_purchase','1'],['channel_notice_deposit','1'],
-      ['product_notifications_enabled','1'],['product_notice_new_product','1'],['product_notice_restock','1'],['product_notice_sold_out','1'],
+      ['product_notifications_enabled','1'],['product_notice_new_product','1'],['product_notice_restock','1'],['product_notice_sold_out','1'],['product_notice_price_drop','1'],['product_notice_price_increase','1'],
       ['external_profit_margin', '20'],
       ['external_profit_margin_type', 'percent'],
       ['auto_order_enabled', '1'],
@@ -2837,6 +2848,7 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
     [{text:'🛍️ Browse Shop',callback_data:'shop',style:'primary'}],
     [{text:'📦 My Orders',callback_data:'my_orders'},{text:'⏳ Pre-Orders',callback_data:'my_preorders'}],
     [{text:'🎁 Refer & Earn',callback_data:'refer'},{text:'📖 Guide / FAQ',callback_data:'user_guide'}],
+    [{text:'👤 My Profile',callback_data:'profile'},{text:'⭐ Followed Products',callback_data:'product_follows_0'}],
     [{text:'👛 Wallet',callback_data:'profile',style:'primary'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}],
     [{text:'💬 Support',callback_data:'support'}]
   ];
@@ -2944,6 +2956,8 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null, 
       buttons.push([{text:"Stock Out",callback_data:`stock_out_${prod.id}`,style:"danger"}]);
       if(!prod.is_external)buttons.push([{text:"⏳ Pre-Order Now",callback_data:`preorder_${prod.id}`}]);
     }
+    const following=await env.DB.prepare('SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,prod.id).first();
+    buttons.push([{text:following?'🔕 Unfollow Product':'🔔 Follow Stock & Price',callback_data:`product_${following?'unfollow':'follow'}_${prod.id}`}]);
     buttons.push([
       { text: "🔄 Refresh Stock", callback_data: `prod_refresh_${prod.id}` },
       { text: "◀️ Back to Shop", callback_data: `shop_return_${prod.id}` }
@@ -3117,20 +3131,32 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
   const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
   const bdtBal = user ? Math.round((user.balance_usd || 0) * rate) : 0;
 
-  const profileText = `👤 <b>Customer Profile & Wallet</b>\n\n` +
-    `🆔 <b>User ID:</b> <code>${chatId}</code>\n` +
-    `👤 <b>Name:</b> ${user ? user.first_name : "Customer"}\n\n` +
-    `💰 <b>Available Wallet Balance:</b>\n` +
-    `• USD: <b>$${usdBal} USD</b>\n` +
-    `• BDT: <b>≈ ৳${bdtBal} BDT</b>\n\n` +
-    `📊 <b>Account Statistics:</b>\n` +
-    `• Total Spent: <b>$${(user ? user.total_spent_usd || 0 : 0).toFixed(2)} USD</b>\n` +
-    `• Total Invited Friends: <b>${user ? user.total_referrals : 0} members</b>`;
+  const [orders,deposits,followed]=await Promise.all([
+    env.DB.prepare("SELECT COUNT(*) placed,SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) delivered,SUM(CASE WHEN status IN ('paid_pending_delivery','delivering') THEN 1 ELSE 0 END) awaiting_delivery,SUM(CASE WHEN status='refunded' THEN 1 ELSE 0 END) refunded,COALESCE(SUM(CASE WHEN status='completed' THEN ROUND(amount_usd*100) ELSE 0 END),0) spent_cents FROM orders WHERE user_id=?").bind(chatId).first(),
+    env.DB.prepare("SELECT SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) successful,COALESCE(SUM(CASE WHEN status='completed' THEN ROUND(amount_usd*100) ELSE 0 END),0) deposited_cents FROM deposits WHERE user_id=?").bind(chatId).first(),
+    env.DB.prepare('SELECT p.name,p.is_active,COUNT(*) OVER() total FROM product_follows f LEFT JOIN products p ON p.id=f.product_id WHERE f.user_id=? ORDER BY f.product_id DESC LIMIT 3').bind(chatId).all()
+  ]);
+  const followedCount=Number(followed.results?.[0]?.total||0);
+  const favorites=(followed.results||[]).map(p=>`• ${escapeHtml(p.name||'Unavailable product')}${p.is_active===1?'':' (unavailable)'}`).join('\n');
+  const profileText = `👤 <b>My Profile</b>\n\n` +
+    `<b>${escapeHtml(user?.first_name||'Customer')}</b>${user?.username?' · @'+escapeHtml(user.username):''}\n` +
+    `User ID: <code>${chatId}</code>\n` +
+    `Member since: ${paymentDashboardTime(user?.created_at)} (Dhaka)\n\n` +
+    `<blockquote>👛 <b>Available Wallet Balance</b>\n<b>$${usdBal} USD</b> ≈ ${bdtBal} BDT</blockquote>\n\n` +
+    `📦 <b>Orders</b>\n` +
+    `Placed: <b>${Number(orders?.placed||0)}</b> · Delivered: <b>${Number(orders?.delivered||0)}</b>\n` +
+    `Awaiting delivery: <b>${Number(orders?.awaiting_delivery||0)}</b> · Refunded: <b>${Number(orders?.refunded||0)}</b>\n` +
+    `Spent on delivered orders: <b>$${(Number(orders?.spent_cents||0)/100).toFixed(2)} USD</b>\n\n` +
+    `💳 <b>Deposits</b>\nSuccessful deposits: <b>${Number(deposits?.successful||0)}</b>\n` +
+    `Total deposited: <b>$${(Number(deposits?.deposited_cents||0)/100).toFixed(2)} USD</b>\n\n` +
+    `⭐ <b>Followed Products (${followedCount})</b>\n${favorites||'No followed products yet.'}${followedCount>3?'\nOpen Followed Products to see all.':''}\n\n` +
+    `🎁 Friends invited: <b>${Number(user?.total_referrals||0)}</b>`;
 
   const buttons = [
     [{ text: "💳 Deposit Funds", callback_data: "deposit" }],
     [{text:"📒 Balance History",callback_data:"wallet_history_0"}],
-    [{text:`🔔 Product Alerts: ${user?.product_alerts===0?'OFF':'ON'}`,callback_data:"product_alert_toggle"}],
+    [{text:`🔔 Product Alerts: ${user?.product_alerts===0?'OFF':user?.product_alert_scope==='following'?'Followed Only':'All Products'}`,callback_data:"product_alert_settings"}],
+    [{text:`⭐ Followed Products (${followedCount})`,callback_data:'product_follows_0'}],
     [{ text: "📦 Order History", callback_data: "my_orders" }, { text: "⏳ My Pre-Orders", callback_data: "my_preorders" }],
     [{ text: "👥 Refer & Earn", callback_data: "refer" }],
     [{text:"📖 Guide / FAQ",callback_data:"user_guide"},{text:"💬 Support",callback_data:"support"}],
@@ -4198,14 +4224,15 @@ async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
   if(!product||product.is_active===0||await getSetting(env,'product_notice_'+event.kind,'1')!=='1'||(event.kind==='restock'&&product.stock===0)||(event.kind==='sold_out'&&product.stock>0)){
     await env.DB.prepare("UPDATE product_notice_events SET status='superseded',lease_until=0 WHERE id=? AND lease_token=?").bind(event.id,token).run();return 0;
   }
-  const titles={new_product:'🆕 New Product Added',restock:'✅ Stock Added',sold_out:'📦 Stock Finished'};
-  const text=`<b>${titles[event.kind]||'Product Update'}</b>\n\n${escapeHtml(productDisplayName(product))}\nPrice: <b>$${adminMoney(product.price_usd)}</b>\n${event.kind==='sold_out'?'Stock: 0':'Available stock: '+Number(product.stock||0)}\n\n${paymentDashboardTime(event.created_at)} (Dhaka)`;
-  const {results:users}=await env.DB.prepare('SELECT user_id FROM users WHERE user_id>? AND user_id<=? AND user_id<>? AND COALESCE(product_alerts,1)=1 ORDER BY user_id LIMIT ?').bind(event.cursor,event.max_user_id,env.ADMIN_ID||0,limit).all();
+  const titles={new_product:'🆕 New Product Added',restock:'✅ Stock Added',sold_out:'📦 Stock Finished',price_drop:'📉 Price Dropped',price_increase:'📈 Price Increased'};
+  const text=`<b>${titles[event.kind]||'Product Update'}</b>\n\n${escapeHtml(productDisplayName(product))}\n${['price_drop','price_increase'].includes(event.kind)?`Price: <b>$${adminMoney(event.old_price_cents/100)} → $${adminMoney(event.new_price_cents/100)}</b>`:`Price: <b>$${adminMoney(product.price_usd)}</b>`}\n${event.kind==='sold_out'?'Stock: 0':'Available stock: '+Number(product.stock||0)}\n\n${paymentDashboardTime(event.created_at)} (Dhaka)`;
+  const priceEvent=['price_drop','price_increase'].includes(event.kind);
+  const {results:users}=await env.DB.prepare(`SELECT u.user_id FROM users u WHERE u.user_id>? AND u.user_id<=? AND u.user_id<>? AND COALESCE(u.product_alerts,1)=1 AND ((COALESCE(u.product_alert_scope,'all')='all' AND ?=0) OR EXISTS(SELECT 1 FROM product_follows f WHERE f.user_id=u.user_id AND f.product_id=?)) ORDER BY u.user_id LIMIT ?`).bind(event.cursor,event.max_user_id,env.ADMIN_ID||0,priceEvent?1:0,event.product_id,limit).all();
   let cursor=event.cursor,attempted=0;
   for(const user of users){
     if(Date.now()>=deadline)break;
     attempted++;
-    const sent=await sendMsg(env,user.user_id,text,[[{text:'View Product',callback_data:`prod_${product.id}`}],[{text:'🔕 Turn Off Product Alerts',callback_data:'product_alert_off'}]]);
+    const sent=await sendMsg(env,user.user_id,text,[[{text:'View Product',callback_data:`prod_${product.id}`}],[{text:'🔔 Notification Settings',callback_data:'product_alert_settings'}]]);
     if(!sent?.ok&&![400,403].includes(sent?.error_code)){
       const delay=Math.max(30,Math.min(3600,Number(sent?.parameters?.retry_after)||30));
       await env.DB.prepare('UPDATE product_notice_events SET next_at=?,lease_until=0,retries=retries+1 WHERE id=? AND lease_token=?').bind(Date.now()+delay*1000,event.id,token).run();return null;
@@ -4217,14 +4244,15 @@ async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
 }
 async function showProductNoticeSettings(env,chatId,messageId=null){
   if(!adminUserAccess(env,chatId))return;
-  const keys=['product_notifications_enabled','product_notice_new_product','product_notice_restock','product_notice_sold_out'];
-  const values=await Promise.all(keys.map(k=>getSetting(env,k,'1'))),labels=['All Product Alerts','New Products','Stock Added','Stock Finished'];
+  const keys=['product_notifications_enabled','product_notice_new_product','product_notice_restock','product_notice_sold_out','product_notice_price_drop','product_notice_price_increase'];
+  const values=await Promise.all(keys.map(k=>getSetting(env,k,'1'))),labels=['All Product Alerts','New Products','Stock Added','Stock Finished','Price Drops (Followers)','Price Increases (Followers)'];
   const pending=await env.DB.prepare("SELECT COUNT(*) AS n FROM product_notice_events WHERE status='pending'").first();
   const buttons=keys.map((k,i)=>[{text:`${labels[i]}: ${values[i]==='1'?'ON':'OFF'}`,callback_data:`adm_notice_toggle_${i}`}]);buttons.push([{text:'Send Pending Batch',callback_data:'adm_notice_drain'}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
-  const text=`🔔 <b>Product Notifications</b>\n\nPending events: ${pending.n}\n\nUsers receive new-product, stock-return and stock-finished updates. They can mute alerts from Profile. Repeated unchanged syncs do not create new alerts.\n\nDelivery runs in small background batches after bot activity/sync. Large queues may need more bot activity or scheduled sync calls to finish promptly.`;
+  const text=`🔔 <b>Product Notifications</b>\n\nPending events: ${pending.n}\n\nUsers can receive all product updates or follow selected products. Followers also receive price-drop and price-increase alerts. They can manage or mute alerts from Profile. Repeated unchanged syncs do not create new alerts.\n\nDelivery runs in small background batches after bot activity/sync. Large queues may need more bot activity or scheduled sync calls to finish promptly.`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleProductNoticeCallback(env,chatId,data,messageId){
+  if(await handleProductFollowCallback(env,chatId,data,messageId))return true;
   if(await handleChannelNoticeCallback(env,chatId,data,messageId))return true;
   if(data==='product_alert_off'||data==='product_alert_toggle'){
     await env.DB.prepare(data==='product_alert_off'?'UPDATE users SET product_alerts=0 WHERE user_id=?':'UPDATE users SET product_alerts=CASE WHEN COALESCE(product_alerts,1)=1 THEN 0 ELSE 1 END WHERE user_id=?').bind(chatId).run();
@@ -4233,7 +4261,7 @@ async function handleProductNoticeCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
   if(data==='adm_product_notices'){await showProductNoticeSettings(env,chatId,messageId);return true;}
   if(data==='adm_notice_drain'){await drainProductNotices(env);await showProductNoticeSettings(env,chatId,messageId);return true;}
-  const match=data.match(/^adm_notice_toggle_([0-3])$/);if(match){const key=['product_notifications_enabled','product_notice_new_product','product_notice_restock','product_notice_sold_out'][Number(match[1])];await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,CASE WHEN COALESCE((SELECT value FROM settings WHERE key=?),'1')='1' THEN '0' ELSE '1' END)").bind(key,key).run();await showProductNoticeSettings(env,chatId,messageId);return true;}return false;
+  const match=data.match(/^adm_notice_toggle_([0-5])$/);if(match){const key=['product_notifications_enabled','product_notice_new_product','product_notice_restock','product_notice_sold_out','product_notice_price_drop','product_notice_price_increase'][Number(match[1])];await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,CASE WHEN COALESCE((SELECT value FROM settings WHERE key=?),'1')='1' THEN '0' ELSE '1' END)").bind(key,key).run();await showProductNoticeSettings(env,chatId,messageId);return true;}return false;
 }
 
 
@@ -4414,4 +4442,44 @@ async function sendSavedOrderDocument(env,chatId,order){
   let content=order.delivery_data;
   if(!content){const {results}=await env.DB.prepare('SELECT item_data FROM inventory WHERE order_id=? AND is_sold=1 ORDER BY id').bind(order.id).all();content=results.map(item=>item.item_data).join('\n\n');}
   return sendOrderDocument(env,chatId,order,content);
+}
+
+async function showProductAlertPreferences(env,chatId,messageId=null){
+  const user=await env.DB.prepare('SELECT product_alerts,product_alert_scope FROM users WHERE user_id=?').bind(chatId).first();
+  const count=await env.DB.prepare('SELECT COUNT(*) n FROM product_follows WHERE user_id=?').bind(chatId).first();
+  const mode=user?.product_alerts===0?'off':user?.product_alert_scope==='following'?'following':'all';
+  const options=[['all','All Products'],['following','Followed Only'],['off','Turn Off Alerts']];
+  const buttons=options.map(([key,label])=>[{text:`${mode===key?'✓ ':''}${label}`,callback_data:`product_alert_mode_${key}`}]);
+  buttons.push([{text:`⭐ Followed Products (${count.n})`,callback_data:'product_follows_0'}],[{text:'👤 My Profile',callback_data:'profile'}]);
+  const text=`🔔 <b>Product Notifications</b>\n\nCurrent: <b>${options.find(([key])=>key===mode)[1]}</b>\n\n<b>All Products</b> — new products and stock updates across the store.\n<b>Followed Only</b> — stock added, stock finished and price changes for products you follow.\n<b>Turn Off Alerts</b> — pause all private product alerts.\n\nOpen a product and tap Follow Stock &amp; Price to follow it. Following a product switches to Followed Only. Price alerts go only to followers. Channel posts are separate.`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function showFollowedProducts(env,chatId,page=0,messageId=null){
+  page=adminUserPage(page);
+  const {results}=await env.DB.prepare('SELECT f.product_id,p.name,p.is_active FROM product_follows f LEFT JOIN products p ON p.id=f.product_id WHERE f.user_id=? ORDER BY f.product_id DESC LIMIT 11 OFFSET ?').bind(chatId,page*10).all();
+  const buttons=[];
+  for(const product of results.slice(0,10)){
+    const row=[];if(product.is_active===1)row.push({text:String(product.name).slice(0,45),callback_data:`prod_${product.product_id}`});
+    row.push({text:product.is_active===1?'Unfollow':`Unfollow · ${String(product.name||'Unavailable product').slice(0,30)}`,callback_data:`product_unfollow_list_${product.product_id}_${page}`});buttons.push(row);
+  }
+  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`product_follows_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`product_follows_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'🔔 Notification Settings',callback_data:'product_alert_settings'},{text:'🛍️ Browse Shop',callback_data:'shop'}],[{text:'👤 My Profile',callback_data:'profile'}]);
+  const text=`⭐ <b>Followed Products</b> · Page ${page+1}\n\n${results.length?'Open a product to view it, or tap Unfollow to remove it.':'No followed products on this page. Open a product in the shop and tap Follow Stock &amp; Price.'}`;
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function handleProductFollowCallback(env,chatId,data,messageId){
+  if(data==='product_alert_settings'){await showProductAlertPreferences(env,chatId,messageId);return true;}
+  let match=data.match(/^product_alert_mode_(all|following|off)$/);
+  if(match){await env.DB.prepare("UPDATE users SET product_alerts=?,product_alert_scope=CASE WHEN ?='off' THEN product_alert_scope ELSE ? END WHERE user_id=?").bind(match[1]==='off'?0:1,match[1],match[1],chatId).run();await showProductAlertPreferences(env,chatId,messageId);return true;}
+  match=data.match(/^product_follows_(\d+)$/);if(match){await showFollowedProducts(env,chatId,match[1],messageId);return true;}
+  match=data.match(/^product_unfollow_list_(\d+)_(\d+)$/);
+  if(match){await env.DB.prepare('DELETE FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,match[1]).run();await showFollowedProducts(env,chatId,match[2],messageId);return true;}
+  match=data.match(/^product_(follow|unfollow)_(\d+)$/);if(!match)return false;
+  if(match[1]==='follow'){
+    await env.DB.batch([
+      env.DB.prepare('INSERT OR IGNORE INTO product_follows(user_id,product_id) SELECT ?,id FROM products WHERE id=? AND is_active=1').bind(chatId,match[2]),
+      env.DB.prepare("UPDATE users SET product_alerts=1,product_alert_scope='following' WHERE user_id=? AND EXISTS(SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?)").bind(chatId,chatId,match[2])
+    ]);
+  }else await env.DB.prepare('DELETE FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,match[2]).run();
+  await sendProductDetailView(env,chatId,match[2],messageId);return true;
 }

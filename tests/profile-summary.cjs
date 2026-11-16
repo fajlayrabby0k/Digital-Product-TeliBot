@@ -1,0 +1,25 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,drainProductNotices,parseStockItems,sendProfile,sendHomeDashboard};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);for(const id of [1,99,100])db.prepare("INSERT INTO users(user_id,first_name,balance_usd,total_spent_usd) VALUES(?,'Buyer <safe>',10,999)").run(id);
+ const makeOrder=(user,status,amount)=>db.prepare("INSERT INTO orders(user_id,product_id,quantity,payment_method,amount_usd,status) VALUES(?,1,4,'WALLET',?,?)").run(user,amount,status);
+ makeOrder(99,'completed',5.25);makeOrder(99,'pending',20);makeOrder(99,'refunded',8);makeOrder(99,'paid_pending_delivery',3);makeOrder(100,'completed',500);
+ const deposit=(user,status,amount)=>db.prepare("INSERT INTO deposits(user_id,method,amount_usd,status) VALUES(?,'BKASH',?,?)").run(user,amount,status);
+ deposit(99,'completed',2.25);deposit(99,'completed',3);deposit(99,'pending',99);deposit(100,'completed',500);
+ for(let i=1;i<=4;i++){const product=db.prepare('INSERT INTO products(name,price_usd,price_bdt) VALUES(?,1,125)').run('Favorite '+i).lastInsertRowid;db.prepare('INSERT INTO product_follows(user_id,product_id) VALUES(99,?)').run(product);}
+ const privateProduct=db.prepare("INSERT INTO products(name,price_usd,price_bdt) VALUES('OTHER-CUSTOMER-FAVORITE',1,125)").run().lastInsertRowid;db.prepare('INSERT INTO product_follows(user_id,product_id) VALUES(100,?)').run(privateProduct);
+ const user=id=>db.prepare('SELECT * FROM users WHERE user_id=?').get(id),before=db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd;
+ await c.api.sendProfile(env,99,user(99));let t=last().text;assert(t.includes('Placed: <b>4</b>'));assert(t.includes('Delivered: <b>1</b>'));assert(t.includes('Awaiting delivery: <b>1</b>'));assert(t.includes('Refunded: <b>1</b>'));assert(t.includes('Successful deposits: <b>2</b>'));assert(t.includes('Total deposited: <b>$5.25 USD</b>'));assert(t.includes('Spent on delivered orders: <b>$5.25 USD</b>'));assert(t.includes('Followed Products (4)'));assert(t.includes('Favorite 4'));assert(!t.includes('OTHER-CUSTOMER-FAVORITE'));assert(t.includes('&lt;safe&gt;'));assert(!t.includes('$999'));
+ assert(buttons().some(b=>b.callback_data==='product_follows_0'));assert(buttons().some(b=>b.callback_data==='product_alert_settings'));
+ await c.api.sendProfile(env,100,user(100));t=last().text;assert(t.includes('Placed: <b>1</b>'));assert(t.includes('Successful deposits: <b>1</b>'));assert(t.includes('OTHER-CUSTOMER-FAVORITE'));assert(!t.includes('Favorite 4'));
+ await c.api.sendProfile(env,1,user(1));assert(last().text.includes('Successful deposits: <b>0</b>'));assert(last().text.includes('No followed products yet.'));
+ await c.api.sendHomeDashboard(env,99,user(99),'Buyer');assert(buttons().some(b=>b.text==='👤 My Profile'&&b.callback_data==='profile'));assert(buttons().some(b=>b.callback_data==='product_follows_0'));assert(!buttons().some(b=>b.callback_data==='admin_panel'));assert.equal(last().reply_markup.inline_keyboard[0][0].callback_data,'shop');
+ await c.api.sendHomeDashboard(env,1,user(1),'Admin');assert.equal(last().reply_markup.inline_keyboard.at(-1)[0].callback_data,'admin_panel');assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,before);
+ console.log('PASS: own profile order/deposit counts and cents, completed-only totals, balance, favorite preview/list access, escaped names, no cross-user data, empty profile and home navigation');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
