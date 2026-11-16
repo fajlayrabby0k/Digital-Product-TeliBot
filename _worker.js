@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-wallet-funds-report-1";
+const BOT_BUILD="2026-11-16-auto-sync-guides-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -34,7 +34,8 @@ export default {
             { command: "orders", description: "My order history" },
             { command: "preorder", description: "My active pre-orders" },
             { command: "refer", description: "Refer & earn commission" },
-            { command: "support", description: "24/7 Customer Helpdesk" }
+            { command: "support", description: "24/7 Customer Helpdesk" },
+            { command: "help", description: "Payment, delivery, warranty & refund guide" }
           ]
         });
         if (url.searchParams.get('repair_webhook') === '1') {
@@ -53,14 +54,10 @@ export default {
 
     // 2. Live Sync Webhook / Cron Ping Endpoint (/api/sync)
     if (url.pathname === "/api/sync") {
-      try {
-        await ensureDbReady(env.DB);
-        const res = await syncExternalProducts(env, null, null, true);
-        if(ctx?.waitUntil)ctx.waitUntil(drainAllNotices(env).catch(()=>{}));
-        return new Response(JSON.stringify(res), { status: 200, headers: { "Content-Type": "application/json" } });
-      } catch (e) {
-        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } });
-      }
+      if(!['GET','POST'].includes(request.method))return new Response('Method not allowed',{status:405});
+      const result=await runPeriodicSync(env);
+      if(ctx?.waitUntil&&env.DB)ctx.waitUntil(drainAllNotices(env).catch(()=>console.error('Scheduled notification drain paused')));
+      return new Response(JSON.stringify(result.body),{status:result.status,headers:{'Content-Type':'application/json','Cache-Control':'no-store'}});
     }
 
     // 3. Mock External Provider for instant testing (/api/mock-provider)
@@ -124,7 +121,7 @@ export default {
 
   // Cloudflare Scheduled Cron Handler (Periodic background live sync)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async()=>{await ensureDbReady(env.DB);await syncExternalProducts(env);await drainAllNotices(env);})());
+    ctx.waitUntil((async()=>{await runPeriodicSync(env);await drainAllNotices(env);})());
   }
 };
 
@@ -132,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-price-notifications-1";
+const DB_SCHEMA_VERSION = "2026-11-auto-sync-guides-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -155,6 +152,7 @@ async function initializeDatabase(db, force) {
       } catch (_) { /* First installation has no settings table yet. */ }
     }
     const schema = [
+      `CREATE TABLE IF NOT EXISTS periodic_sync_status(id INTEGER PRIMARY KEY CHECK(id=1),lease_until INTEGER NOT NULL DEFAULT 0,lease_token TEXT,last_attempt_ms INTEGER,last_success_ms INTEGER,last_error TEXT);`,
       `CREATE TABLE IF NOT EXISTS channel_notice_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,product_id INTEGER,order_id INTEGER,deposit_id INTEGER,kind TEXT NOT NULL,channel_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',next_at INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0,lease_token TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT,sent_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS product_notice_state(product_id INTEGER PRIMARY KEY,stock INTEGER NOT NULL,revision INTEGER NOT NULL DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS product_notice_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,product_id INTEGER NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,retries INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
@@ -270,6 +268,7 @@ async function initializeDatabase(db, force) {
     };
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const auditSetup=[
+      db.prepare("INSERT OR IGNORE INTO periodic_sync_status(id) VALUES(1)"),
       ...['product_notice_new','product_notice_api_stock','product_notice_inventory_add','product_notice_inventory_remove','product_notice_inventory_change'].map(name=>db.prepare(`DROP TRIGGER IF EXISTS ${name}`)),
       db.prepare(`INSERT OR IGNORE INTO product_notice_state(product_id,stock) SELECT id,CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=products.id AND is_sold=0) END FROM products`),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_new AFTER INSERT ON products BEGIN INSERT OR IGNORE INTO product_notice_state(product_id,stock) VALUES(NEW.id,CASE WHEN NEW.is_external=1 THEN MAX(0,COALESCE(NEW.api_stock,0)) ELSE 0 END); ${noticeEvent('NEW.id',"'new_product'","'new:'||NEW.id")} END`),
@@ -349,6 +348,8 @@ async function initializeDatabase(db, force) {
       ['usd_to_bdt_rate', '125'],
       ['referral_commission_percent', '5'],
       ['support_admin', '@fojlaybd'],
+      ['periodic_sync_enabled','1'],
+      ...Object.entries(GUIDE_DEFAULTS),
       ['bkash_num', '017XXXXXXXX'],
       ['nagad_num', '017XXXXXXXX'],
       ['rocket_num', '017XXXXXXXX'],
@@ -1289,7 +1290,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     const msg = update.message;
     const chatId = msg.chat.id;
     let text = (msg.text || "").trim();
-    const navigationCommand = text.match(/^\/(start|home|admin|shop|deposit|profile|orders|preorder|refer|support|cancel)(?:@\w+)?(?=\s|$)/i);
+    const navigationCommand = text.match(/^\/(start|home|admin|shop|deposit|profile|orders|preorder|refer|support|help|guide|cancel)(?:@\w+)?(?=\s|$)/i);
     if (navigationCommand) text = text.replace(navigationCommand[0], `/${navigationCommand[1].toLowerCase()}`);
     const from = msg.from;
     const username = from.username ? `@${from.username}` : (from.first_name || "Customer");
@@ -1342,6 +1343,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (text==='/cancel') {await sendAdminDashboard(env,chatId);return;}
       }
       if (adminState && adminState.state) {
+        if (await handleGuideText(env,chatId,text,adminState))return;
         if (await handleCategoryText(env,chatId,text,adminState,msg))return;
         if (await handleAdminCoreText(env,chatId,text,adminState))return;
         if (await handleOrderSearchText(env,chatId,text,adminState))return;
@@ -1496,6 +1498,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if (text === "/orders") { await sendOrders(env, chatId); return; }
     if (text === "/preorder") { await sendUserPreorders(env, chatId); return; }
     if (text === "/refer") { await sendRefer(env, chatId, user); return; }
+    if(text==='/help'||text==='/guide'){await showUserGuide(env,chatId);return;}
     if (text === "/support") { await sendSupport(env, chatId); return; }
     if (text === "/admin" && String(chatId) === String(env.ADMIN_ID)) { await sendAdminDashboard(env, chatId); return; }
 
@@ -1647,6 +1650,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     if(await handleCategoryCallback(env,chatId,data,messageId))return;
     if(await handleProductNoticeCallback(env,chatId,data,messageId))return;
+    if(await handleGuideCallback(env,chatId,data,messageId))return;
+    if(await handlePeriodicCallback(env,chatId,data,messageId))return;
     // Navigation Callbacks
     if (data === "home") { await clearAdminState(env, chatId); await sendHomeDashboard(env, chatId, user, firstName, messageId); return; }
     const shopPage=data.match(/^shop_(page|refresh)_(\d+)$/);
@@ -2794,7 +2799,8 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
     [{ text: "🛒 Shop", callback_data: "shop" }],
     [{ text: "👤 Profile", callback_data: "profile" }, { text: "💰 Deposit", callback_data: "deposit" }],
     [{ text: "📦 Orders", callback_data: "my_orders" }, { text: "⏳ Pre-Orders", callback_data: "my_preorders" }],
-    [{ text: "👥 Refer & Earn", callback_data: "refer" }]
+    [{ text: "👥 Refer & Earn", callback_data: "refer" }],
+    [{text:"📖 Guide / FAQ",callback_data:"user_guide"},{text:"💬 Support",callback_data:"support"}]
   ];
   if (String(chatId) === String(env.ADMIN_ID)) keyboard.push([{ text: "👑 Admin Panel", callback_data: "admin_panel" }]);
 
@@ -3044,6 +3050,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     `Select any button below to manage your store:`;
 
   const buttons = [
+    [{text:'⏱️ Automatic Sync',callback_data:'adm_periodic'},{text:'📖 User Guide Settings',callback_data:'adm_guide'}],
     [{text:'👥 Users / Find Customer',callback_data:'adm_users'},{text:'🔎 Find Order',callback_data:'adm_order_find'}],
     [{text:'📊 Sales & Profit Reports',callback_data:'adm_sales_today'}],
     [{text:'💳 Payment Dashboard',callback_data:'adm_paydash_pending_0'}],
@@ -3087,6 +3094,7 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
     [{text:`🔔 Product Alerts: ${user?.product_alerts===0?'OFF':'ON'}`,callback_data:"product_alert_toggle"}],
     [{ text: "📦 Order History", callback_data: "my_orders" }, { text: "⏳ My Pre-Orders", callback_data: "my_preorders" }],
     [{ text: "👥 Refer & Earn", callback_data: "refer" }],
+    [{text:"📖 Guide / FAQ",callback_data:"user_guide"},{text:"💬 Support",callback_data:"support"}],
     [{ text: "◀️ Main Menu", callback_data: "home" }]
   ];
   if (editMessageId) await editMsg(env, chatId, editMessageId, profileText, buttons);
@@ -3145,6 +3153,7 @@ async function sendSupport(env, chatId, editMessageId = null) {
   const cleanUsername = supContact.replace("@", "");
   const supText = `🕒 <b>Customer Support & Helpdesk</b>\n\nNeed help with an order or deposit?\nOur customer service team is ready to assist you!\n\n📞 <b>Support Handle:</b> <code>${supContact}</code>`;
   const buttons = [
+    [{text:"📖 User Guide / FAQ",callback_data:"user_guide"}],
     [{text:"🎫 My Support Tickets",callback_data:"tickets_mine_0"}],
     [{text:"📦 Get Help with an Order",callback_data:"my_orders"}],
     [{ text: "💬 Chat with Support Admin", url: /^\d+$/.test(supContact)?`tg://user?id=${supContact}`:`https://t.me/${cleanUsername}` }],
@@ -4250,4 +4259,63 @@ async function handleChannelNoticeCallback(env,chatId,data,messageId){
 function normalizeNoticeChannel(value){
   const text=String(value||'').trim();if(/^-[0-9]+$/.test(text)||/^@[A-Za-z0-9_]{5,32}$/.test(text))return text;
   const match=text.match(/^https?:\/\/t\.me\/([A-Za-z0-9_]{5,32})\/?$/i);return match?'@'+match[1]:null;
+}
+
+
+const GUIDE_DEFAULTS={
+  guide_delivery:'পেমেন্ট নিশ্চিত হলে উপলব্ধ প্রোডাক্ট স্বয়ংক্রিয়ভাবে ডেলিভারি হয়। সাপ্লায়ারের অর্ডার বা স্টক আটকে থাকলে সময় লাগতে পারে। Orders থেকে অবস্থা দেখুন। Check Delivery থাকলে ব্যবহার করুন অথবা Get Help দিয়ে সাপোর্ট টিকিট করুন। একই অর্ডারের জন্য আবার পেমেন্ট করবেন না।',
+  guide_warranty:'ওয়ারেন্টি প্রোডাক্টভেদে আলাদা। কেনার আগে প্রোডাক্টের বিবরণে মেয়াদ, শর্ত ও নির্দেশনা পড়ুন। স্পষ্টভাবে উল্লেখ না থাকলে কেনার আগে সাপোর্টে নিশ্চিত করুন। সমস্যায় Order ID-সহ সাপোর্ট টিকিট দিন; PIN, OTP বা পাসওয়ার্ড পাঠাবেন না।',
+  guide_refund:'রিফান্ডের আবেদন অর্ডারের সমস্যা ও সংশ্লিষ্ট প্রোডাক্টের শর্ত অনুযায়ী অ্যাডমিন যাচাই করবেন। Orders → Get Help থেকে টিকিট দিন। শুধু আবেদন করলেই স্বয়ংক্রিয় রিফান্ড নিশ্চিত নয়। পেমেন্ট আটকে থাকলে আবার টাকা না পাঠিয়ে একই Order ID দিয়ে সাপোর্ট নিন।',
+  guide_faq:'• টাকা কেটেছে, প্রোডাক্ট আসেনি? Orders দেখুন; Check Delivery থাকলে ব্যবহার করুন, না হলে Get Help দিন।\n• ডিপোজিট হয়নি? সঠিক মাধ্যম, পরিমাণ ও রসিদের ID মিলিয়ে দেখুন; PIN/OTP দেবেন না।\n• একই TxID আবার ব্যবহার করা যায়? সম্পন্ন পেমেন্টের ID দ্বিতীয়বার ক্রেডিট হয় না।\n• দাম বদলেছে? API-এর দাম/স্টক sync হলে আপডেট হয়। কেনার আগে সর্বশেষ মোট মূল্য দেখুন।\n• ব্যালেন্সের হিসাব? Profile → Balance History দেখুন।'
+};
+async function showUserGuide(env,chatId,section='menu',messageId=null){
+  const labels={payment:'পেমেন্টের নিয়ম',delivery:'অর্ডার ও ডেলিভারি',warranty:'ওয়ারেন্টি',refund:'রিফান্ড',faq:'FAQ'};
+  let text='📖 <b>User Guide / FAQ</b>\n\nপ্রয়োজনীয় বিষয়টি বেছে নিন।';
+  if(section==='payment'){
+    const rate=await getSetting(env,'usd_to_bdt_rate','125');
+    text=`💳 <b>পেমেন্টের নিয়ম</b>\n\nবর্তমান রেট: 1 USD = ${escapeHtml(rate)} BDT\n\n• Wallet Pay: আগে ডিপোজিট করুন, তারপর Wallet Payment দিয়ে কেনা নিশ্চিত করুন।\n• Direct Payment: অর্ডারের পেমেন্ট মাধ্যম বেছে দেখানো পরিমাণ পাঠান।\n• bKash/Nagad: দেখানো নম্বরে ঠিক পরিমাণ Send Money করুন। ৬০ মিনিটের মধ্যে রসিদের TrxID দিন। গ্রহণকারী ফোনের SMS-এর সঙ্গে মিললে ভেরিফাই হবে।\n• Rocket: রসিদের Transaction ID নির্দেশনায় Reply দিয়ে ৬০ মিনিটের মধ্যে জমা দিন; অ্যাডমিনের অনুমোদন লাগে।\n• Binance Pay: Pay ID-তে USDT পাঠিয়ে রসিদের Order/Transaction ID দিন। পেমেন্টের ১০ মিনিটের মধ্যে ID জমা দিন। ডিপোজিটে সর্বোচ্চ $10।\n• BEP20: শুধু USDT, BNB Smart Chain নেটওয়ার্কে দেখানো ঠিকানায় পুরো পরিমাণ পৌঁছাতে হবে। ফি আলাদা বহন করুন। পেমেন্টের ১০ মিনিটের মধ্যে TxHash দিন; ১২টি confirmation প্রয়োজন।\n• Redeem Code: ডিপোজিটের Redeem Code অপশনে বৈধ একবার-ব্যবহারযোগ্য কোড দিন।\n\nPIN, OTP বা private key দেবেন না। পেমেন্ট নিশ্চিত না হলে আবার টাকা পাঠাবেন না।`;
+  }else if(labels[section])text=`📖 <b>${labels[section]}</b>\n\n${escapeHtml(await getSetting(env,'guide_'+section,GUIDE_DEFAULTS['guide_'+section]))}`;
+  const buttons=section==='menu'?[[{text:'Payment Rules',callback_data:'guide_payment'},{text:'Order / Delivery',callback_data:'guide_delivery'}],[{text:'Warranty',callback_data:'guide_warranty'},{text:'Refund Policy',callback_data:'guide_refund'}],[{text:'FAQ',callback_data:'guide_faq'}]]:[[{text:'Back to Guide',callback_data:'user_guide'}]];
+  buttons.push([{text:'Shop',callback_data:'shop'},{text:'Support',callback_data:'support'}],[{text:'Main Menu',callback_data:'home'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function handleGuideCallback(env,chatId,data,messageId){
+  if(data==='user_guide'){await clearBinanceInput(env,chatId);await clearTicketInput(env,chatId);if(adminUserAccess(env,chatId))await clearAdminState(env,chatId);await showUserGuide(env,chatId,'menu',messageId);return true;}
+  let match=data.match(/^guide_(payment|delivery|warranty|refund|faq)$/);if(match){await showUserGuide(env,chatId,match[1],messageId);return true;}
+  if(!adminUserAccess(env,chatId))return false;
+  if(data==='adm_guide'){await clearAdminState(env,chatId);await editMsg(env,chatId,messageId,'📖 <b>User Guide Settings</b>\n\nSet your actual delivery, warranty, refund and FAQ text. Do not promise terms that your store cannot honor. Payment instructions follow the bot’s verification rules.',Object.keys(GUIDE_DEFAULTS).map(key=>[{text:'Edit '+key.slice(6),callback_data:'adm_edit_'+key}]).concat([[{text:'Preview Guide',callback_data:'user_guide'},{text:'Admin Panel',callback_data:'admin_panel'}]]));return true;}
+  match=data.match(/^adm_edit_(guide_(delivery|warranty|refund|faq))$/);if(match){const current=await getSetting(env,match[1],GUIDE_DEFAULTS[match[1]]);await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_guide_text',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,`Current text:\n${escapeHtml(current)}\n\nSend replacement plain text (up to 1200 characters).`,[[{text:'Cancel',callback_data:'adm_guide'}]]);return true;}return false;
+}
+async function handleGuideText(env,chatId,text,state){
+  if(!adminUserAccess(env,chatId)||state.state!=='awaiting_guide_text')return false;
+  const value=String(text).trim();if(!Object.hasOwn(GUIDE_DEFAULTS,state.data)||!value||value.length>1200||escapeHtml(value).length>2800){await sendMsg(env,chatId,'Send a non-empty plain text guide of up to 1200 characters.');return true;}
+  await env.DB.batch([env.DB.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').bind(state.data,value),env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='awaiting_guide_text' AND data=?").bind(chatId,state.data)]);await sendMsg(env,chatId,'Guide text saved.',[[{text:'Preview',callback_data:state.data},{text:'Guide Settings',callback_data:'adm_guide'}]]);return true;
+}
+async function runPeriodicSync(env,force=false){
+  try{
+    await ensureDbReady(env.DB);if(!env.DB)return {status:503,body:{success:false,error:'Database unavailable'}};
+    if(!force&&await getSetting(env,'periodic_sync_enabled','1')!=='1')return {status:200,body:{success:true,skipped:true,reason:'paused'}};
+    const token=crypto.randomUUID(),now=Date.now();
+    const claim=await env.DB.prepare('UPDATE periodic_sync_status SET lease_token=?,lease_until=?,last_attempt_ms=? WHERE id=1 AND lease_until<?').bind(token,now+90000,now,now).run();
+    if(!claim.meta?.changes)return {status:202,body:{success:true,skipped:true,reason:'already_running'}};
+    try{
+      const result=await syncExternalProducts(env,null,null,false,null,true);
+      const error=result.success?null:await safeDiagnostic(env,result.message||'Provider sync failed');
+      await env.DB.prepare('UPDATE periodic_sync_status SET lease_until=0,last_success_ms=CASE WHEN ?=1 THEN ? ELSE last_success_ms END,last_error=? WHERE id=1 AND lease_token=?').bind(result.success?1:0,Date.now(),error,token).run();
+      return {status:result.success?200:502,body:{success:result.success,message:result.success?'Catalog sync completed.':'Catalog sync failed; check admin sync status.'}};
+    }catch(error){await env.DB.prepare('UPDATE periodic_sync_status SET lease_until=0,last_error=? WHERE id=1 AND lease_token=?').bind(await safeDiagnostic(env,error?.message),token).run();return {status:502,body:{success:false,message:'Catalog sync failed; check admin sync status.'}};}
+  }catch{return {status:503,body:{success:false,message:'Sync service unavailable'}};}
+}
+async function showPeriodicStatus(env,chatId,messageId=null){
+  if(!adminUserAccess(env,chatId))return;await clearAdminState(env,chatId);const enabled=await getSetting(env,'periodic_sync_enabled','1'),state=await env.DB.prepare('SELECT * FROM periodic_sync_status WHERE id=1').first();
+  const time=ms=>ms?paymentDashboardTime(new Date(ms).toISOString()):'Not recorded';
+  const text=`⏱️ <b>Automatic Sync</b>\n\nProcessing: ${enabled==='1'?'ON':'OFF'}\nLast attempt: ${time(state?.last_attempt_ms)} (Dhaka)\nLast successful sync: ${time(state?.last_success_ms)} (Dhaka)\nState: ${state?.lease_until>Date.now()?'Running':'Idle'}\nLast issue: ${escapeHtml(state?.last_error||'None recorded')}\n\nThe repository scheduler requests sync approximately every 5 minutes when GitHub Actions is enabled. GitHub may delay scheduled jobs. ON allows processing; the timestamps confirm whether an external schedule actually reached this bot. The job also resumes queued notifications.`;
+  const buttons=[[{text:enabled==='1'?'Pause Auto Sync':'Enable Auto Sync',callback_data:'adm_periodic_toggle'}],[{text:'Run Now',callback_data:'adm_periodic_run'}],[{text:'🔄 Refresh',callback_data:'adm_periodic'},{text:'Admin Panel',callback_data:'admin_panel'}]];
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function handlePeriodicCallback(env,chatId,data,messageId){
+  if(!adminUserAccess(env,chatId)||!['adm_periodic','adm_periodic_toggle','adm_periodic_run'].includes(data))return false;
+  if(data==='adm_periodic_toggle')await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('periodic_sync_enabled',CASE WHEN COALESCE((SELECT value FROM settings WHERE key='periodic_sync_enabled'),'1')='1' THEN '0' ELSE '1' END)").run();
+  if(data==='adm_periodic_run'){await runPeriodicSync(env,true);if(env.__executionContext?.waitUntil)env.__executionContext.waitUntil(drainAllNotices(env).catch(()=>{}));}
+  await showPeriodicStatus(env,chatId,messageId);return true;
 }

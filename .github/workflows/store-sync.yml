@@ -1,0 +1,27 @@
+name: Store catalog sync
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: store-catalog-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Sync catalog and resume notification queues
+        env:
+          SYNC_URL: https://digital-product-telibot.pages.dev/api/sync
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 15 --max-time 70 \
+            --retry 1 --retry-delay 5 \
+            --request POST "$SYNC_URL"
