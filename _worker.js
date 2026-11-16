@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-notification-options-1";
+const BOT_BUILD="2026-11-16-audit-repairs-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-notification-options-1";
+const DB_SCHEMA_VERSION = "2026-11-audit-repairs-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -279,6 +279,7 @@ async function initializeDatabase(db, force) {
       db.prepare('CREATE INDEX IF NOT EXISTS product_follows_recipients ON product_follows(product_id,user_id)'),
       db.prepare('DROP INDEX IF EXISTS product_notice_coalesce'),
       db.prepare("CREATE UNIQUE INDEX product_notice_coalesce ON product_notice_events(product_id,kind) WHERE status='pending' AND kind NOT IN ('price_drop','price_increase')"),
+      db.prepare('DROP TRIGGER IF EXISTS product_notice_price'),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_price AFTER UPDATE OF price_usd ON products WHEN NEW.is_active=1 AND OLD.price_usd>0 AND NEW.price_usd>0 AND ROUND(OLD.price_usd*100)<>ROUND(NEW.price_usd*100) BEGIN
         INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id,old_price_cents,new_price_cents)
         SELECT 'price:'||NEW.id||':'||(COALESCE(OLD.price_notice_revision,0)+1),NEW.id,CASE WHEN NEW.price_usd<OLD.price_usd THEN 'price_drop' ELSE 'price_increase' END,COALESCE((SELECT MAX(user_id) FROM users),0),ROUND(OLD.price_usd*100),ROUND(NEW.price_usd*100)
@@ -1729,6 +1730,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
     if (data === "profile") { await sendProfile(env, chatId, user, messageId); return; }
     if (data === "deposit") { await sendDeposit(env, chatId, messageId); return; }
+    const orderPage=data.match(/^my_orders_page_(\d+)$/);
+    if(orderPage){await clearTicketInput(env,chatId);await sendOrders(env,chatId,messageId,Number(orderPage[1]));return;}
     if (data === "my_orders") { await sendOrders(env, chatId, messageId); return; }
     if (data === "my_preorders") { await sendUserPreorders(env, chatId, messageId); return; }
     if (data === "refer") { await sendRefer(env, chatId, user, messageId); return; }
@@ -2773,22 +2776,10 @@ async function processReferralCommission(env, buyerChatId, orderAmountUsd, produ
   } catch (e) { console.error("Referral Commission Error:", e); }
 }
 
-async function notifyPreorders(env, productId, productName, stockCount) {
-  try {
-    const product=await env.DB.prepare('SELECT is_external FROM products WHERE id=?').bind(productId).first();
-    if(!product||product.is_external)return;
-    if(await getSetting(env,'product_notifications_enabled','1')!=='1'||await getSetting(env,'product_notice_restock','1')!=='1')return;
-    const { results: pendingPreorders } = await env.DB.prepare("SELECT po.* FROM preorders po JOIN product_follows f ON f.user_id=po.user_id AND f.product_id=po.product_id JOIN users u ON u.user_id=po.user_id WHERE po.product_id=? AND po.status='pending' AND COALESCE(u.product_alerts,1)=1").bind(productId).all();
-    if (pendingPreorders && pendingPreorders.length > 0) {
-      for (const po of pendingPreorders) {
-        await sendMsg(env, po.user_id, `🔔 <b>Good News! Pre-Ordered Product Restocked!</b>\n\nProduct: <b>${productName}</b>\n⚡ Available Stock: <b>${stockCount} items</b>\n\nTap below to complete your order:`, [
-          [{ text: `🛍️ Buy ${productName} Now`, callback_data: `prod_${productId}` }],
-          [{ text: "🛒 Open Shop", callback_data: "shop" }]
-        ]);
-      }
-      await env.DB.prepare("UPDATE preorders SET status='notified' WHERE product_id=? AND status='pending' AND user_id IN (SELECT f.user_id FROM product_follows f JOIN users u ON u.user_id=f.user_id WHERE f.product_id=? AND COALESCE(u.product_alerts,1)=1)").bind(productId,productId).run();
-    }
-  } catch (e) { console.error("notifyPreorders Error:", e); }
+// Preorder restock and follower alerts share the durable queue and recipient cursor.
+async function notifyPreorders(env) {
+  try { await drainProductNotices(env); }
+  catch { console.error('Queued restock delivery paused; stock remains saved.'); }
 }
 
 const membershipCache = new WeakMap();
@@ -3182,9 +3173,13 @@ async function sendUserPreorders(env, chatId, editMessageId = null) {
   else await sendMsg(env, chatId, text, buttons);
 }
 
-async function sendOrders(env,chatId,editMessageId=null){
-  const {results}=await env.DB.prepare("SELECT o.*,p.name AS product_name,(SELECT GROUP_CONCAT(item_data,char(10)||char(10)) FROM inventory WHERE order_id=o.id) AS item_data FROM orders o JOIN products p ON p.id=o.product_id WHERE o.user_id=? AND o.status IN ('completed','paid_pending_delivery','delivering','refunded') ORDER BY o.id DESC LIMIT 5").bind(chatId).all();
-  let orderText='📦 <b>Your Orders:</b>\n\n';const buttons=[];
+async function sendOrders(env,chatId,editMessageId=null,requestedPage=0){
+  const pageSize=5;
+  const count=await env.DB.prepare("SELECT COUNT(*) total FROM orders WHERE user_id=? AND status IN ('completed','paid_pending_delivery','delivering','refunded')").bind(chatId).first();
+  const total=Number(count?.total||0),pages=Math.max(1,Math.ceil(total/pageSize));
+  const page=Math.min(pages-1,adminUserPage(requestedPage));
+  const {results}=await env.DB.prepare("SELECT o.*,COALESCE(NULLIF(o.product_name,''),p.name,'Product unavailable') AS product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.user_id=? AND o.status IN ('completed','paid_pending_delivery','delivering','refunded') ORDER BY o.id DESC LIMIT ? OFFSET ?").bind(chatId,pageSize,page*pageSize).all();
+  let orderText=`📦 <b>Your Orders</b>\nPage ${page+1}/${pages} · ${total} ${total===1?'order':'orders'}\n\n`;const buttons=[];
   if(!results?.length)orderText+='You have no paid orders yet.';
   for(const order of results||[]){
     const orderLabel=`Order - ${String(order.user_order_number).padStart(2,'0')} Order ID- ${orderDisplayId(order)}`;
@@ -3197,6 +3192,7 @@ async function sendOrders(env,chatId,editMessageId=null){
       if(order.provider_request_id&&order.status==='paid_pending_delivery')buttons.push([{text:`Check Delivery · ${orderDisplayId(order)}`,callback_data:`provider_retry_${order.id}`}]);
     }
   }
+  const pager=[];if(page>0)pager.push({text:'‹ Previous',callback_data:`my_orders_page_${page-1}`});if(page<pages-1)pager.push({text:'Next ›',callback_data:`my_orders_page_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🎫 My Support Tickets',callback_data:'tickets_mine_0'}],[{text:'◀️ Main Menu',callback_data:'home'}]);
   if(editMessageId)await editMsg(env,chatId,editMessageId,orderText,buttons);else await sendMsg(env,chatId,orderText,buttons);
 }
@@ -4041,7 +4037,7 @@ async function handleAdminCoreText(env,chatId,text,state){
     const writes=items.map(item=>env.DB.prepare('INSERT INTO inventory(product_id,item_data) SELECT ?,? WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)').bind(product.id,item,chatId,state.state,state.data));
     writes.push(env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data));const saved=await env.DB.batch(writes);
     const added=saved.slice(0,-1).reduce((n,r)=>n+Number(r.meta?.changes||0),0);if(added>10)env.__noticeMaxRecipients=4;await sendMsg(env,chatId,`Stock added: ${added} item(s).`,[[{text:'Product',callback_data:`adm_prod_details_${product.id}`}]]);
-    if(added)await notifyPreorders(env,product.id,escapeHtml(productDisplayName(product)),added);return true;
+    if(added)await notifyPreorders(env);return true;
   }
   if(state.state==='awaiting_deposit_amount'){
     const amount=parseMarginInput(text);if(!Number.isFinite(amount)||amount<=0||amount>1000000||String(text).trim().endsWith('%')){await sendMsg(env,chatId,'Enter a positive USD amount with up to 2 decimal places.');return true;}
@@ -4242,7 +4238,11 @@ async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
       const delay=Math.max(30,Math.min(3600,Number(sent?.parameters?.retry_after)||30));
       await env.DB.prepare('UPDATE product_notice_events SET next_at=?,lease_until=0,retries=retries+1 WHERE id=? AND lease_token=?').bind(Date.now()+delay*1000,event.id,token).run();return null;
     }
-    cursor=user.user_id;await env.DB.prepare('UPDATE product_notice_events SET cursor=?,sent=sent+?,failed=failed+?,retries=0 WHERE id=? AND lease_token=?').bind(cursor,sent?.ok?1:0,sent?.ok?0:1,event.id,token).run();
+    cursor=user.user_id;
+    const progress=env.DB.prepare('UPDATE product_notice_events SET cursor=?,sent=sent+?,failed=failed+?,retries=0 WHERE id=? AND lease_token=?').bind(cursor,sent?.ok?1:0,sent?.ok?0:1,event.id,token);
+    const writes=[progress];
+    if(sent?.ok&&event.kind==='restock'&&!product.is_external)writes.push(env.DB.prepare("UPDATE preorders SET status='notified' WHERE product_id=? AND user_id=? AND status='pending'").bind(product.id,user.user_id));
+    await env.DB.batch(writes);
   }
   await env.DB.prepare('UPDATE product_notice_events SET status=?,lease_until=0 WHERE id=? AND lease_token=?').bind(attempted===users.length&&(users.length<limit||cursor>=event.max_user_id)?'done':'pending',event.id,token).run();
   return attempted;

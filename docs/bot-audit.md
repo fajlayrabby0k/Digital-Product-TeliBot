@@ -1,3 +1,15 @@
+# Audit repairs — 16 November 2026
+
+Build: `2026-11-16-audit-repairs-1`.
+
+- Recreated the private price-event trigger transactionally on upgrade. Previously `CREATE TRIGGER IF NOT EXISTS` retained the old followers-only predicate, so All Products subscribers missed price updates on products with no followers.
+- Added user-scoped My Orders pagination with five records per page, total/page display and Previous/Next. Original order names and missing-catalog history remain accessible; downloads and support keep their existing internal references and public IDs.
+- Unified local pre-order restock delivery with the durable product-event queue. There is no second direct preorder restock send. Successful Telegram delivery records cursor progress and marks the matching pre-order notified in one database batch; failed sends leave it pending.
+
+All 45 local test files passed. Added regression coverage reproduces a legacy price trigger before upgrade, preserved settings/queued events on repeated migration, 12-order pagination, boundary requests, old downloads, user isolation, one restock message for a follower with a pre-order, and retry without prematurely marking notified. Syntax and whitespace checks passed. No live payment, supplier purchase or customer campaign was executed. Production health access from this workspace returned a proxy CONNECT 403, so live connectivity and settlement remain unverified.
+
+---
+
 # Bot review — 15 November 2026
 
 Build: `2026-11-15-audit-fixes-1`.
