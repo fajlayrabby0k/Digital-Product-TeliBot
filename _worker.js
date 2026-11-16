@@ -2787,22 +2787,20 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
   const bdtBal = user ? Math.round((user.balance_usd || 0) * rate) : 0;
 
   const welcome = `🛒 <b>Welcome to SMART SUBS STORE!</b>\n\n` +
-    `Hello ${escapeHtml(firstName)}! 👋\n\n` +
-    `We offer high-quality digital products and software licenses with fast, secure, and automated delivery.\n\n` +
-    `<blockquote>🛒 <b>Shop</b> — Browse & buy products\n` +
-    `💰 <b>Deposit</b> — Add funds to your wallet\n` +
-    `👤 <b>Profile</b> — View wallet balance & orders</blockquote>\n\n` +
-    `💰 <b>Wallet Balance:</b> $${usdBal} USD (≈ ৳${bdtBal} BDT)\n\n` +
-    `Select an option below to continue:`;
+    `Hello ${escapeHtml(firstName)}! 👋\n` +
+    `Browse subscriptions, manage your wallet and track your orders.\n\n` +
+    `<blockquote>💰 <b>Available Wallet Balance</b>\n` +
+    `<b>$${usdBal} USD</b>  ≈  ৳${bdtBal} BDT</blockquote>\n\n` +
+    `Choose an option below:`;
 
   const keyboard = [
-    [{ text: "🛒 Shop", callback_data: "shop" }],
-    [{ text: "👤 Profile", callback_data: "profile" }, { text: "💰 Deposit", callback_data: "deposit" }],
-    [{ text: "📦 Orders", callback_data: "my_orders" }, { text: "⏳ Pre-Orders", callback_data: "my_preorders" }],
-    [{ text: "👥 Refer & Earn", callback_data: "refer" }],
-    [{text:"📖 Guide / FAQ",callback_data:"user_guide"},{text:"💬 Support",callback_data:"support"}]
+    [{text:'🛍️ Browse Shop',callback_data:'shop',style:'primary'}],
+    [{text:'👤 My Profile',callback_data:'profile'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}],
+    [{text:'📦 My Orders',callback_data:'my_orders'},{text:'⏳ Pre-Orders',callback_data:'my_preorders'}],
+    [{text:'🎁 Refer & Earn',callback_data:'refer'},{text:'📖 Guide / FAQ',callback_data:'user_guide'}],
+    [{text:'💬 Contact Support',callback_data:'support'}]
   ];
-  if (String(chatId) === String(env.ADMIN_ID)) keyboard.push([{ text: "👑 Admin Panel", callback_data: "admin_panel" }]);
+  if(String(chatId)===String(env.ADMIN_ID))keyboard.push([{text:'⚙️ Admin Panel',callback_data:'admin_panel',style:'primary'}]);
 
   if (editMessageId) {
     const res = await editMsg(env, chatId, editMessageId, welcome, keyboard);
