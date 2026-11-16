@@ -4332,7 +4332,9 @@ function walletFooterKeyboard(chatId,keyboard){
   if(!hasUserNavigation)return keyboard;
   const rows=keyboard.map(row=>row.filter(button=>!['profile','deposit'].includes(button.callback_data))).filter(row=>row.length);
   const adminRows=rows.filter(row=>row.length===1&&row[0].callback_data==='admin_panel');
-  const content=rows.filter(row=>!(row.length===1&&row[0].callback_data==='admin_panel'));
-  content.push([{text:'👛 Wallet',callback_data:'profile',style:'primary'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}],...adminRows);
+  const isBottomNavigation=row=>row.some(button=>button.callback_data==='home')&&row.some(button=>/^shop(?:_refresh|catrefresh_|looserefresh_)/.test(button.callback_data||''));
+  const navigationRows=rows.filter(isBottomNavigation);
+  const content=rows.filter(row=>!(row.length===1&&row[0].callback_data==='admin_panel')&&!isBottomNavigation(row));
+  content.push([{text:'👛 Wallet',callback_data:'profile',style:'primary'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}],...navigationRows,...adminRows);
   return content;
 }
