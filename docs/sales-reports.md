@@ -28,3 +28,10 @@ New local orders copy purchase cost at insertion within the order transaction. Q
 These figures are gross profit based on entered costs; fees, referral commissions and overheads remain outside the calculation. API profit uses the recorded catalog cost as purchase cost.
 
 `node tests/local-product-costs.cjs` covers the creation wizard, edits, historical snapshots, quantity totals, zero costs, losses, Bengali inputs, invalid inputs, access checks and cancellation. No extra configuration is needed.
+
+
+## Current total wallet funds
+
+All report periods include **Current Wallet Funds · All Users**: total current USD wallet balance, the separately stored BDT equivalent, and the number of funded wallets out of registered users. This includes the admin account if it has wallet funds. NULL balances count as zero; sums use cents/minor units. The USD and BDT displays are two stored wallet representations, not amounts to add together. Existing stored BDT values are not recomputed using today's rate.
+
+These are live balances across all users, independent of the selected sales period. They are not deposit turnover, supplier balance, revenue or profit and are never added to sales/profit totals. Refresh reloads the current aggregate. This is admin-only and does not mutate wallet funds or ledger entries. The sales-report test covers multiple wallets, admin inclusion, NULL balances, consistent totals across periods and refresh after a balance change.

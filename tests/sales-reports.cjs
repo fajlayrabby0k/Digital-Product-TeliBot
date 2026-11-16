@@ -36,5 +36,11 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const count=messages.length;await c.api.showAdminSalesReport(env,99,'all');assert.equal(messages.length,count);
  const before=db.prepare('SELECT SUM(amount_usd) AS n FROM orders').get().n;await cb('adm_sales_today',99);assert(!messages.slice(count).some(m=>m.text?.includes('Total sales:')));assert.equal(db.prepare('SELECT SUM(amount_usd) AS n FROM orders').get().n,before);
  await c.api.ensureDbReady(DB,true);assert.equal(db.prepare('SELECT provider_unit_cost_usd FROM orders WHERE id=?').get(first).provider_unit_cost_usd,2);
+ db.prepare('UPDATE users SET balance_usd=2.50,balance_bdt=325 WHERE user_id=1').run();
+ db.prepare('INSERT INTO users(user_id,balance_usd,balance_bdt) VALUES(99,10.10,1313),(100,20.20,2626),(101,NULL,NULL)').run();
+ const balances=JSON.stringify(db.prepare('SELECT user_id,balance_usd,balance_bdt FROM users ORDER BY user_id').all());
+ for(const period of ['today','week','days30','month','all']){await cb('adm_sales_'+period);assert(last().text.includes('Total wallet balance: <b>$32.80 USD</b>'));assert(last().text.includes('Stored BDT equivalent: <b>4264.00 BDT</b>'));assert(last().text.includes('Wallets with funds: 3 / 4'));}
+ assert.equal(JSON.stringify(db.prepare('SELECT user_id,balance_usd,balance_bdt FROM users ORDER BY user_id').all()),balances);
+ db.prepare('UPDATE users SET balance_usd=balance_usd-1 WHERE user_id=99').run();await cb('adm_sales_today');assert(last().text.includes('Total wallet balance: <b>$31.80 USD</b>'));
  console.log('PASS: Dhaka day/month boundaries, cost snapshots and price changes, completed-only sales, quantity cost/profit, unknown/local costs, deposits/refunds excluded, admin access and repeated migration');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
