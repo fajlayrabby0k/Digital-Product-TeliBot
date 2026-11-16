@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-explicit-alert-mode-1";
+const BOT_BUILD="2026-11-17-channel-recovery-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-all-product-default-1";
+const DB_SCHEMA_VERSION = "2026-11-channel-recovery-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -188,6 +188,9 @@ async function initializeDatabase(db, force) {
     const alters = [
       "ALTER TABLE orders ADD COLUMN public_order_id TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN user_order_number INTEGER DEFAULT NULL;",
+      "ALTER TABLE channel_notice_events ADD COLUMN stock_snapshot INTEGER DEFAULT NULL;",
+      "ALTER TABLE channel_notice_events ADD COLUMN price_snapshot_cents INTEGER DEFAULT NULL;",
+      "ALTER TABLE channel_notice_events ADD COLUMN product_name_snapshot TEXT DEFAULT NULL;",
       "ALTER TABLE channel_notice_events ADD COLUMN old_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE channel_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN price_notice_revision INTEGER DEFAULT 0;",
@@ -277,6 +280,9 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      ...['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit','channel_notice_price_drop','channel_notice_price_increase'].map(key=>db.prepare("UPDATE settings SET value='1' WHERE key=? AND NOT EXISTS(SELECT 1 FROM settings WHERE key='__channel_all_events_20261117')").bind(key)),
+      db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES('__channel_all_events_20261117','1')"),
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_snapshot AFTER INSERT ON channel_notice_events WHEN NEW.product_id IS NOT NULL BEGIN UPDATE channel_notice_events SET product_name_snapshot=(SELECT name FROM products WHERE id=NEW.product_id),price_snapshot_cents=(SELECT ROUND(price_usd*100) FROM products WHERE id=NEW.product_id),stock_snapshot=(SELECT CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=NEW.product_id AND is_sold=0) END FROM products WHERE id=NEW.product_id) WHERE id=NEW.id; END`),
       db.prepare('DROP TRIGGER IF EXISTS users_followed_alert_default'),
       db.prepare("UPDATE users SET product_alert_preference_set=1 WHERE product_alert_preference_set=0 AND (product_alerts=0 OR EXISTS(SELECT 1 FROM product_follows f WHERE f.user_id=users.user_id))"),
       db.prepare("UPDATE users SET product_alert_scope='all' WHERE product_alert_preference_set=0"),
@@ -2675,9 +2681,12 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
           .bind(name, desc, baseCostPrice, finalPrice, priceBdt, apiStock, emojiId, existing.id).run();
         }
       } else {
-        const ins = await env.DB.prepare("INSERT INTO products (name, description, price_usd, price_bdt, cost_price_usd, custom_price_usd, api_stock, is_active, is_external, external_id, provider_emoji_id) VALUES (?, ?, ?, ?, ?, 0, ?, 1, 1, ?, ?)")
-          .bind(name, desc, finalPrice, priceBdt, baseCostPrice, apiStock, extId, emojiId).run();
-        targetId = ins.meta ? ins.meta.last_row_id : null;
+        const imported=await env.DB.batch([
+          env.DB.prepare("INSERT INTO products (name, description, price_usd, price_bdt, cost_price_usd, custom_price_usd, api_stock, is_active, is_external, external_id, provider_emoji_id) VALUES (?, ?, ?, ?, ?, 0, ?, 1, 1, ?, ?)").bind(name,desc,finalPrice,priceBdt,baseCostPrice,apiStock,extId,emojiId),
+          env.DB.prepare('INSERT OR IGNORE INTO product_notice_state(product_id,stock) SELECT id,MAX(0,COALESCE(api_stock,0)) FROM products WHERE is_external=1 AND external_id=?').bind(extId),
+          env.DB.prepare(channelNewProductInsert("p.is_external=1 AND p.external_id=?")).bind(extId)
+        ]);
+        targetId=imported[0]?.meta?.last_row_id??null;
       }
 
       if(targetId&&(Number(existing?.provider_category_id||0)!==Number(providerCategoryId||0)||!existing&&providerCategoryId)){
@@ -2782,7 +2791,7 @@ async function processReferralCommission(env, buyerChatId, orderAmountUsd, produ
 
 // Preorder restock and follower alerts share the durable queue and recipient cursor.
 async function notifyPreorders(env) {
-  try { await drainProductNotices(env); }
+  try { await drainAllNotices(env); }
   catch { console.error('Queued restock delivery paused; stock remains saved.'); }
 }
 
@@ -3298,7 +3307,10 @@ async function receiveMobileBridgeReceipt(request, env, ctx) {
     const saved=await env.DB.prepare('SELECT event_id,body_hash FROM mobile_bridge_receipts WHERE event_id=?').bind(b.eventId).first();
     if(!saved||saved.body_hash!==digest){await recordBridgeHealth(env,'receipt_conflict');return reply(409,{error:'receipt_conflict'});}
     await recordBridgeHealth(env,'ok',{last_receipt_ms:Date.now()});
-    const resume=()=>resumeMobilePayments(env,b.method,b.trxId).catch(()=>console.error('Mobile receipt settlement needs retry'));
+    const resume=async()=>{
+      try{await resumeMobilePayments(env,b.method,b.trxId);}catch{console.error('Mobile receipt settlement needs retry');}
+      try{await drainAllNotices(env);}catch{console.error('Post-payment channel/product notice delivery paused');}
+    };
     if(ctx?.waitUntil)ctx.waitUntil(resume());else await resume();
     return reply(200,{accepted:true,eventId:b.eventId,status:'stored'});
   }catch{return reply(503,{error:'receipt_storage_unavailable'});}
@@ -4251,7 +4263,7 @@ async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
   const claim=await env.DB.prepare("UPDATE product_notice_events SET lease_token=?,lease_until=? WHERE id=(SELECT id FROM product_notice_events WHERE status='pending' AND next_at<=? AND lease_until<? ORDER BY id LIMIT 1) AND lease_until<?").bind(token,now+60000,now,now,now).run();
   if(!claim.meta?.changes)return null;
   const event=await env.DB.prepare('SELECT * FROM product_notice_events WHERE lease_token=?').bind(token).first();
-  const product=await env.DB.prepare('SELECT p.*,s.stock FROM products p LEFT JOIN product_notice_state s ON s.product_id=p.id WHERE p.id=?').bind(event.product_id).first();
+  const product=await env.DB.prepare('SELECT p.*,COALESCE(s.stock,CASE WHEN p.is_external=1 THEN p.api_stock ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END) AS stock FROM products p LEFT JOIN product_notice_state s ON s.product_id=p.id WHERE p.id=?').bind(event.product_id).first();
   if(!product||product.is_active===0||await getSetting(env,'product_notice_'+event.kind,'1')!=='1'||(event.kind==='restock'&&product.stock===0)||(event.kind==='sold_out'&&product.stock>0)){
     await env.DB.prepare("UPDATE product_notice_events SET status='superseded',lease_until=0 WHERE id=? AND lease_token=?").bind(event.id,token).run();return 0;
   }
@@ -4307,25 +4319,29 @@ async function drainChannelNotices(env){
 }
 async function deliverChannelNotices(env){
   if(await getSetting(env,'channel_notifications_enabled','1')!=='1')return;
-  const current=await getSetting(env,'force_channel_username','');if(!current)return;
+  const current=await getSetting(env,'force_channel_username','');if(!normalizeNoticeChannel(current))return;
   const pending=await env.DB.prepare("SELECT id FROM channel_notice_events WHERE status='pending' AND next_at<=? AND lease_until<? LIMIT 1").bind(Date.now(),Date.now()).first();if(!pending)return;
   const me=await callTg(env,'getMe',{}),username=me?.result?.username;
   const link=typeof username==='string'&&/^[A-Za-z0-9_]+$/.test(username)?`https://t.me/${username}`:null;
   const deadline=Math.min(Date.now()+8000,env.__noticeDeadline||Infinity);
-  for(let i=0;i<6&&Date.now()<deadline;i++){
+  let sentPosts=0;
+  for(let inspected=0;inspected<100&&sentPosts<6&&Date.now()<deadline;inspected++){
     const token=crypto.randomUUID(),now=Date.now();
     const claim=await env.DB.prepare("UPDATE channel_notice_events SET lease_token=?,lease_until=? WHERE id=(SELECT id FROM channel_notice_events WHERE status='pending' AND next_at<=? AND lease_until<? ORDER BY id LIMIT 1) AND lease_until<?").bind(token,now+60000,now,now,now).run();if(!claim.meta?.changes)return;
     const event=await env.DB.prepare('SELECT * FROM channel_notice_events WHERE lease_token=?').bind(token).first();
-    const product=event.product_id?await env.DB.prepare('SELECT p.*,s.stock FROM products p LEFT JOIN product_notice_state s ON s.product_id=p.id WHERE p.id=?').bind(event.product_id).first():null;
+    const product=event.product_id?await env.DB.prepare('SELECT p.*,COALESCE(s.stock,CASE WHEN p.is_external=1 THEN p.api_stock ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END) AS stock FROM products p LEFT JOIN product_notice_state s ON s.product_id=p.id WHERE p.id=?').bind(event.product_id).first():null;
     let text='',invalid=normalizeNoticeChannel(event.channel_id)!==normalizeNoticeChannel(current)||!normalizeNoticeChannel(current)||await getSetting(env,'channel_notice_'+event.kind,'1')!=='1';
     if(['price_drop','price_increase'].includes(event.kind)){
       const oldPrice=Number(event.old_price_cents),newPrice=Number(event.new_price_cents);
-      invalid=invalid||!product||product.is_active===0||!Number.isFinite(oldPrice)||!Number.isFinite(newPrice)||oldPrice<=0||newPrice<=0||oldPrice===newPrice;
-      if(!invalid){const drop=newPrice<oldPrice,difference=Math.abs(newPrice-oldPrice);text=`${drop?'📉 Price Drop!':'📈 Price Increased'}\n\n<b>${escapeHtml(productDisplayName(product))}</b>\nOld price: <b>$${adminMoney(oldPrice/100)}</b>\nNew price: <b>$${adminMoney(newPrice/100)}</b>\nChange: ${drop?'-':'+'}$${adminMoney(difference/100)} (${(difference/oldPrice*100).toFixed(2)}%)\n\nUpdated: ${paymentDashboardTime(event.created_at)} (Dhaka)`;}
+      invalid=invalid||(!product&&!event.product_name_snapshot)||!Number.isFinite(oldPrice)||!Number.isFinite(newPrice)||oldPrice<=0||newPrice<=0||oldPrice===newPrice;
+      if(!invalid){const drop=newPrice<oldPrice,difference=Math.abs(newPrice-oldPrice);text=`${drop?'📉 Price Drop!':'📈 Price Increased'}\n\n<b>${escapeHtml(event.product_name_snapshot||productDisplayName(product))}</b>\nOld price: <b>$${adminMoney(oldPrice/100)}</b>\nNew price: <b>$${adminMoney(newPrice/100)}</b>\nChange: ${drop?'-':'+'}$${adminMoney(difference/100)} (${(difference/oldPrice*100).toFixed(2)}%)\n\nUpdated: ${paymentDashboardTime(event.created_at)} (Dhaka)`;}
     }else if(['new_product','restock','sold_out','low_stock'].includes(event.kind)){
-      invalid=invalid||!product||product.is_active===0||(event.kind==='low_stock'&&!(product.stock>0&&product.stock<=5))||(event.kind==='sold_out'&&product.stock>0)||(event.kind==='restock'&&product.stock<=0);
+      const snapshot=event.stock_snapshot!==null&&event.stock_snapshot!==undefined;
+      invalid=invalid||(!snapshot&&(!product||product.is_active===0||(event.kind==='low_stock'&&!(product.stock>0&&product.stock<=5))||(event.kind==='sold_out'&&product.stock>0)||(event.kind==='restock'&&product.stock<=0)));
       const titles={new_product:'🆕 New Product',restock:'✅ Stock Added',sold_out:'📦 Sold Out',low_stock:'🔥 Last Chance to Purchase!'};
-      if(product)text=`<b>${titles[event.kind]}</b>\n\n${escapeHtml(productDisplayName(product))}\nPrice: <b>$${adminMoney(product.price_usd)}</b>\n${event.kind==='low_stock'?`Only <b>${product.stock}</b> left — order before stock runs out!`:`Available stock: <b>${Number(product.stock||0)}</b>`}`;
+      const stock=snapshot?Number(event.stock_snapshot):Number(product?.stock||0),price=snapshot?Number(event.price_snapshot_cents)/100:product?.price_usd;
+      const name=event.product_name_snapshot||product&&productDisplayName(product)||'Store Product';
+      text=`<b>${titles[event.kind]}</b>\n\n${escapeHtml(name)}\nPrice: <b>$${adminMoney(price)}</b>\n${event.kind==='low_stock'?`Only <b>${stock}</b> left at this update — check live stock before buying!`:`Stock at update: <b>${stock}</b>`}\nUpdated: ${paymentDashboardTime(event.created_at)} (Dhaka)${product&&Number(product.stock)!==stock?`\nLatest stock: <b>${Number(product.stock||0)}</b>`:''}`;
     }else if(event.kind==='purchase'){
       const order=await env.DB.prepare("SELECT product_name,quantity,amount_usd FROM orders WHERE id=? AND status='completed'").bind(event.order_id).first();invalid=invalid||!order;
       if(order)text=`🛍️ <b>Purchase Completed!</b>\n\n${escapeHtml(order.product_name||product?.name||'Store Product')}\nQuantity: <b>${order.quantity||1}</b>\nTotal: <b>$${adminMoney(order.amount_usd)}</b>\n\nThank you for shopping with us!`;
@@ -4334,30 +4350,65 @@ async function deliverChannelNotices(env){
       if(deposit)text=`💳 <b>Deposit Completed!</b>\n\nAmount: <b>$${adminMoney(deposit.amount_usd)}</b>\nMethod: ${escapeHtml(deposit.method==='REDEEM'?'Redeem Code':deposit.method)}\n\nWallet top-up confirmed.`;
     }else invalid=true;
     if(invalid){await env.DB.prepare("UPDATE channel_notice_events SET status='superseded',lease_until=0 WHERE id=? AND lease_token=?").bind(event.id,token).run();continue;}
-    const keyboard=link?[[{text:event.product_id?'Open Product':'Open Store Bot',url:event.product_id?`${link}?start=product_${event.product_id}`:link}]]:null;
+    const productAvailable=Boolean(event.product_id&&product?.is_active===1);
+    if(event.product_id&&!productAvailable)text+='\n\nThis product is currently unavailable in the store.';
+    const keyboard=link?[[{text:productAvailable?'Open Product':'Open Store Bot',url:productAvailable?`${link}?start=product_${event.product_id}`:link}]]:null;
     const sent=await sendMsg(env,normalizeNoticeChannel(event.channel_id),text,keyboard);
-    if(sent?.ok){await env.DB.prepare("UPDATE channel_notice_events SET status='sent',sent_at=CURRENT_TIMESTAMP,lease_until=0,last_error=NULL,attempts=attempts+1 WHERE id=? AND lease_token=?").bind(event.id,token).run();}
-    else{const delay=Math.max(30,Math.min(3600,Number(sent?.parameters?.retry_after)||300));await env.DB.prepare('UPDATE channel_notice_events SET next_at=?,lease_until=0,attempts=attempts+1,last_error=? WHERE id=? AND lease_token=?').bind(Date.now()+delay*1000,'Telegram '+(Number(sent?.error_code)||'unavailable'),event.id,token).run();return;}
+    if(sent?.ok){sentPosts++;await env.DB.prepare("UPDATE channel_notice_events SET status='sent',sent_at=CURRENT_TIMESTAMP,lease_until=0,last_error=NULL,attempts=attempts+1 WHERE id=? AND lease_token=?").bind(event.id,token).run();}
+    else{const delay=Math.max(30,Math.min(3600,Number(sent?.parameters?.retry_after)||300));await env.DB.prepare('UPDATE channel_notice_events SET next_at=?,lease_until=0,attempts=attempts+1,last_error=? WHERE id=? AND lease_token=?').bind(Date.now()+delay*1000,await channelPostError(env,sent),event.id,token).run();return;}
   }
 }
 async function showChannelNotices(env,chatId,messageId=null){
   if(!adminUserAccess(env,chatId))return;
   const channel=await getSetting(env,'force_channel_username',''),keys=['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit','channel_notice_price_drop','channel_notice_price_increase'],labels=['All Channel Alerts','New Product','Stock Added','Stock Finished','Last 5 / Low Stock','Successful Purchase','Successful Deposit','Price Drops','Price Increases'];
-  const values=await Promise.all(keys.map(key=>getSetting(env,key,'1'))),pending=await env.DB.prepare("SELECT COUNT(*) AS n FROM channel_notice_events WHERE status='pending'").first(),issue=await env.DB.prepare('SELECT last_error FROM channel_notice_events WHERE last_error IS NOT NULL ORDER BY id DESC LIMIT 1').first();
-  const buttons=keys.map((key,i)=>[{text:`${labels[i]}: ${values[i]==='1'?'ON':'OFF'}`,callback_data:`adm_channel_toggle_${i}`}]);buttons.push([{text:'Retry Pending Channel Posts',callback_data:'adm_channel_retry'}],[{text:'Force Channel Settings',callback_data:'adm_force_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]);
-  const text=`📢 <b>Channel Notifications</b>\n\nForce channel: <code>${escapeHtml(channel||'Not configured')}</code>\nPending posts: ${pending.n}\nLast issue: ${escapeHtml(issue?.last_error||'None recorded')}\n\nThe bot must be an admin in this channel with permission to post messages. Posts do not expose customer identity, payment transaction IDs or product credentials. Low-stock posts trigger when stock enters 1–5, not on every remaining-item sale.`;
+  const [values,totals,recent,lastCheck,missing]=await Promise.all([
+    Promise.all(keys.map(key=>getSetting(env,key,'1'))),
+    env.DB.prepare("SELECT SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending,SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) sent,SUM(CASE WHEN status='pending' AND kind='new_product' THEN 1 ELSE 0 END) new_pending FROM channel_notice_events").first(),
+    env.DB.prepare('SELECT channel_id,last_error,sent_at FROM channel_notice_events WHERE last_error IS NOT NULL OR sent_at IS NOT NULL ORDER BY id DESC LIMIT 20').all(),
+    getSetting(env,'__channel_connection_check',''),
+    env.DB.prepare("SELECT COUNT(*) n FROM products p WHERE p.is_external=1 AND p.is_active=1 AND NOT EXISTS(SELECT 1 FROM channel_notice_events e WHERE e.event_key='new:'||p.id)").first()
+  ]);
+  const relevant=(recent.results||[]).filter(row=>normalizeNoticeChannel(row.channel_id)===normalizeNoticeChannel(channel));
+  const issue=relevant.find(row=>row.last_error),lastSent=relevant.find(row=>row.sent_at);
+  let checked;try{checked=JSON.parse(lastCheck);}catch{}
+  const connection=checked&&normalizeNoticeChannel(checked.target)===normalizeNoticeChannel(channel)?`${checked.ok?'Ready to post':'Needs attention'} — ${checked.message} (${paymentDashboardTime(checked.checkedAt)})`:'Not checked. Tap Check Channel Connection.';
+  const state=!channel?'No announcement channel configured':!normalizeNoticeChannel(channel)?'Invalid channel address':values[0]!=='1'?'All Channel Alerts is OFF':values[1]!=='1'?'New Product alerts are OFF':'Channel alerts enabled';
+  const buttons=keys.map((key,i)=>[{text:`${labels[i]}: ${values[i]==='1'?'ON':'OFF'}`,callback_data:`adm_channel_toggle_${i}`}]);
+  buttons.push([{text:'Enable All Channel Alerts',callback_data:'adm_channel_enable_all'}],[{text:'🔎 Check Channel Connection',callback_data:'adm_channel_check'}],[{text:'Retry Pending Channel Posts',callback_data:'adm_channel_retry'}],[{text:`Queue Missed API Products (${missing.n||0})`,callback_data:'adm_channel_recover_preview'}],[{text:'Automatic Sync Status',callback_data:'adm_periodic'}],[{text:'Force Channel Settings',callback_data:'adm_force_menu'},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  const text=`📢 <b>Channel Notifications</b>\n\nForce channel: <code>${escapeHtml(channel||'Not configured')}</code>\n<b>${escapeHtml(state)}</b>\nPending posts: ${totals?.pending||0} · New products pending: ${totals?.new_pending||0}\nSent posts: ${totals?.sent||0}\nLast sent to this channel: ${lastSent?paymentDashboardTime(lastSent.sent_at):'Not recorded'}\nLast issue: ${escapeHtml(issue?.last_error||'None recorded')}\n\n<b>Connection &amp; permissions</b>\n${escapeHtml(connection)}\n\nUnannounced API products: ${missing.n||0}\nRecovery queues only selected missing products; it never reposts recorded announcements. Automatic sync must run to discover supplier changes. Telegram errors remain queued for retry. No credentials or customer details are posted.`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
+
 async function handleChannelNoticeCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
+  if(data==='adm_channel_enable_all'){
+    await env.DB.batch(['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit','channel_notice_price_drop','channel_notice_price_increase'].map(key=>env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,'1')").bind(key)));
+    await showChannelNotices(env,chatId,messageId);return true;
+  }
+  if(data==='adm_channel_check'){await checkChannelConnection(env);await showChannelNotices(env,chatId,messageId);return true;}
+  if(data==='adm_channel_recover_preview'){await previewChannelRecovery(env,chatId,messageId);return true;}
+  const recover=data.match(/^adm_channel_recover_run_([a-f0-9]{8})$/);
+  if(recover){
+    const saved=await env.DB.prepare("SELECT * FROM admin_states WHERE user_id=? AND state='channel_recovery_preview'").bind(chatId).first();
+    let draft;try{draft=JSON.parse(saved?.data||'');}catch{}
+    const channel=await getSetting(env,'force_channel_username','');
+    if(!draft||draft.token!==recover[1]||Date.now()-draft.createdAt>600000||draft.channel!==normalizeNoticeChannel(channel)){await previewChannelRecovery(env,chatId,messageId);return true;}
+    if(!normalizeNoticeChannel(channel)||await getSetting(env,'channel_notifications_enabled','1')!=='1'||await getSetting(env,'channel_notice_new_product','1')!=='1'){await showChannelNotices(env,chatId,messageId);return true;}
+    const ids=draft.ids.filter(id=>Number.isSafeInteger(id)&&id>0).slice(0,10);
+    if(ids.length)await env.DB.batch([
+      env.DB.prepare(channelNewProductInsert(`p.id IN (${ids.map(()=>'?').join(',')}) AND p.is_external=1 AND (SELECT value FROM settings WHERE key='force_channel_username')=? AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='channel_recovery_preview' AND data=?)`)).bind(...ids,channel,chatId,saved.data),
+      env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='channel_recovery_preview' AND data=?").bind(chatId,saved.data)
+    ]);
+    await drainChannelNotices(env);await showChannelNotices(env,chatId,messageId);return true;
+  }
   if(data==='adm_channel_notices'){await showChannelNotices(env,chatId,messageId);return true;}
   if(data==='adm_channel_retry'){await env.DB.prepare("UPDATE channel_notice_events SET next_at=0 WHERE status='pending' AND lease_until<?").bind(Date.now()).run();await drainChannelNotices(env);await showChannelNotices(env,chatId,messageId);return true;}
   const match=data.match(/^adm_channel_toggle_([0-8])$/);if(match){const key=['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit','channel_notice_price_drop','channel_notice_price_increase'][Number(match[1])];await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES(?,CASE WHEN COALESCE((SELECT value FROM settings WHERE key=?),'1')='1' THEN '0' ELSE '1' END)").bind(key,key).run();await showChannelNotices(env,chatId,messageId);return true;}return false;
 }
 
 function normalizeNoticeChannel(value){
-  const text=String(value||'').trim();if(/^-[0-9]+$/.test(text)||/^@[A-Za-z0-9_]{5,32}$/.test(text))return text;
-  const match=text.match(/^https?:\/\/t\.me\/([A-Za-z0-9_]{5,32})\/?$/i);return match?'@'+match[1]:null;
+  const text=String(value||'').trim();if(/^-[0-9]+$/.test(text))return text;if(/^@[A-Za-z0-9_]{5,32}$/.test(text))return text.toLowerCase();
+  const match=text.match(/^https?:\/\/t\.me\/([A-Za-z0-9_]{5,32})\/?$/i);return match?'@'+match[1].toLowerCase():null;
 }
 
 
@@ -4569,4 +4620,34 @@ async function showPaymentHealth(env,chatId,messageId=null){
   const buttons=[[{text:'🔄 Refresh Status',callback_data:'adm_payment_health'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Pending Payments',callback_data:'adm_paydash_pending_0'}],[{text:'Payment Settings',callback_data:'adm_payment_settings'},{text:'Admin Panel',callback_data:'admin_panel'}],[{text:'📱 Bridge v0.9 APK',url:'https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.9.apk'}]];
   for(const issue of issues.results||[])buttons.splice(1,0,[{text:`Inspect ${issue.invoice_type==='order'?'Order':'Deposit'} ${issue.public_order_id||issue.invoice_id}`,callback_data:`adm_paydetail_${issue.invoice_type}_${issue.invoice_id}`}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+
+
+function channelNewProductInsert(where){return `INSERT OR IGNORE INTO channel_notice_events(event_key,product_id,kind,channel_id) SELECT 'new:'||p.id,p.id,'new_product',(SELECT value FROM settings WHERE key='force_channel_username') FROM products p WHERE ${where} AND p.is_active=1 AND COALESCE((SELECT value FROM settings WHERE key='force_channel_username'),'')<>'' AND COALESCE((SELECT value FROM settings WHERE key='channel_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='channel_notice_new_product'),'1')='1'`;}
+async function channelPostError(env,result){const code='Telegram '+(Number(result?.error_code)||'unavailable'),detail=result?.description||result?.error;return detail?code+': '+await safeDiagnostic(env,detail):code;}
+async function checkChannelConnection(env){
+  const target=await getSetting(env,'force_channel_username',''),normalized=normalizeNoticeChannel(target);
+  let ok=false,message;
+  if(!normalized)message='Set a public @channel username, public t.me link or numeric channel ID.';
+  else{
+    const [me,chat]=await Promise.all([callTg(env,'getMe',{}),callTg(env,'getChat',{chat_id:normalized})]);
+    if(!me?.ok||!me.result?.id)message=await channelPostError(env,me);
+    else if(!chat?.ok)message=await channelPostError(env,chat);
+    else{
+      const membership=await callTg(env,'getChatMember',{chat_id:chat.result.id,user_id:me.result.id}),member=membership?.result;
+      if(!membership?.ok)message=await channelPostError(env,membership);
+      else if(!['administrator','creator'].includes(member?.status))message='The bot is not an administrator in this channel.';
+      else if(chat.result.type==='channel'&&member.status!=='creator'&&member.can_post_messages!==true)message='The bot is an admin but Post Messages permission is OFF.';
+      else{ok=true;message=`${String(chat.result.title||'Channel').slice(0,100)} · ${chat.result.type||'chat'} · posting permission available`;}
+    }
+  }
+  const result={target,ok,message,checkedAt:new Date().toISOString()};await env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('__channel_connection_check',?)").bind(JSON.stringify(result)).run();return result;
+}
+async function previewChannelRecovery(env,chatId,messageId){
+  if(!adminUserAccess(env,chatId))return;
+  const {results}=await env.DB.prepare("SELECT p.id,p.name FROM products p WHERE p.is_external=1 AND p.is_active=1 AND NOT EXISTS(SELECT 1 FROM channel_notice_events e WHERE e.event_key='new:'||p.id) ORDER BY p.id DESC LIMIT 10").all();
+  const draft={ids:results.map(p=>Number(p.id)),channel:normalizeNoticeChannel(await getSetting(env,'force_channel_username','')),token:crypto.randomUUID().slice(0,8),createdAt:Date.now()};
+  await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'channel_recovery_preview',?)").bind(chatId,JSON.stringify(draft)).run();
+  const text=`📢 <b>Recover Missing API Announcements</b>\n\n${results.length?'The following products have no recorded new-product announcement. Some may be older products imported before notifications were enabled.\n\n'+results.map(p=>'• '+escapeHtml(String(p.name).slice(0,100))).join('\n'):'No missing API announcements found.'}\n\nQueueing creates up to 10 channel posts. Existing announcements are not repeated. Pending posts use the normal delivery queue.`;
+  const buttons=[];if(results.length)buttons.push([{text:`Queue These ${results.length} Products`,callback_data:`adm_channel_recover_run_${draft.token}`}]);buttons.push([{text:'Back to Channel Alerts',callback_data:'adm_channel_notices'}]);return editMsg(env,chatId,messageId,text,buttons);
 }
