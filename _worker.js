@@ -1653,6 +1653,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if(await handleGuideCallback(env,chatId,data,messageId))return;
     if(await handlePeriodicCallback(env,chatId,data,messageId))return;
     if(['profile','deposit'].includes(data)){await env.DB.prepare('DELETE FROM user_states WHERE user_id=?').bind(chatId).run();if(adminUserAccess(env,chatId))await clearAdminState(env,chatId);}
+    const stockOut=data.match(/^stock_out_(\d+)$/);if(stockOut){await sendMsg(env,chatId,'Stock Out — this product is not available right now. Refresh stock to check again.',[[{text:'🔄 Refresh Stock',callback_data:`prod_refresh_${stockOut[1]}`}],[{text:'Back to Shop',callback_data:`shop_return_${stockOut[1]}`}]]);return;}
     // Navigation Callbacks
     if (data === "home") { await clearAdminState(env, chatId); await sendHomeDashboard(env, chatId, user, firstName, messageId); return; }
     const shopPage=data.match(/^shop_(page|refresh)_(\d+)$/);
@@ -2898,11 +2899,12 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null, 
 
     const buttons = [];
     if (prod.is_external && !prod.stock_verified) {
-      // Keep Refresh available without offering checkout on stale stock.
+      buttons.push([{text:'Check Stock',callback_data:`prod_refresh_${prod.id}`}]);
     } else if (stockCount > 0) {
       buttons.push([{ text: "🛍️ Buy Now", callback_data: `buynow_${prod.id}_1` }]);
-    } else if (!prod.is_external) {
-      buttons.push([{ text: "⏳ Pre-Order Now", callback_data: `preorder_${prod.id}` }]);
+    } else {
+      buttons.push([{text:"Stock Out",callback_data:`stock_out_${prod.id}`,style:"danger"}]);
+      if(!prod.is_external)buttons.push([{text:"⏳ Pre-Order Now",callback_data:`preorder_${prod.id}`}]);
     }
     buttons.push([
       { text: "🔄 Refresh Stock", callback_data: `prod_refresh_${prod.id}` },
