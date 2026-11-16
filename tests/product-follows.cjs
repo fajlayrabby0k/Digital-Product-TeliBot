@@ -12,7 +12,7 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const q=db.prepare("INSERT INTO products(name,description,price_usd,price_bdt,is_external,external_id,api_stock) VALUES('Followed API','test',2,250,1,'api-follow',4)").run().lastInsertRowid;
  const follow=(data,id=99)=>c.api.handleProductFollowCallback(env,id,data,1),scope=id=>db.prepare('SELECT product_alert_scope s FROM users WHERE user_id=?').get(id).s;
  const alerts=()=>messages.filter(m=>/Stock Added|Price Dropped|Price Increased|Stock Finished|New Product Added/.test(m.text||''));
- await c.api.drainProductNotices(env);assert.equal(alerts().length,0,'default following mode with no follows sends nothing');messages.length=0;
+ await c.api.drainProductNotices(env);assert.equal(alerts().length,8,'all four users, including admin, get both new-product events by default');assert.equal(new Set(alerts().map(m=>m.chat_id)).size,4);messages.length=0;await follow('product_alert_mode_off',1);for(const id of [99,100,101])await follow('product_alert_mode_following',id);messages.length=0;
  await follow('product_follow_'+p);assert.equal(scope(99),'following');assert(buttons().some(b=>b.callback_data==='product_unfollow_'+p));await follow('product_follow_'+p);assert.equal(db.prepare('SELECT COUNT(*) n FROM product_follows WHERE user_id=99').get().n,1);
  await follow('product_follow_'+q,100);messages.length=0;
  db.prepare('INSERT INTO inventory(product_id,item_data) VALUES(?,?)').run(p,'SECRET-CREDENTIAL');await c.api.drainProductNotices(env);assert.deepEqual(alerts().map(m=>m.chat_id),[99]);assert(!alerts().some(m=>m.text.includes('SECRET-CREDENTIAL')));messages.length=0;

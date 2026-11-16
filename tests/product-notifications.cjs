@@ -8,7 +8,7 @@ const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{fir
 const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
 (async()=>{
  await c.api.ensureDbReady(DB);assert.equal(db.prepare('SELECT COUNT(*) n FROM product_notice_events').get().n,0);
- for(const id of [1,99,100])db.prepare('INSERT INTO users(user_id,balance_usd) VALUES(?,10)').run(id);db.prepare('UPDATE users SET product_alerts=0 WHERE user_id=100').run();
+ for(const id of [1,99,100])db.prepare('INSERT INTO users(user_id,balance_usd) VALUES(?,10)').run(id);db.prepare('UPDATE users SET product_alerts=0 WHERE user_id IN (1,100)').run();
  db.exec("CREATE TRIGGER test_follow_new_product AFTER INSERT ON products BEGIN INSERT OR IGNORE INTO product_follows(user_id,product_id) SELECT user_id,NEW.id FROM users; END");
  assert.deepEqual(Array.from(c.api.parseStockItems('|   |\n| --- |\n| bikpaz@umail.asia |\n| -------- |')),['bikpaz@umail.asia']);
  const p=db.prepare("INSERT INTO products(name,description,price_usd,price_bdt) VALUES('Notice Test','test',5,625)").run().lastInsertRowid;

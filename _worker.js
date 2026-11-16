@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-mobile-retry-1";
+const BOT_BUILD="2026-11-16-all-product-default-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-payment-health-1";
+const DB_SCHEMA_VERSION = "2026-11-all-product-default-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -192,7 +192,8 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE channel_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE products ADD COLUMN price_notice_revision INTEGER DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN product_alerts INTEGER DEFAULT 1;",
-      "ALTER TABLE users ADD COLUMN product_alert_scope TEXT NOT NULL DEFAULT 'following';",
+      "ALTER TABLE users ADD COLUMN product_alert_scope TEXT NOT NULL DEFAULT 'all';",
+      "ALTER TABLE users ADD COLUMN product_alert_preference_set INTEGER NOT NULL DEFAULT 0;",
       "ALTER TABLE product_notice_events ADD COLUMN old_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE product_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE product_categories ADD COLUMN custom_icon TEXT DEFAULT NULL;",
@@ -276,7 +277,10 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
-      db.prepare("CREATE TRIGGER IF NOT EXISTS users_followed_alert_default AFTER INSERT ON users WHEN NEW.product_alert_scope='all' BEGIN UPDATE users SET product_alert_scope='following' WHERE user_id=NEW.user_id; END"),
+      db.prepare('DROP TRIGGER IF EXISTS users_followed_alert_default'),
+      db.prepare("UPDATE users SET product_alert_preference_set=1 WHERE product_alert_preference_set=0 AND (product_alerts=0 OR EXISTS(SELECT 1 FROM product_follows f WHERE f.user_id=users.user_id))"),
+      db.prepare("UPDATE users SET product_alert_scope='all' WHERE product_alert_preference_set=0"),
+      db.prepare("CREATE TRIGGER IF NOT EXISTS users_all_alert_default AFTER INSERT ON users WHEN NEW.product_alert_preference_set=0 BEGIN UPDATE users SET product_alert_scope='all' WHERE user_id=NEW.user_id; END"),
       db.prepare('CREATE INDEX IF NOT EXISTS product_follows_recipients ON product_follows(product_id,user_id)'),
       db.prepare('DROP INDEX IF EXISTS product_notice_coalesce'),
       db.prepare("CREATE UNIQUE INDEX product_notice_coalesce ON product_notice_events(product_id,kind) WHERE status='pending' AND kind NOT IN ('price_drop','price_increase')"),
@@ -284,7 +288,7 @@ async function initializeDatabase(db, force) {
       db.prepare(`CREATE TRIGGER IF NOT EXISTS product_notice_price AFTER UPDATE OF price_usd ON products WHEN NEW.is_active=1 AND OLD.price_usd>0 AND NEW.price_usd>0 AND ROUND(OLD.price_usd*100)<>ROUND(NEW.price_usd*100) BEGIN
         INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id,old_price_cents,new_price_cents)
         SELECT 'price:'||NEW.id||':'||(COALESCE(OLD.price_notice_revision,0)+1),NEW.id,CASE WHEN NEW.price_usd<OLD.price_usd THEN 'price_drop' ELSE 'price_increase' END,COALESCE((SELECT MAX(user_id) FROM users),0),ROUND(OLD.price_usd*100),ROUND(NEW.price_usd*100)
-        WHERE (EXISTS(SELECT 1 FROM product_follows WHERE product_id=NEW.id) OR EXISTS(SELECT 1 FROM users WHERE product_alert_scope='all' AND COALESCE(product_alerts,1)=1)) AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key=CASE WHEN NEW.price_usd<OLD.price_usd THEN 'product_notice_price_drop' ELSE 'product_notice_price_increase' END),'1')='1'; END`),
+        WHERE (EXISTS(SELECT 1 FROM product_follows WHERE product_id=NEW.id) OR EXISTS(SELECT 1 FROM users WHERE COALESCE(product_alert_scope,'all')='all' AND COALESCE(product_alerts,1)=1)) AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key=CASE WHEN NEW.price_usd<OLD.price_usd THEN 'product_notice_price_drop' ELSE 'product_notice_price_increase' END),'1')='1'; END`),
       ...Object.entries(GUIDE_BENGALI_DEFAULTS).map(([key,value])=>db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS[key],key,value)),
       db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS.guide_intro,'guide_intro',GUIDE_PREVIOUS_INTRO),
       ...Object.entries(GUIDE_LEGACY_DEFAULTS).map(([key,value])=>db.prepare('UPDATE settings SET value=? WHERE key=? AND value=?').bind(GUIDE_DEFAULTS[key],key,value)),
@@ -1749,7 +1753,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, product_name, details, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)").bind(chatId, username, prodId, prod.name, JSON.stringify({product_name:prod.name,external_id:prod.is_external?String(prod.external_id):null,type:'stock_notification'})).run();
         await env.DB.batch([
           env.DB.prepare('INSERT OR IGNORE INTO product_follows(user_id,product_id) SELECT ?,id FROM products WHERE id=? AND is_active=1').bind(chatId,prodId),
-          env.DB.prepare("UPDATE users SET product_alerts=1 WHERE user_id=? AND EXISTS(SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?)").bind(chatId,chatId,prodId)
+          env.DB.prepare("UPDATE users SET product_alert_scope=CASE WHEN product_alerts=0 THEN 'following' ELSE COALESCE(product_alert_scope,'all') END,product_alerts=1,product_alert_preference_set=1 WHERE user_id=? AND EXISTS(SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?)").bind(chatId,chatId,prodId)
         ]);
         await editMsg(env, chatId, messageId, `⏳ <b>Stock Alert Registered</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your stock alert is registered and you are now following this product. Unfollow it or turn alerts off from Profile at any time. No payment was taken and no supplier pre-order was placed. When stock is added or synced, you will receive a purchase link.`, [
           [{ text: "🛒 Continue Shopping", callback_data: "shop" }],
@@ -3155,7 +3159,7 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
   const buttons = [
     [{ text: "💳 Deposit Funds", callback_data: "deposit" }],
     [{text:"📒 Balance History",callback_data:"wallet_history_0"}],
-    [{text:`🔔 Product Alerts: ${user?.product_alerts===0?'OFF':user?.product_alert_scope==='all'?'All Products':'Followed Only'}`,callback_data:"product_alert_settings"}],
+    [{text:`🔔 Product Alerts: ${user?.product_alerts===0?'OFF':user?.product_alert_scope==='following'?'Followed Only':'All Products'}`,callback_data:"product_alert_settings"}],
     [{text:`⭐ Followed Products (${followedCount})`,callback_data:'product_follows_0'}],
     [{ text: "📦 Order History", callback_data: "my_orders" }, { text: "⏳ My Pre-Orders", callback_data: "my_preorders" }],
     [{ text: "👥 Refer & Earn", callback_data: "refer" }],
@@ -4256,7 +4260,7 @@ async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
   }
   const titles={new_product:'🆕 New Product Added',restock:'✅ Stock Added',sold_out:'📦 Stock Finished',price_drop:'📉 Price Dropped',price_increase:'📈 Price Increased'};
   const text=`<b>${titles[event.kind]||'Product Update'}</b>\n\n${escapeHtml(productDisplayName(product))}\n${['price_drop','price_increase'].includes(event.kind)?`Price: <b>$${adminMoney(event.old_price_cents/100)} → $${adminMoney(event.new_price_cents/100)}</b>`:`Price: <b>$${adminMoney(product.price_usd)}</b>`}\n${event.kind==='sold_out'?'Stock: 0':'Available stock: '+Number(product.stock||0)}\n\n${paymentDashboardTime(event.created_at)} (Dhaka)`;
-  const {results:users}=await env.DB.prepare(`SELECT u.user_id FROM users u WHERE u.user_id>? AND u.user_id<=? AND u.user_id<>? AND COALESCE(u.product_alerts,1)=1 AND (u.product_alert_scope='all' OR EXISTS(SELECT 1 FROM product_follows f WHERE f.user_id=u.user_id AND f.product_id=?)) ORDER BY u.user_id LIMIT ?`).bind(event.cursor,event.max_user_id,env.ADMIN_ID||0,event.product_id,limit).all();
+  const {results:users}=await env.DB.prepare(`SELECT u.user_id FROM users u WHERE u.user_id>? AND u.user_id<=? AND COALESCE(u.product_alerts,1)=1 AND (COALESCE(u.product_alert_scope,'all')='all' OR EXISTS(SELECT 1 FROM product_follows f WHERE f.user_id=u.user_id AND f.product_id=?)) ORDER BY u.user_id LIMIT ?`).bind(event.cursor,event.max_user_id,event.product_id,limit).all();
   let cursor=event.cursor,attempted=0;
   for(const user of users){
     if(Date.now()>=deadline)break;
@@ -4281,14 +4285,14 @@ async function showProductNoticeSettings(env,chatId,messageId=null){
   const values=await Promise.all(keys.map(k=>getSetting(env,k,'1'))),labels=['All Product Alerts','New Products','Stock Added','Stock Finished','Price Drops','Price Increases'];
   const pending=await env.DB.prepare("SELECT COUNT(*) AS n FROM product_notice_events WHERE status='pending'").first();
   const buttons=keys.map((k,i)=>[{text:`${labels[i]}: ${values[i]==='1'?'ON':'OFF'}`,callback_data:`adm_notice_toggle_${i}`}]);buttons.push([{text:'Send Pending Batch',callback_data:'adm_notice_drain'}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
-  const text=`🔔 <b>Product Notifications</b>\n\nPending events: ${pending.n}\n\nUsers choose All Products or Followed Only for private stock and price alerts, or turn private alerts off. Channel posts remain independent and cover the store catalog. They can manage or mute alerts from Profile. Repeated unchanged syncs do not create new alerts.\n\nDelivery runs in small background batches after bot activity/sync. Large queues may need more bot activity or scheduled sync calls to finish promptly.`;
+  const text=`🔔 <b>Product Notifications</b>\n\nPending events: ${pending.n}\n\nAll Products is the default for customers and admins. Users can choose Followed Only or turn private alerts off. Channel posts remain independent and cover the store catalog. They can manage or mute alerts from Profile. Repeated unchanged syncs do not create new alerts.\n\nDelivery runs in small background batches after bot activity/sync. Large queues may need more bot activity or scheduled sync calls to finish promptly.`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleProductNoticeCallback(env,chatId,data,messageId){
   if(await handleProductFollowCallback(env,chatId,data,messageId))return true;
   if(await handleChannelNoticeCallback(env,chatId,data,messageId))return true;
   if(data==='product_alert_off'||data==='product_alert_toggle'){
-    await env.DB.prepare(data==='product_alert_off'?'UPDATE users SET product_alerts=0 WHERE user_id=?':'UPDATE users SET product_alerts=CASE WHEN COALESCE(product_alerts,1)=1 THEN 0 ELSE 1 END WHERE user_id=?').bind(chatId).run();
+    await env.DB.prepare(data==='product_alert_off'?'UPDATE users SET product_alerts=0,product_alert_preference_set=1 WHERE user_id=?':'UPDATE users SET product_alerts=CASE WHEN COALESCE(product_alerts,1)=1 THEN 0 ELSE 1 END,product_alert_preference_set=1 WHERE user_id=?').bind(chatId).run();
     const user=await env.DB.prepare('SELECT * FROM users WHERE user_id=?').bind(chatId).first();await sendProfile(env,chatId,user,messageId);return true;
   }
   if(!adminUserAccess(env,chatId))return false;
@@ -4480,11 +4484,11 @@ async function sendSavedOrderDocument(env,chatId,order){
 async function showProductAlertPreferences(env,chatId,messageId=null){
   const user=await env.DB.prepare('SELECT product_alerts,product_alert_scope FROM users WHERE user_id=?').bind(chatId).first();
   const count=await env.DB.prepare('SELECT COUNT(*) n FROM product_follows WHERE user_id=?').bind(chatId).first();
-  const mode=user?.product_alerts===0?'off':user?.product_alert_scope==='all'?'all':'following';
-  const options=[['following','Followed Only'],['all','All Products'],['off','Turn Off Alerts']];
+  const mode=user?.product_alerts===0?'off':user?.product_alert_scope==='following'?'following':'all';
+  const options=[['all','All Products (Default)'],['following','Followed Only'],['off','Turn Off Alerts']];
   const buttons=options.map(([key,label])=>[{text:`${mode===key?'✓ ':''}${label}`,callback_data:`product_alert_mode_${key}`}]);
   buttons.push([{text:`⭐ Followed Products (${count.n})`,callback_data:'product_follows_0'}],[{text:'👤 My Profile',callback_data:'profile'}]);
-  const text=`🔔 <b>Product Notifications</b>\n\nCurrent: <b>${options.find(([key])=>key===mode)[1]}</b>\n\n<b>Followed Only</b> — stock added, stock finished and price changes only for products you follow. With no follows, you receive no private product alerts.\n\n<b>All Products</b> — new products, stock updates and price changes across the store, including products you do not follow.\n\n<b>Turn Off Alerts</b> — pause all private product alerts without removing your follows.\n\nManage your follows using Followed Products below. Channel updates for all products are separate.`;
+  const text=`🔔 <b>Product Notifications</b>\n\nCurrent: <b>${options.find(([key])=>key===mode)[1]}</b>\n\n<b>Followed Only</b> — stock added, stock finished and price changes only for products you follow. With no follows, you receive no private product alerts.\n\n<b>All Products (Default)</b> — new products, stock updates and price changes across the store, including products you do not follow.\n\n<b>Turn Off Alerts</b> — pause all private product alerts without removing your follows.\n\nTo receive only selected products, choose Followed Only and manage your follows below. If alerts are OFF, following a product enables Followed Only. Following while All Products is ON keeps All Products selected. Channel updates for all products are separate.`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showFollowedProducts(env,chatId,page=0,messageId=null){
@@ -4502,7 +4506,7 @@ async function showFollowedProducts(env,chatId,page=0,messageId=null){
 async function handleProductFollowCallback(env,chatId,data,messageId){
   if(data==='product_alert_settings'){await showProductAlertPreferences(env,chatId,messageId);return true;}
   let match=data.match(/^product_alert_mode_(all|following|off)$/);
-  if(match){await env.DB.prepare("UPDATE users SET product_alerts=?,product_alert_scope=CASE WHEN ?='off' THEN product_alert_scope ELSE ? END WHERE user_id=?").bind(match[1]==='off'?0:1,match[1],match[1],chatId).run();await showProductAlertPreferences(env,chatId,messageId);return true;}
+  if(match){await env.DB.prepare("UPDATE users SET product_alerts=?,product_alert_scope=CASE WHEN ?='off' THEN product_alert_scope ELSE ? END,product_alert_preference_set=1 WHERE user_id=?").bind(match[1]==='off'?0:1,match[1],match[1],chatId).run();await showProductAlertPreferences(env,chatId,messageId);return true;}
   match=data.match(/^product_follows_(\d+)$/);if(match){await showFollowedProducts(env,chatId,match[1],messageId);return true;}
   match=data.match(/^product_unfollow_list_(\d+)_(\d+)$/);
   if(match){await env.DB.prepare('DELETE FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,match[1]).run();await showFollowedProducts(env,chatId,match[2],messageId);return true;}
@@ -4510,7 +4514,7 @@ async function handleProductFollowCallback(env,chatId,data,messageId){
   if(match[1]==='follow'){
     await env.DB.batch([
       env.DB.prepare('INSERT OR IGNORE INTO product_follows(user_id,product_id) SELECT ?,id FROM products WHERE id=? AND is_active=1').bind(chatId,match[2]),
-      env.DB.prepare("UPDATE users SET product_alerts=1 WHERE user_id=? AND EXISTS(SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?)").bind(chatId,chatId,match[2])
+      env.DB.prepare("UPDATE users SET product_alert_scope=CASE WHEN product_alerts=0 THEN 'following' ELSE COALESCE(product_alert_scope,'all') END,product_alerts=1,product_alert_preference_set=1 WHERE user_id=? AND EXISTS(SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?)").bind(chatId,chatId,match[2])
     ]);
   }else await env.DB.prepare('DELETE FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,match[2]).run();
   await sendProductDetailView(env,chatId,match[2],messageId);return true;
