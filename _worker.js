@@ -4325,4 +4325,3 @@ async function handlePeriodicCallback(env,chatId,data,messageId){
   if(data==='adm_periodic_run'){await runPeriodicSync(env,true);if(env.__executionContext?.waitUntil)env.__executionContext.waitUntil(drainAllNotices(env).catch(()=>{}));}
   await showPeriodicStatus(env,chatId,messageId);return true;
 }
-
