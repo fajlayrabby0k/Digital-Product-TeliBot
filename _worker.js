@@ -4032,13 +4032,16 @@ async function ensureCategory(env,name,restore=false){
   return row?.is_deleted?null:row?.id;
 }
 async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
-  await syncExternalProducts(env,null,null,false,null,force);page=adminUserPage(page);
+  await syncExternalProducts(env,null,null,false,null,force);
+  const totals=await env.DB.prepare("SELECT (SELECT COUNT(*)+1 FROM product_categories WHERE is_deleted=0 AND LOWER(name) NOT IN ('subscription','others subscription')) AS categories,(SELECT COUNT(*) FROM products WHERE is_active=1) AS products").first();
+  const pages=Math.max(1,Math.ceil(Number(totals?.categories||1)/10));page=Math.min(pages-1,adminUserPage(page));
   const {results}=await env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count,0 AS sort_order FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 AND LOWER(c.name) NOT IN ('subscription','others subscription') GROUP BY c.id UNION ALL SELECT 0 AS id,'Others Subscription' AS name,NULL AS custom_icon,COUNT(*) AS count,1 AS sort_order FROM products WHERE is_active=1 AND (shop_category_id IS NULL OR shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name) IN ('subscription','others subscription') AND is_deleted=0)) ORDER BY sort_order,name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
-  const choices=results.slice(0,10).map(c=>categoryButton(c,`shopcat_${c.id}_0`,true)),buttons=[];
+  const visible=results.slice(0,10),choices=visible.filter(c=>c.id!==0).map(c=>categoryButton(c,`shopcat_${c.id}_0`,true)),buttons=[];
   for(let i=0;i<choices.length;i+=2)buttons.push(choices.slice(i,i+2));
+  const others=visible.find(c=>c.id===0);if(others){const button=categoryButton(others,'shopcat_0_0',true);delete button.style;buttons.push([button]);}
   const pager=[];if(page>0)pager.push({text:'Previous Categories',callback_data:`shop_page_${page-1}`});if(results.length>10)pager.push({text:'Next Categories',callback_data:`shop_page_${page+1}`});if(pager.length)buttons.push(pager);
-  buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'Main Menu',callback_data:'home'}]);
-  const text='📂 <b>Shop Categories</b>\n\nChoose a category to browse its products.';
+  buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'🏠 Main Menu',callback_data:'home'}]);
+  const text=`🛍️ <b>Shop Categories</b>\n\nChoose a category to explore its products.\n\n<blockquote><b>${totals?.categories||0}</b> categories  ·  <b>${totals?.products||0}</b> products</blockquote>${pages>1?`\nPage ${page+1} of ${pages}`:''}`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,force=false){
