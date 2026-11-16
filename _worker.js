@@ -2795,9 +2795,10 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
     `Choose an option below:`;
 
   const keyboard = [
-    [{text:'🛍️ Browse Shop',callback_data:'shop',style:'primary'},{text:'💬 Support',callback_data:'support'}],
+    [{text:'🛍️ Browse Shop',callback_data:'shop',style:'primary'}],
     [{text:'📦 My Orders',callback_data:'my_orders'},{text:'⏳ Pre-Orders',callback_data:'my_preorders'}],
-    [{text:'🎁 Refer & Earn',callback_data:'refer'},{text:'📖 Guide / FAQ',callback_data:'user_guide'}]
+    [{text:'🎁 Refer & Earn',callback_data:'refer'},{text:'📖 Guide / FAQ',callback_data:'user_guide'}],
+    [{text:'💬 Support',callback_data:'support'}]
   ];
   if(String(chatId)===String(env.ADMIN_ID))keyboard.push([{text:'⚙️ Admin Panel',callback_data:'admin_panel',style:'primary'}]);
 
