@@ -11,7 +11,7 @@ const methods=['binance','bep20','bkash','nagad','rocket','redeem'];
 (async()=>{
  await api.ensureDbReady(DB);for(const id of [1,99])sqlite.prepare('INSERT INTO users(user_id) VALUES(?)').run(id);
  await cb('deposit',99);const rows=last().reply_markup.inline_keyboard;
- assert(rows.slice(0,-1).every(row=>row.length===1));assert.deepEqual(Array.from(rows.at(-1),button=>button.callback_data),['profile','deposit']);assert.equal(rows.at(-1)[0].style,'primary');assert.equal(rows.at(-1)[1].style,'success');assert.deepEqual(Array.from(rows.slice(0,6),row=>row[0].callback_data),['dep_method_binance','dep_method_bep20','dep_method_bkash','dep_method_nagad','dep_method_rocket','redeem_open']);
+ assert(rows.every(row=>row.length===1));assert(!rows.some(row=>row.some(button=>button.text==='👛 Wallet')));assert.deepEqual(Array.from(rows.slice(0,6),row=>row[0].callback_data),['dep_method_binance','dep_method_bep20','dep_method_bkash','dep_method_nagad','dep_method_rocket','redeem_open']);
  for(const row of rows.slice(0,6)){assert(!/\p{Extended_Pictographic}/u.test(row[0].text));assert.equal(row[0].icon_custom_emoji_id,undefined);}
  await cb('adm_payment_settings');assert(buttons().some(b=>b.callback_data==='adm_payment_icons'));
  await cb('adm_payment_icons');assert.equal(buttons().filter(b=>b.callback_data.startsWith('adm_payicon_')).length,6);

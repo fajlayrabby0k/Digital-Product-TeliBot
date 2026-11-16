@@ -483,12 +483,12 @@ async function callTg(env, method, payload) {
 }
 async function sendMsg(env, chatId, text, keyboard = null) {
   const p = { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true };
-  if (keyboard) p.reply_markup = { inline_keyboard: walletFooterKeyboard(chatId,keyboard) };
+  if (keyboard) p.reply_markup = { inline_keyboard: keyboard };
   return await callTg(env, "sendMessage", p);
 }
 async function editMsg(env, chatId, messageId, text, keyboard = null) {
   const p = { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", disable_web_page_preview: true };
-  if (keyboard) p.reply_markup = { inline_keyboard: walletFooterKeyboard(chatId,keyboard) };
+  if (keyboard) p.reply_markup = { inline_keyboard: keyboard };
   const res = await callTg(env, "editMessageText", p);
   if (!res || !res.ok) {
     const desc = (res && res.description) || "";
@@ -2798,7 +2798,8 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
     [{text:'🛍️ Browse Shop',callback_data:'shop',style:'primary'}],
     [{text:'📦 My Orders',callback_data:'my_orders'},{text:'⏳ Pre-Orders',callback_data:'my_preorders'}],
     [{text:'🎁 Refer & Earn',callback_data:'refer'},{text:'📖 Guide / FAQ',callback_data:'user_guide'}],
-    [{text:'💬 Support',callback_data:'support'}]
+    [{text:'💬 Support',callback_data:'support'}],
+    [{text:'👛 Wallet',callback_data:'profile',style:'primary'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}]
   ];
   if(String(chatId)===String(env.ADMIN_ID))keyboard.push([{text:'⚙️ Admin Panel',callback_data:'admin_panel',style:'primary'}]);
 
@@ -4325,16 +4326,3 @@ async function handlePeriodicCallback(env,chatId,data,messageId){
   await showPeriodicStatus(env,chatId,messageId);return true;
 }
 
-
-function walletFooterKeyboard(chatId,keyboard){
-  if(!Array.isArray(keyboard)||!/^\d+$/.test(String(chatId))||Number(chatId)<=0)return keyboard;
-  const hasUserNavigation=keyboard.some(row=>row.some(button=>typeof button.callback_data==='string'&&!/^(adm_|admin_)/.test(button.callback_data)&&button.callback_data!=='admin_panel'));
-  if(!hasUserNavigation)return keyboard;
-  const rows=keyboard.map(row=>row.filter(button=>!['profile','deposit'].includes(button.callback_data))).filter(row=>row.length);
-  const adminRows=rows.filter(row=>row.length===1&&row[0].callback_data==='admin_panel');
-  const isBottomNavigation=row=>row.some(button=>button.callback_data==='home')&&row.some(button=>/^shop(?:_refresh|catrefresh_|looserefresh_)/.test(button.callback_data||''));
-  const navigationRows=rows.filter(isBottomNavigation);
-  const content=rows.filter(row=>!(row.length===1&&row[0].callback_data==='admin_panel')&&!isBottomNavigation(row));
-  content.push([{text:'👛 Wallet',callback_data:'profile',style:'primary'},{text:'💳 Deposit',callback_data:'deposit',style:'success'}],...navigationRows,...adminRows);
-  return content;
-}
