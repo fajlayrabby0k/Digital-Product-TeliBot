@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-16-all-product-default-1";
+const BOT_BUILD="2026-11-16-explicit-alert-mode-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1751,11 +1751,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         if(prod.is_external){await sendMsg(env,chatId,'Pre-orders are not available for API products.',[[{text:'Back to Product',callback_data:`prod_${prod.id}`}]]);return;}
         const existingPo = await env.DB.prepare("SELECT id FROM preorders WHERE user_id = ? AND product_id = ? AND status = 'pending'").bind(chatId, prodId).first();
         if (!existingPo) await env.DB.prepare("INSERT INTO preorders (user_id, username, product_id, product_name, details, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)").bind(chatId, username, prodId, prod.name, JSON.stringify({product_name:prod.name,external_id:prod.is_external?String(prod.external_id):null,type:'stock_notification'})).run();
-        await env.DB.batch([
-          env.DB.prepare('INSERT OR IGNORE INTO product_follows(user_id,product_id) SELECT ?,id FROM products WHERE id=? AND is_active=1').bind(chatId,prodId),
-          env.DB.prepare("UPDATE users SET product_alert_scope=CASE WHEN product_alerts=0 THEN 'following' ELSE COALESCE(product_alert_scope,'all') END,product_alerts=1,product_alert_preference_set=1 WHERE user_id=? AND EXISTS(SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?)").bind(chatId,chatId,prodId)
-        ]);
-        await editMsg(env, chatId, messageId, `⏳ <b>Stock Alert Registered</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your stock alert is registered and you are now following this product. Unfollow it or turn alerts off from Profile at any time. No payment was taken and no supplier pre-order was placed. When stock is added or synced, you will receive a purchase link.`, [
+        await env.DB.prepare('INSERT OR IGNORE INTO product_follows(user_id,product_id) SELECT ?,id FROM products WHERE id=? AND is_active=1').bind(chatId,prodId).run();
+        await editMsg(env, chatId, messageId, `⏳ <b>Stock Alert Registered</b>\n\nProduct: <b>${productDisplayName(prod)}</b>\nPrice: <b>$${Number(prod.price_usd).toFixed(2)} USD</b> (≈ ৳${prod.price_bdt} BDT)\n\n✅ Your stock alert is registered and you are now following this product. Unfollow it or turn alerts off from Profile at any time. No payment was taken and no supplier pre-order was placed. Stock updates are sent according to your Product Alerts setting.`, [
           [{ text: "🛒 Continue Shopping", callback_data: "shop" }],
           [{ text: "🏠 Main Menu", callback_data: "home" }]
         ]);
@@ -4488,7 +4485,7 @@ async function showProductAlertPreferences(env,chatId,messageId=null){
   const options=[['all','All Products (Default)'],['following','Followed Only'],['off','Turn Off Alerts']];
   const buttons=options.map(([key,label])=>[{text:`${mode===key?'✓ ':''}${label}`,callback_data:`product_alert_mode_${key}`}]);
   buttons.push([{text:`⭐ Followed Products (${count.n})`,callback_data:'product_follows_0'}],[{text:'👤 My Profile',callback_data:'profile'}]);
-  const text=`🔔 <b>Product Notifications</b>\n\nCurrent: <b>${options.find(([key])=>key===mode)[1]}</b>\n\n<b>Followed Only</b> — stock added, stock finished and price changes only for products you follow. With no follows, you receive no private product alerts.\n\n<b>All Products (Default)</b> — new products, stock updates and price changes across the store, including products you do not follow.\n\n<b>Turn Off Alerts</b> — pause all private product alerts without removing your follows.\n\nTo receive only selected products, choose Followed Only and manage your follows below. If alerts are OFF, following a product enables Followed Only. Following while All Products is ON keeps All Products selected. Channel updates for all products are separate.`;
+  const text=`🔔 <b>Product Notifications</b>\n\nCurrent: <b>${options.find(([key])=>key===mode)[1]}</b>\n\n<b>Followed Only</b> — stock added, stock finished and price changes only for products you follow. With no follows, you receive no private product alerts.\n\n<b>All Products (Default)</b> — new products, stock updates and price changes across the store, including products you do not follow.\n\n<b>Turn Off Alerts</b> — pause all private product alerts without removing your follows.\n\nTo receive only selected products, choose Followed Only and manage your follows below. Following or unfollowing a product never changes your notification mode or turns alerts on. Only Notification Settings can switch to Followed Only. Channel updates for all products are separate.`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showFollowedProducts(env,chatId,page=0,messageId=null){
@@ -4512,10 +4509,7 @@ async function handleProductFollowCallback(env,chatId,data,messageId){
   if(match){await env.DB.prepare('DELETE FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,match[1]).run();await showFollowedProducts(env,chatId,match[2],messageId);return true;}
   match=data.match(/^product_(follow|unfollow)_(\d+)$/);if(!match)return false;
   if(match[1]==='follow'){
-    await env.DB.batch([
-      env.DB.prepare('INSERT OR IGNORE INTO product_follows(user_id,product_id) SELECT ?,id FROM products WHERE id=? AND is_active=1').bind(chatId,match[2]),
-      env.DB.prepare("UPDATE users SET product_alert_scope=CASE WHEN product_alerts=0 THEN 'following' ELSE COALESCE(product_alert_scope,'all') END,product_alerts=1,product_alert_preference_set=1 WHERE user_id=? AND EXISTS(SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?)").bind(chatId,chatId,match[2])
-    ]);
+    await env.DB.prepare('INSERT OR IGNORE INTO product_follows(user_id,product_id) SELECT ?,id FROM products WHERE id=? AND is_active=1').bind(chatId,match[2]).run();
   }else await env.DB.prepare('DELETE FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,match[2]).run();
   await sendProductDetailView(env,chatId,match[2],messageId);return true;
 }
