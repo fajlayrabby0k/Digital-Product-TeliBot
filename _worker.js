@@ -4305,6 +4305,14 @@ const GUIDE_DEFAULTS={
   guide_refund:'রিফান্ডের আবেদন অর্ডারের সমস্যা ও সংশ্লিষ্ট প্রোডাক্টের শর্ত অনুযায়ী অ্যাডমিন যাচাই করবেন। Orders → Get Help থেকে টিকিট দিন। শুধু আবেদন করলেই স্বয়ংক্রিয় রিফান্ড নিশ্চিত নয়। পেমেন্ট আটকে থাকলে আবার টাকা না পাঠিয়ে একই Order ID দিয়ে সাপোর্ট নিন।',
   guide_faq:'• টাকা কেটেছে, প্রোডাক্ট আসেনি? Orders দেখুন; Check Delivery থাকলে ব্যবহার করুন, না হলে Get Help দিন।\n• ডিপোজিট হয়নি? সঠিক মাধ্যম, পরিমাণ ও রসিদের ID মিলিয়ে দেখুন; PIN/OTP দেবেন না।\n• একই TxID আবার ব্যবহার করা যায়? সম্পন্ন পেমেন্টের ID দ্বিতীয়বার ক্রেডিট হয় না।\n• দাম বদলেছে? API-এর দাম/স্টক sync হলে আপডেট হয়। কেনার আগে সর্বশেষ মোট মূল্য দেখুন।\n• ব্যালেন্সের হিসাব? Profile → Balance History দেখুন।'
 };
+function formatGuideFaq(value){
+  return String(value).trim().split(/\n\s*\n|\n(?=\s*[•●])/).map(block=>{
+    const plain=block.trim().replace(/^[•●]\s*/,''),end=plain.search(/[?؟]/);
+    if(end<0)return escapeHtml(plain);
+    const question=plain.slice(0,end+1).replace(/^(?:প্রশ্ন|Question|Q)\s*[:：]\s*/i,''),answer=plain.slice(end+1).trim().replace(/^(?:উত্তর|Answer|A)\s*[:：]\s*/i,'');
+    return `<b>প্রশ্ন: ${escapeHtml(question)}</b>${answer?'\nউত্তর: '+escapeHtml(answer):''}`;
+  }).join('\n\n');
+}
 async function showUserGuide(env,chatId,section='menu',messageId=null){
   const labels={payment:'পেমেন্টের নিয়ম',delivery:'অর্ডার ও ডেলিভারি',warranty:'ওয়ারেন্টি',refund:'রিফান্ড',faq:'FAQ'};
   const title=await getSetting(env,'guide_title',GUIDE_DEFAULTS.guide_title),intro=await getSetting(env,'guide_intro',GUIDE_DEFAULTS.guide_intro);
@@ -4312,6 +4320,8 @@ async function showUserGuide(env,chatId,section='menu',messageId=null){
   if(section==='payment'){
     const rate=await getSetting(env,'usd_to_bdt_rate','125'),body=await getSetting(env,'guide_payment',GUIDE_DEFAULTS.guide_payment);
     text=`💳 <b>পেমেন্টের নিয়ম</b>\n\n${escapeHtml(body.replaceAll('{rate}',String(rate)))}`;
+  }else if(section==='faq'){
+    text=`📖 <b>FAQ</b>\n\n${formatGuideFaq(await getSetting(env,'guide_faq',GUIDE_DEFAULTS.guide_faq))}`;
   }else if(labels[section])text=`📖 <b>${labels[section]}</b>\n\n${escapeHtml(await getSetting(env,'guide_'+section,GUIDE_DEFAULTS['guide_'+section]))}`;
   const buttons=section==='menu'?[[{text:'Payment Rules',callback_data:'guide_payment'},{text:'Order / Delivery',callback_data:'guide_delivery'}],[{text:'Warranty',callback_data:'guide_warranty'},{text:'Refund Policy',callback_data:'guide_refund'}],[{text:'FAQ',callback_data:'guide_faq'}]]:[[{text:'Back to Guide',callback_data:'user_guide'}]];
   buttons.push([{text:'Shop',callback_data:'shop'},{text:'Support',callback_data:'support'}],[{text:'Main Menu',callback_data:'home'}]);
