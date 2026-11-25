@@ -13,12 +13,12 @@ function trx(method){return method==='bkash'?'TEST'+String(serial++).padStart(6,
 async function receipt(method,id,options={}){const body={version:1,eventId:webcrypto.randomUUID(),deviceId:'phone',method,account,trxId:id,amountMinor:62500,receivedAt:clock,paidAt:Math.floor(clock/60000)*60000,...options};const raw=JSON.stringify(body),ts=String(Math.floor(clock/1000));const sig=createHmac('sha256',env.MOBILE_BRIDGE_SECRET).update(raw+ts).digest('hex');const response=await api.receiveMobileBridgeReceipt(new Request('https://test/api/mobile-receipt',{method:'POST',body:raw,headers:{'X-Timestamp':ts,'X-Signature':sig}}),env);assert.equal(response.status,200);return body;}
 async function submit(d,t,user=99){await cb('mobile_enter_deposit_'+d.id,user);await text(t,user);}
 (async()=>{
- const fixtures=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));assert.equal(fixtures.length,4);
+ const fixtures=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));assert.equal(fixtures.length,6);
  await api.ensureDbReady(DB);for(const id of [1,99,100])sqlite.prepare('INSERT INTO users(user_id) VALUES(?)').run(id);
  for(const method of ['bkash','nagad'])sqlite.prepare('UPDATE settings SET value=? WHERE key=?').run(account,method+'_num');
  for(const [key,value] of [['external_api_url','https://supplier.test'],['external_api_key','fixture-api-key']])sqlite.prepare('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)').run(key,value);
  for(let i=0;i<fixtures.length;i++){
-  const parsed=fixtures[i],isExternal=i===3,usd=Math.round(parsed.amountMinor/100/125*100)/100;clock=parsed.paidAt-30000;
+  const parsed=fixtures[i],isExternal=i===3||i===5,usd=Math.round(parsed.amountMinor/100/125*100)/100;clock=parsed.paidAt-30000;
   const product=sqlite.prepare('INSERT INTO products(name,description,price_usd,price_bdt,is_external,external_id,api_stock,cost_price_usd,custom_price_usd) VALUES(?,?,?,?,?,?,?,?,?)').run('SMS integration '+i,'Fixture product',usd,parsed.amountMinor/100,isExternal?1:0,isExternal?'remote-fixture':'',isExternal?4:0,isExternal?0.15:0,isExternal?usd:0).lastInsertRowid;
   if(!isExternal)sqlite.prepare('INSERT INTO inventory(product_id,item_data) VALUES(?,?)').run(product,'LOCAL-DELIVERY-'+i);
   // Payment selection creates the real invoice; API order is created directly to avoid unrelated catalog mocks.
@@ -37,6 +37,6 @@ async function submit(d,t,user=99){await cb('mobile_enter_deposit_'+d.id,user);a
   // Another account cannot reuse an already verified receipt.
   const other=sqlite.prepare("INSERT INTO deposits(user_id,method,amount_usd,amount_bdt) VALUES(100,?,?,?)").run(parsed.method.toUpperCase(),usd,parsed.amountMinor/100).lastInsertRowid;await api.createMobileInvoice(env,'deposit',other,100,parsed.method,account,usd,parsed.amountMinor/100);await cb('mobile_enter_deposit_'+other,100);await text(parsed.trxId,100);assert.equal(balance(100),0);assert.equal(row('deposits',other).status,'pending');
  }
- assert.equal(supplierCalls.length,1);assert.equal(supplierCalls[0].product_id,'remote-fixture');assert.equal(supplierCalls[0].quantity,1);assert(supplierCalls[0].external_order_id);
- console.log('PASS: actual Android parser output → signed SMS upload → user TrxID → once-only payment claim → local/API order → .txt delivery; bKash/Nagad with/without Ref, SMS before/after submission, supplier called once and reused TrxID refused');
+ assert.equal(supplierCalls.length,2);assert.equal(supplierCalls[0].product_id,'remote-fixture');assert.equal(supplierCalls[0].quantity,1);assert(supplierCalls[0].external_order_id);
+ console.log('PASS: actual Android parser output → signed SMS upload → user TrxID → once-only payment claim → local/API order → .txt delivery; bKash/Nagad with/without Ref, SMS before/after submission, Nagad Cash In Received, supplier called once per API order and reused TrxID refused');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sqlite.close());

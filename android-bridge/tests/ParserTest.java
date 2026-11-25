@@ -25,6 +25,13 @@ public class ParserTest {
  check(ReceiptParser.parse(n.replace("1200.01","1600.01"),"nagad").minor==40000);
  for(String t:new String[]{b+" OTP 123456",b.replace("received","sent"),b.replace("500.00","0.00"),b.replace("500.00","1.999"),b.replace("500.00","1,23.00"),b.replace("500.00","1000001.00"),b.replace("02/11/2026","31/11/2026"),b.replace("22:43","25:43"),b.replace("TrxID TEST123456","TrxID SHORT"),b.replace("500.00","-500.00")})check(ReceiptParser.parse(t,"bkash")==null);
  check(ReceiptParser.parse(b,"rocket")==null);check(ReceiptParser.parse(b,"nagad")==null);check(ReceiptParser.parse(n.replace("N/A","OTP 123456"),"nagad").minor==40000);
+ String cash="Cash In Received.\nAmount: Tk 546.00\nUddokta: 01300000000\nTxnID: TEST0005\nBalance: 3645.00\n26/11/2026 00:30";
+ ReceiptParser.Receipt cashReceipt=ReceiptParser.parse(cash,"nagad");check(cashReceipt!=null&&cashReceipt.minor==54600&&cashReceipt.trx.equals("TEST0005"));
+ check(cashReceipt.paidAt==java.time.ZonedDateTime.of(2026,11,26,0,30,0,0,java.time.ZoneId.of("Asia/Dhaka")).toInstant().toEpochMilli());
+ check(ReceiptParser.parse(cash.replace("\n","\r\n"),"nagad").minor==54600);
+ check(ReceiptParser.parse(cash.replace("Balance: ","Balance: Tk "),"nagad").minor==54600);
+ for(String bad:new String[]{cash.replace("Received","Sent"),cash.replace("546.00","0.00"),cash.replace("546.00","-546.00"),cash.replace("546.00","1.999"),cash.replace("26/11/2026","31/11/2026"),cash.replace("TEST0005","BAD"),cash.replace("01300000000","invalid"),cash+" OTP 123456"})check(ReceiptParser.parse(bad,"nagad")==null);
+ check(ReceiptParser.parse(cash,"bkash")==null);check(ReceiptParser.parse(cash,"rocket")==null);
  System.out.println("PASS: company sender matching; bKash/Nagad ignore optional Ref content; receipt formats, fee/balance separation, exact amount/date validation, OTP/outgoing rejection; Rocket disabled");
  }
 }

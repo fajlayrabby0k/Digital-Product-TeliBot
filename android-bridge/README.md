@@ -1,12 +1,12 @@
-# TeliBot Receipt Bridge v1.0 — সহজ ব্যবহার ও Admin Status
+# TeliBot Receipt Bridge v1.1 — সহজ ব্যবহার ও Admin Status
 
-[APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v1.0.apk)
+[APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v1.1.apk)
 
 Android 8+। আগের অ্যাপের ওপর **Update** করুন। Uninstall/Clear data করবেন না: একই signing certificate-এ update করলে চাবি, Device ID এবং encrypted pending queue থাকবে। Payment receipt protocol অপরিবর্তিত; নতুন Cloudflare variable লাগে না।
 
 ## v1.0: দৃশ্যমান Background relay
 
-1. ওপরের v1.0 APK আগের অ্যাপের ওপর **Update** করুন। Uninstall/Clear data করবেন না।
+1. ওপরের v1.1 APK আগের অ্যাপের ওপর **Update** করুন। Uninstall/Clear data করবেন না।
 2. **সেভ করে চালু করুন / সংযোগ পরীক্ষা** চাপুন। SMS এবং Notification permission দিন।
 3. ফোনের notification-এ **Payment SMS bridge active** এবং অ্যাপে **Foreground relay: active** দেখুন। Notification থেকে Stop করা যায়।
 4. **ফোনের Background / Battery সেটিংস** খুলে অ্যাপের Battery mode **Unrestricted** রাখুন; ফোনে আলাদা Auto-start থাকলে সেটিও চালু করুন।
@@ -79,3 +79,7 @@ The server still requires device/account/method/TrxID/exact amount/time/invoice 
 SDK platform 35 / build-tools 35.0.0, JDK 17+ (or Java runtime + Eclipse ECJ 3.40), Python/zip. Set ANDROID_SDK_ROOT, BRIDGE_KEYSTORE, BRIDGE_STORE_PASS (alias bridge), optionally ECJ_JAR; run `./build.sh`. Private signing material stays outside Git in `/workspace/.bridge-signing`; back it up privately for future updates.
 
 ParserTest.java covers screenshot receipt formats, optional refs, sender/amount/TrxID/time validation and OTP/outgoing exclusion. QueueTest.java covers failures/continuation/cancellation. ConfigTest.java covers copied/Bangla phone numbers and pending endpoint-change protection. `tests/android-queue-migration.cjs` validates queue upgrade/ordering with SQLite; mobile bridge/payment suites validate server signature checks and atomic settlement. APK build and v2/v3 signatures verified. Actual Android permissions, reboot/background execution and live SMS reception/upload require a receiving-phone check; these tests do not certify those device-specific paths.
+
+## v1.1: Nagad Cash In Received
+
+Supports the incoming company SMS format: `Cash In Received.`, `Amount: Tk …`, `Uddokta: 01…`, `TxnID: …`, `Balance: …`, and `DD/MM/YYYY HH:mm`. Balance may include the Tk prefix. Sender must still match the configured Nagad company sender. Only the incoming amount is used; agent number and balance are not uploaded. The app must be updated; changing only the bot worker cannot update the phone parser. Existing bKash and Nagad Money Received templates are retained. Rocket remains manual. Older inbox messages are not read automatically.

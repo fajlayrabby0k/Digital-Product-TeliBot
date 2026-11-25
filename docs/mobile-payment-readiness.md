@@ -29,7 +29,7 @@ Save-and-Start schedules uploads and heartbeat reporting as soon as forwarding i
 
 ## Required live check
 
-Use the v1.0 APK as an update over the installed app; do not uninstall or clear data. Confirm the app connection check, enrolled-device heartbeat, SMS permission, receiving numbers and server account settings agree. Then check a fresh real direct-order payment for each supported method. Verify the receipt appears in Payment & SMS Status, the invoice completes, exactly one document arrives, and repeating Check Payment does not charge or deliver again. A genuine supplier order also requires sufficient supplier balance/stock and a live API connection. No live check was performed from this workspace.
+Use the v1.1 APK as an update over the installed app; do not uninstall or clear data. Confirm the app connection check, enrolled-device heartbeat, SMS permission, receiving numbers and server account settings agree. Then check a fresh real direct-order payment for each supported method. Verify the receipt appears in Payment & SMS Status, the invoice completes, exactly one document arrives, and repeating Check Payment does not charge or deliver again. A genuine supplier order also requires sufficient supplier balance/stock and a live API connection. No live check was performed from this workspace.
 
 ## Foreground operation in v1.0
 
