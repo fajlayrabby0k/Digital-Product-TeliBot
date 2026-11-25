@@ -48,3 +48,9 @@ No extra secret, Android update or Cloudflare binding is required. Migration add
 The price-event trigger is recreated transactionally during schema upgrades so older follower-only trigger definitions do not survive an All Products upgrade. Existing queued events, customer preferences and follow lists are preserved. `tests/audit-upgrade-history.cjs` covers migration from that deployed legacy trigger.
 
 `node tests/notification-defaults.cjs` checks migration from the old physical following default/reversing trigger, default broadcasts including the admin, preserved explicit/muted/followed settings, Off→Follow keeps alerts muted and future migration stability.
+
+## Request Restock
+
+Out-of-stock product details show **Request Restock** for both local and verified API products. Requests are stored once per customer/product while pending, and add the product to the customer's follows. The admin receives a request with a link to local stock entry or API Center. Repeated pending requests do not send duplicate admin messages. No order, payment, supplier preorder or wallet change is created. Existing preorder entry points remain supported.
+
+Notification scope and mute settings remain unchanged. If private alerts are off, the confirmation links to Notification Settings and explains that alerts must be enabled. Stock-return delivery uses the existing durable product notification queue and marks the request notified only after Telegram acknowledges delivery. A later stock-out can be requested again. Store-wide notification switches and normal sync/batch timing still apply.

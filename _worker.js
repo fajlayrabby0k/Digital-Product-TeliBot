@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-channel-recovery-1";
+const DB_SCHEMA_VERSION = "2026-11-restock-requests-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -167,6 +167,7 @@ async function initializeDatabase(db, force) {
       `CREATE TABLE IF NOT EXISTS payment_verification_events(invoice_type TEXT NOT NULL,invoice_id INTEGER NOT NULL,user_id INTEGER NOT NULL,method TEXT NOT NULL,trx_id TEXT,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 1,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(invoice_type,invoice_id));`,
       `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE NOT NULL, username TEXT, first_name TEXT, balance_usd REAL DEFAULT 0, balance_bdt REAL DEFAULT 0, referred_by INTEGER DEFAULT 0, total_referrals INTEGER DEFAULT 0, total_spent_usd REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, price_usd REAL NOT NULL, price_bdt REAL NOT NULL, is_active INTEGER DEFAULT 1, is_external INTEGER DEFAULT 0, external_id TEXT DEFAULT '', cost_price_usd REAL DEFAULT 0, custom_price_usd REAL DEFAULT 0, api_stock INTEGER DEFAULT 0);`,
+      `CREATE TABLE IF NOT EXISTS restock_requests(user_id INTEGER NOT NULL,product_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(user_id,product_id));`,
       `CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, product_id INTEGER NOT NULL, item_data TEXT NOT NULL, is_sold INTEGER DEFAULT 0, order_id INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
       `CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, product_id INTEGER NOT NULL, quantity INTEGER DEFAULT 1, payment_method TEXT NOT NULL, trx_id TEXT DEFAULT '', amount_usd REAL NOT NULL DEFAULT 0, amount_bdt REAL NOT NULL DEFAULT 0, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
       `CREATE TABLE IF NOT EXISTS preorders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, product_id INTEGER NOT NULL, status TEXT DEFAULT 'pending', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (product_id) REFERENCES products(id));`,
@@ -2976,7 +2977,7 @@ async function sendProductDetailView(env, chatId, prodId, editMessageId = null, 
       buttons.push([{ text: "🛍️ Buy Now", callback_data: `buynow_${prod.id}_1` }]);
     } else {
       buttons.push([{text:"Stock Out",callback_data:`stock_out_${prod.id}`,style:"danger"}]);
-      if(!prod.is_external)buttons.push([{text:"⏳ Pre-Order Now",callback_data:`preorder_${prod.id}`}]);
+      buttons.push([{text:"🛍️ Request Restock",callback_data:`restock_request_${prod.id}`}]);
     }
     const following=await env.DB.prepare('SELECT 1 FROM product_follows WHERE user_id=? AND product_id=?').bind(chatId,prod.id).first();
     buttons.push([{text:following?'🔕 Unfollow Product':'🔔 Follow Stock & Price',callback_data:`product_${following?'unfollow':'follow'}_${prod.id}`}]);
@@ -4299,6 +4300,7 @@ async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
     cursor=user.user_id;
     const progress=env.DB.prepare('UPDATE product_notice_events SET cursor=?,sent=sent+?,failed=failed+?,retries=0 WHERE id=? AND lease_token=?').bind(cursor,sent?.ok?1:0,sent?.ok?0:1,event.id,token);
     const writes=[progress];
+    if(sent?.ok&&event.kind==='restock')writes.push(env.DB.prepare("UPDATE restock_requests SET status='notified' WHERE product_id=? AND user_id=? AND status='pending'").bind(product.id,user.user_id));
     if(sent?.ok&&event.kind==='restock'&&!product.is_external)writes.push(env.DB.prepare("UPDATE preorders SET status='notified' WHERE product_id=? AND user_id=? AND status='pending'").bind(product.id,user.user_id));
     await env.DB.batch(writes);
   }
@@ -4569,6 +4571,20 @@ async function showFollowedProducts(env,chatId,page=0,messageId=null){
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function handleProductFollowCallback(env,chatId,data,messageId){
+  const restock=data.match(/^restock_request_(\d+)$/);
+  if(restock){
+    const product=await env.DB.prepare('SELECT p.*,CASE WHEN p.is_external=1 THEN COALESCE(p.api_stock,0) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=p.id AND is_sold=0) END AS current_stock FROM products p WHERE p.id=? AND p.is_active=1').bind(restock[1]).first();
+    if(!product){await sendMsg(env,chatId,'This product is no longer available.',[[{text:'Back to Shop',callback_data:'shop'}]]);return true;}
+    if(Number(product.current_stock)>0){await sendProductDetailView(env,chatId,product.id,messageId);return true;}
+    const saved=await env.DB.batch([
+      env.DB.prepare("INSERT INTO restock_requests(user_id,product_id) VALUES(?,?) ON CONFLICT(user_id,product_id) DO UPDATE SET status='pending',created_at=CURRENT_TIMESTAMP WHERE restock_requests.status!='pending'").bind(chatId,product.id),
+      env.DB.prepare('INSERT OR IGNORE INTO product_follows(user_id,product_id) VALUES(?,?)').bind(chatId,product.id)
+    ]);
+    if(saved[0].meta?.changes)await sendMsg(env,env.ADMIN_ID,`🔔 <b>Restock Requested</b>\n\nProduct: <b>${escapeHtml(productDisplayName(product))}</b>\nCustomer ID: <code>${chatId}</code>\nSource: ${product.is_external?'Supplier API':'Local inventory'}\n\nNo payment or order was created.`,[[{text:product.is_external?'API Center':'Add Stock',callback_data:product.is_external?'adm_api_menu':`adm_addstock_${product.id}`}]]);
+    const user=await env.DB.prepare('SELECT product_alerts FROM users WHERE user_id=?').bind(chatId).first();
+    await editMsg(env,chatId,messageId,`✅ <b>Restock Request Saved</b>\n\n${escapeHtml(productDisplayName(product))}\n\nYou are now following this product. ${user?.product_alerts===0?'Your private alerts are OFF. Turn them on in Notification Settings to receive stock updates.':'We will notify you when stock returns, according to your Notification Settings.'}\n\nNo payment was taken and no order was placed.`,[[{text:'Back to Product',callback_data:`prod_${product.id}`}],[{text:'🔔 Notification Settings',callback_data:'product_alert_settings'}]]);return true;
+  }
+
   if(data==='product_alert_settings'){await showProductAlertPreferences(env,chatId,messageId);return true;}
   let match=data.match(/^product_alert_mode_(all|following|off)$/);
   if(match){await env.DB.prepare("UPDATE users SET product_alerts=?,product_alert_scope=CASE WHEN ?='off' THEN product_alert_scope ELSE ? END,product_alert_preference_set=1 WHERE user_id=?").bind(match[1]==='off'?0:1,match[1],match[1],chatId).run();await showProductAlertPreferences(env,chatId,messageId);return true;}

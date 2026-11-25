@@ -20,7 +20,7 @@ const ids=()=>Array.from(buttons().filter(b=>/^prod_\d+$/.test(b.callback_data))
  await cb('shopcat_0_999');assert.deepEqual(ids(),[21,22,23]);await cb('shopcat_0_9999999999999999999999');assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+1));
  await cb('prod_15');await cb('shop_return_15');assert(last().text.includes('Page 2/3'));assert.deepEqual(ids(),Array.from({length:10},(_,i)=>i+11));await cb('shopcatrefresh_0_1');assert(last().text.includes('Page 2/3'));
  sqlite.exec('UPDATE products SET is_active=0 WHERE id>10');await cb('shopcat_0_2');assert(last().text.includes('Page 1/1'));assert.equal(ids().length,10);
- await cb('prod_2');assert(buttons().some(b=>b.text==='Stock Out'&&b.style==='danger'));assert(!buttons().some(b=>b.callback_data==='buynow_2_1'));assert(buttons().some(b=>b.callback_data==='preorder_2'));await cb('stock_out_2');assert(last().text.includes('Stock Out'));assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM orders').get().n,0);
+ await cb('prod_2');assert(buttons().some(b=>b.text==='Stock Out'&&b.style==='danger'));assert(!buttons().some(b=>b.callback_data==='buynow_2_1'));assert(buttons().some(b=>b.callback_data==='restock_request_2'));await cb('stock_out_2');assert(last().text.includes('Stock Out'));assert.equal(sqlite.prepare('SELECT COUNT(*) n FROM orders').get().n,0);
  sqlite.exec('UPDATE products SET is_active=0');await cb('shop');assert.equal(ids().length,0);assert(buttons().some(b=>b.text==='Others Subscription (0)'));
  console.log('PASS: 10-item pages, active-only indexed queries, fresh Shop message, previous/next, last/empty pages, safe bounds, page-preserving refresh, product return and stock button styles');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sqlite.close());
