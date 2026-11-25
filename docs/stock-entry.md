@@ -18,6 +18,6 @@ To add several accounts in one message, place `---` on its own line between comp
 
 ## Single-line Items
 
-Each nonempty line is a separate stock item. Single-column Markdown tables are also supported. Existing pending single-line stock entry sessions keep this format.
+Each nonempty line is a separate stock item. Single-column Markdown tables are also supported. A standalone `---` line automatically selects multiline grouping, including in older single-line sessions. A trailing separator does not create an extra item. Recognizable multiline account fields without a separator are rejected in single-line mode; switch to Multiline Accounts to save them together.
 
 API products use supplier stock and cannot receive local inventory. Stock content is private; stock notifications contain no credentials.

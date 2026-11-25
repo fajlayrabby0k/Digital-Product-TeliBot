@@ -16,6 +16,20 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  assert.deepEqual(Array.from(c.api.parseStockItems(bundle,true)),[bundle]);
  assert.deepEqual(Array.from(c.api.parseStockItems(bundle+'\r\n---\r\n'+bundle,true)),[bundle,bundle]);
  assert.deepEqual(Array.from(c.api.parseStockItems('key-a\nkey-b')),['key-a','key-b']);
+ assert.deepEqual(Array.from(c.api.parseStockItems(bundle+'\n---')),[bundle]);
+ await cb('adm_stockline_'+p);await text(bundle);
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM inventory').get().n,0);
+ assert(last().text.includes('Nothing was added'));
+ await text(bundle+'\n---');
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM inventory').get().n,1);
+ assert.equal(db.prepare('SELECT item_data FROM inventory').get().item_data,bundle);
+ db.exec('DELETE FROM inventory');
+ // A pre-update single-line session must also recognize a trailing separator.
+ db.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(1,'awaiting_stock',?)").run(String(p));
+ await text(bundle+'\n---\n'+bundle+'\n---');
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM inventory').get().n,2);
+ assert(db.prepare('SELECT item_data FROM inventory').all().every(row=>row.item_data===bundle));
+ db.exec('DELETE FROM inventory');
  await cb('adm_addstock_'+p);assert(buttons().some(b=>b.callback_data==='adm_stockmulti_'+p));
  await cb('adm_stockmulti_'+p);
  assert.equal(db.prepare('SELECT state FROM admin_states WHERE user_id=1').get().state,'awaiting_stock_multiline');

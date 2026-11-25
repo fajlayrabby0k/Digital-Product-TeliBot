@@ -4085,7 +4085,10 @@ async function handleAdminCoreText(env,chatId,text,state){
   if(state.state==='awaiting_stock'||state.state==='awaiting_stock_multiline'){
     const product=await env.DB.prepare('SELECT * FROM products WHERE id=? AND is_active=1').bind(state.data).first();
     if(!product||product.is_external){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Choose an active local product to add stock.');return true;}
-    const multiline=state.state==='awaiting_stock_multiline';
+    const multiline=state.state==='awaiting_stock_multiline'||/^[ \t]*---[ \t]*$/m.test(String(text));
+    if(!multiline&&/^(?:mail(?: reader)?|(?:lovable|outlook) password)\s*[-:]/im.test(String(text))&&String(text).includes('\n')){
+      await sendMsg(env,chatId,'This looks like a multiline account. Nothing was added. Choose Multiline Accounts to keep all details together, or add a line containing --- after each complete account.',[[{text:'📄 Multiline Accounts',callback_data:`adm_stockmulti_${product.id}`}]]);return true;
+    }
     const items=parseStockItems(text,multiline);
     if(!items.length||items.length>50||items.some(x=>x.length>1500)){await sendMsg(env,chatId,multiline?'Send 1–50 complete accounts (up to 1500 characters each). Separate accounts with a line containing ---; keep each account’s details together.':'Send 1–50 stock items, one per line (up to 1500 characters each).');return true;}
     const writes=items.map(item=>env.DB.prepare('INSERT INTO inventory(product_id,item_data) SELECT ?,? WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)').bind(product.id,item,chatId,state.state,state.data));
@@ -4262,7 +4265,7 @@ async function beginProductInCategory(env,chatId,categoryId,messageId=null){
 
 
 function parseStockItems(text,multiline=false){
-  if(multiline)return String(text).replace(/\r\n?/g,'\n').split(/^[ \t]*---[ \t]*$/m).map(item=>item.trim()).filter(Boolean);
+  if(multiline||/^[ \t]*---[ \t]*$/m.test(String(text)))return String(text).replace(/\r\n?/g,'\n').split(/^[ \t]*---[ \t]*$/m).map(item=>item.trim()).filter(Boolean);
   return String(text).split(/\r?\n/).map(line=>line.trim()).filter(line=>line&&!/^[|:\-\s]+$/.test(line)&&!/^```/.test(line)).map(line=>line.startsWith('|')&&line.endsWith('|')?line.slice(1,-1).trim():line).filter(Boolean);
 }
 const noticeDrainRunning=new WeakMap();
