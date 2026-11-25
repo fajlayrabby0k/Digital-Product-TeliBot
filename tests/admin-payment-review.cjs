@@ -19,7 +19,8 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  await cb('adm_payreview_cancel_deposit_'+id);const abort=confirm();await cb('adm_paydetail_deposit_'+id);await cb(abort);assert.equal(row(id).status,'pending');
  await cb('adm_payreview_cancel_deposit_'+id);const ok=confirm();await cb(ok,99);assert.equal(row(id).status,'pending');
  await Promise.all([cb(ok),cb(ok)]);assert.equal(row(id).status,'cancelled');assert.equal(bal(),0);assert.equal(db.prepare('SELECT COUNT(*) n FROM admin_payment_reviews').get().n,1);
- await cb(ok);assert.equal(bal(),0);assert.equal(messages.filter(m=>m.document).length,0);
+ assert.equal(last().method,'editMessageText');assert(last().text.includes('list is up to date'));assert(!buttons().some(b=>b.callback_data==='adm_paydetail_deposit_'+id));assert(!buttons().some(b=>b.callback_data?.startsWith('adm_payreview_ok_')));
+ await cb(ok);assert(last().text.includes('list is up to date'));assert(!last().text.includes('expired'));assert.equal(bal(),0);assert.equal(messages.filter(m=>m.document).length,0);
  await cb('adm_paydash_cancelled_0');assert(last().text.includes('TEST123456'));
  const changed=deposit('CHANGE1234');await cb('adm_payreview_cancel_deposit_'+changed);const stale=confirm();db.prepare('UPDATE deposits SET trx_id=? WHERE id=?').run('CHANGED123',changed);await cb(stale);assert.equal(row(changed).status,'pending');
  const claimed=deposit('CLAIM12345');db.prepare("INSERT INTO binance_payment_claims(transaction_id,invoice_type,invoice_id,user_id,amount_usdt) VALUES('123456789','deposit',?,99,'5')").run(claimed);await cb('adm_payreview_cancel_deposit_'+claimed);await cb(confirm());assert.equal(row(claimed).status,'pending');
@@ -28,6 +29,15 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const order=db.prepare("INSERT INTO orders(user_id,product_id,payment_method,amount_usd,amount_bdt,trx_id) VALUES(99,?,'NAGAD',5,625,'NG123456')").run(product).lastInsertRowid;
  await cb('adm_payreview_cancel_order_'+order);await cb(confirm());assert.equal(db.prepare('SELECT status FROM orders WHERE id=?').get(order).status,'cancelled');assert.equal(bal(),0);
  assert.throws(()=>db.prepare("INSERT INTO mobile_payment_claims(method,trx_id,event_id,invoice_type,invoice_id,user_id,amount_minor,amount_cents,token) VALUES('bkash','TEST123456','event','deposit',?,99,62500,500,'token')").run(id),/already reviewed/);
+ // Old instruction-only requests never appear in pending, but old delete links still work.
+ const old=deposit('');db.prepare("UPDATE deposits SET created_at='2000-01-01 00:00:00',amount_usd=0,amount_bdt=0 WHERE id=?").run(old);
+ await c.api.recordPaymentVerification(env,'deposit',old,99,'bkash','','invalid_format');
+ for(const filter of ['pending','submitted','issues']){await cb('adm_paydash_'+filter+'_0');assert(!buttons().some(b=>b.callback_data==='adm_paydetail_deposit_'+old));}
+ await cb('adm_payreview_cancel_deposit_'+old);await cb(confirm());assert.equal(row(old).status,'cancelled');assert(last().text.includes('list is up to date'));assert.equal(bal(),0);
+ await cb('adm_payreview_cancel_deposit_'+old);assert(last().text.includes('list is up to date'));
+ const oldTrx=deposit('OLDER12345');db.prepare("UPDATE deposits SET created_at='2000-01-01 00:00:00' WHERE id=?").run(oldTrx);
+ await cb('adm_paydash_pending_0');assert(buttons().some(b=>b.callback_data==='adm_paydetail_deposit_'+oldTrx));
+ await cb('adm_payreview_cancel_deposit_'+oldTrx);await cb(confirm());assert.equal(row(oldTrx).status,'cancelled');assert(!buttons().some(b=>b.callback_data==='adm_paydetail_deposit_'+oldTrx));
  // The separate additive wallet credit remains available.
  await cb('adm_wallet_add_99');await text('5');await cb(buttons().find(b=>b.callback_data?.startsWith('adm_wallet_add_ok_')).callback_data);assert.equal(bal(),5);assert.equal(row(id).status,'cancelled');
  console.log('PASS: delete-only pending review, disabled approval/legacy buttons and stale approval tokens, admin/cancel/expiry/replay guards, automatic-claim exclusion, no credit/delivery and separate Add Balance');
