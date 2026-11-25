@@ -8,9 +8,9 @@
 - **Manage Products → product → Set Category** assigns any local or API product to a category. Create Category on this screen also assigns the new category to that product.
 - After adding a local product, **Set Category** is available on its success screen. Until assigned, the product appears directly below the category buttons in Shop.
 - **No Category** explicitly keeps a product without a category; it appears below the category buttons.
-- **Use API Category / Default** removes the admin override. API products then use their latest recorded provider category; local products appear below the category buttons.
+- **Reset to Others Subscription** removes the category assignment. Both API and local products appear in Others Subscription until the admin assigns a category.
 
-API sync imports a label from `category_name`, a string `category`, or `category.name`. A provider category ID without a readable name does not invent a label. Products without provider metadata appear directly below the category buttons. Admin overrides are stored separately and survive supplier price, stock and category updates. Provider metadata is still recorded while an override is active, so resetting to the API/default takes effect immediately. Existing products, margins, orders and balances are preserved.
+API sync ignores supplier category labels and IDs. New API products have no category assignment and appear in Others Subscription. Admin category choices survive supplier name, price and stock updates. Existing products, margins, orders and balances are preserved.
 
 All non-deleted categories are shown to customers, including empty categories with (0). There is no built-in অন্যান্য category button. Admins can select empty categories for product assignment. Admin create/assign/reset controls require the configured `ADMIN_ID`; customers cannot change categories by forging callbacks. No API key, Android update, Cron Trigger or extra Cloudflare binding is needed.
 
@@ -63,3 +63,7 @@ Create New Category is available in this picker; after entering the name, produc
 Shop now displays category buttons only. The previous Others Product section and direct unassigned product buttons are removed. Products without a selected category appear inside **Subscription**, ten per page. The default Subscription button remains visible with (0) when empty, has no automatic icon, and uses the same two-column layout and Back to Categories navigation.
 
 No product data is moved or deleted: unassigned products retain NULL shop_category_id and are grouped into Subscription at display time. No-category choices in admin assignment and product creation are labeled Subscription (Default). Deleting a category moves its products to this default group. If a saved/provider category is itself named Subscription, it is merged with the default group in the customer shop instead of creating duplicate buttons. Existing category IDs and manual overrides remain intact. Older unassigned-product pagination links open Subscription.
+
+## Admin-only categories migration
+
+Only admin-created categories and the built-in Others Subscription group are used for new imports. The migration clears old automatic category assignments on API products and clears provider category IDs. Categories with provider references and no recorded admin-management evidence are soft-deleted; their products remain. Categories marked as admin-managed, used by local products or explicit manual assignments, renamed (alias recorded), or customized with an icon are preserved. Old unreferenced categories are retained because their origin cannot be established. Creating/restoring, renaming or editing an icon marks a category as admin-managed. The migration runs once and is batched with existing database setup.

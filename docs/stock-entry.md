@@ -28,4 +28,4 @@ Open Admin Panel → Manage Products → select a local product → **Edit Name*
 
 ## Rename a category
 
-Open Admin Panel → Categories → select a category → **Edit Name**. Send a unique name on one line (1–60 characters). Product assignments and category icons stay attached to the same category ID. Others Subscription is the reserved default name. Previous category names are retained as aliases for supplier sync, so renamed API categories retain their identity. Names belonging to another category (including aliases) cannot be used. Cancel discards the rename session.
+Open Admin Panel → Categories → select a category → **Edit Name**. Send a unique name on one line (1–60 characters). Product assignments and category icons stay attached to the same category ID. Others Subscription is the reserved default name. Previous category names remain reserved as aliases. Supplier category labels are ignored; API sync never creates or assigns categories. Names belonging to another category (including aliases) cannot be used. Cancel discards the rename session.

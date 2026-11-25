@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-category-rename-1";
+const DB_SCHEMA_VERSION = "2026-11-admin-only-categories-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -203,6 +203,7 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE product_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE product_categories ADD COLUMN custom_icon TEXT DEFAULT NULL;",
       "ALTER TABLE product_categories ADD COLUMN is_deleted INTEGER DEFAULT 0;",
+      "ALTER TABLE product_categories ADD COLUMN admin_managed INTEGER NOT NULL DEFAULT 0;",
       // Historical preorder tables stored product names without a numeric product_id.
       // Keep those rows intact and unlinked; never guess a product/account for an old request.
       "ALTER TABLE preorders ADD COLUMN details TEXT DEFAULT '';",
@@ -273,6 +274,14 @@ async function initializeDatabase(db, force) {
         await db.prepare('UPDATE products SET shop_category_id=category_id WHERE category_id IN (SELECT id FROM product_categories WHERE is_deleted=0)').run();
       }
     }
+    const categoryPolicyGuard="NOT EXISTS(SELECT 1 FROM settings WHERE key='__admin_only_categories_v1')";
+    const categoryPolicyWrites=[
+      db.prepare(`UPDATE product_categories SET admin_managed=1 WHERE ${categoryPolicyGuard} AND (custom_icon IS NOT NULL OR id IN(SELECT category_id FROM category_name_aliases) OR id IN(SELECT shop_category_id FROM products WHERE COALESCE(is_external,0)=0 OR category_override=1) OR id NOT IN(SELECT provider_category_id FROM products WHERE provider_category_id IS NOT NULL))`),
+      db.prepare(`UPDATE product_categories SET is_deleted=1 WHERE ${categoryPolicyGuard} AND admin_managed=0 AND id IN(SELECT provider_category_id FROM products WHERE is_external=1 AND provider_category_id IS NOT NULL)`),
+      db.prepare(`UPDATE products SET shop_category_id=NULL WHERE ${categoryPolicyGuard} AND is_external=1 AND COALESCE(category_override,0)=0`),
+      db.prepare(`UPDATE products SET provider_category_id=NULL WHERE ${categoryPolicyGuard} AND is_external=1`),
+      db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES('__admin_only_categories_v1','1')")
+    ];
     const channelEvent=(product,kind,key,from='',condition='1=1',order='NULL',deposit='NULL')=>`INSERT OR IGNORE INTO channel_notice_events(event_key,product_id,order_id,deposit_id,kind,channel_id) SELECT ${key},${product},${order},${deposit},${kind},(SELECT value FROM settings WHERE key='force_channel_username') ${from} WHERE ${condition} AND COALESCE((SELECT value FROM settings WHERE key='force_channel_username'),'')<>'' AND COALESCE((SELECT value FROM settings WHERE key='channel_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='channel_notice_'||${kind}),'1')='1';`;
     const noticeEvent=(product,kind,key)=>`INSERT OR IGNORE INTO product_notice_events(event_key,product_id,kind,max_user_id) SELECT ${key},${product},${kind},COALESCE((SELECT MAX(user_id) FROM users),0) WHERE COALESCE((SELECT MAX(user_id) FROM users),0)>0 AND COALESCE((SELECT value FROM settings WHERE key='product_notifications_enabled'),'1')='1' AND COALESCE((SELECT value FROM settings WHERE key='product_notice_'||${kind}),'1')='1';`+channelEvent(product,kind,key);
     const stockBody=(product,stock,condition='1=1')=>{
@@ -282,6 +291,7 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      ...categoryPolicyWrites,
       ...['channel_notifications_enabled','channel_notice_new_product','channel_notice_restock','channel_notice_sold_out','channel_notice_low_stock','channel_notice_purchase','channel_notice_deposit','channel_notice_price_drop','channel_notice_price_increase'].map(key=>db.prepare("UPDATE settings SET value='1' WHERE key=? AND NOT EXISTS(SELECT 1 FROM settings WHERE key='__channel_all_events_20261117')").bind(key)),
       db.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES('__channel_all_events_20261117','1')"),
       db.prepare(`CREATE TRIGGER IF NOT EXISTS channel_notice_snapshot AFTER INSERT ON channel_notice_events WHEN NEW.product_id IS NOT NULL BEGIN UPDATE channel_notice_events SET product_name_snapshot=(SELECT name FROM products WHERE id=NEW.product_id),price_snapshot_cents=(SELECT ROUND(price_usd*100) FROM products WHERE id=NEW.product_id),stock_snapshot=(SELECT CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=NEW.product_id AND is_sold=0) END FROM products WHERE id=NEW.product_id) WHERE id=NEW.id; END`),
@@ -2670,7 +2680,6 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       ? await env.DB.prepare("SELECT * FROM products WHERE is_external = 1").all()
       : await env.DB.prepare("SELECT * FROM products WHERE is_external = 1 AND external_id = ?").bind(targetExternalId).all();
     const existingByExternalId = new Map(externalProducts.map(p => [String(p.external_id), p]));
-    const categoryNames=new Map();
     const seenIds = new Set();
     let importedCount = 0;
     for (const item of items) {
@@ -2685,11 +2694,6 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
       const baseCostPrice=(typeof rawCost==='number'||typeof rawCost==='string'&&/^\d+(?:\.\d+)?$/.test(rawCost.trim()))?Number(rawCost):NaN;
       if(!Number.isFinite(baseCostPrice)||baseCostPrice<=0)continue;
       const apiStock = providerStock(item);
-      const rawCategory=item.category_name ?? (typeof item.category==='object'?item.category?.name:item.category);
-      const normalizedCategory=typeof rawCategory==='string'?rawCategory.replace(/\s+/g,' ').trim().slice(0,60):'';
-      const categoryName=normalizedCategory==='অন্যান্য'?'':normalizedCategory;
-      let providerCategoryId=null;
-      if(categoryName){if(!categoryNames.has(categoryName.toLowerCase()))categoryNames.set(categoryName.toLowerCase(),await ensureCategory(env,categoryName));providerCategoryId=categoryNames.get(categoryName.toLowerCase());}
 
 
       const existing = existingByExternalId.get(extId);
@@ -2719,8 +2723,8 @@ async function syncExternalProducts(env, apiUrl = null, apiKey = null, isManual 
         targetId=imported[0]?.meta?.last_row_id??null;
       }
 
-      if(targetId&&(Number(existing?.provider_category_id||0)!==Number(providerCategoryId||0)||!existing&&providerCategoryId)){
-        await env.DB.prepare('UPDATE products SET provider_category_id=(SELECT id FROM product_categories WHERE id=? AND is_deleted=0),shop_category_id=CASE WHEN category_override=1 THEN shop_category_id ELSE (SELECT id FROM product_categories WHERE id=? AND is_deleted=0) END WHERE id=?').bind(providerCategoryId,providerCategoryId,targetId).run();
+      if(existing&&(existing.provider_category_id!=null||!existing.category_override&&existing.shop_category_id!=null)){
+        await env.DB.prepare('UPDATE products SET provider_category_id=NULL,shop_category_id=CASE WHEN category_override=1 THEN shop_category_id ELSE NULL END WHERE id=?').bind(existing.id).run();
       }
       importedCount++;
     }
@@ -4223,8 +4227,8 @@ async function guardCheckoutQuote(env,chatId,product,quantity,total){
 async function ensureCategory(env,name,restore=false){
   const alias=await env.DB.prepare('SELECT c.id,c.is_deleted FROM category_name_aliases a JOIN product_categories c ON c.id=a.category_id WHERE a.name=? COLLATE NOCASE').bind(name).first();
   if(alias&&!restore)return alias.is_deleted?null:alias.id;
-  await env.DB.prepare('INSERT OR IGNORE INTO product_categories(name) VALUES(?)').bind(name).run();
-  if(restore)await env.DB.prepare('UPDATE product_categories SET is_deleted=0 WHERE name=? COLLATE NOCASE').bind(name).run();
+  await env.DB.prepare('INSERT OR IGNORE INTO product_categories(name,admin_managed) VALUES(?,1)').bind(name).run();
+  if(restore)await env.DB.prepare('UPDATE product_categories SET is_deleted=0,admin_managed=1 WHERE name=? COLLATE NOCASE').bind(name).run();
   const row=await env.DB.prepare('SELECT id,is_deleted FROM product_categories WHERE name=? COLLATE NOCASE').bind(name).first();
   return row?.is_deleted?null:row?.id;
 }
@@ -4272,7 +4276,7 @@ async function showAdminCategories(env,chatId,productId=null,page=0,messageId=nu
   const {results}=await env.DB.prepare('SELECT * FROM product_categories WHERE is_deleted=0 ORDER BY name COLLATE NOCASE LIMIT 11 OFFSET ?').bind(page*10).all();
   const buttons=[[{text:'➕ Create New Category',callback_data:`adm_cat_create_${productId||0}`}],...results.slice(0,10).map(c=>[{text:c.name,callback_data:product?`adm_cat_assign_${productId}_${c.id}`:`adm_cat_view_${c.id}`}])],prefix=product?`adm_cat_product_${productId}_`:'adm_categories_',pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:prefix+(page-1)});if(results.length>10)pager.push({text:'Next',callback_data:prefix+(page+1)});if(pager.length)buttons.push(pager);
-  if(product)buttons.push([{text:'Others Subscription (Default)',callback_data:`adm_cat_assign_${productId}_0`}],[{text:'Use API Category / Default',callback_data:`adm_cat_default_${productId}`}]);
+  if(product)buttons.push([{text:'Others Subscription (Default)',callback_data:`adm_cat_assign_${productId}_0`}],[{text:'Reset to Others Subscription',callback_data:`adm_cat_default_${productId}`}]);
   buttons.push([{text:product?'Product':'Admin Panel',callback_data:product?`adm_prod_details_${productId}`:'admin_panel'}]);
   let current='';if(product){const c=product.shop_category_id?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(product.shop_category_id).first():null;current=`\nProduct: ${adminSnippet(productDisplayName(product),100)}\nCurrent: ${escapeHtml(c?.name||'Others Subscription')}\nRule: ${product.category_override?'Admin choice (kept after API sync)':'API category / default'}\n`;}
   const text=`📂 <b>${product?'Choose Product Category':'Manage Categories'}</b>\n${current}\n${product?'Choose a category below.':'Tap Create New Category above to add one. Select a category to view or delete it. Assign products from Manage Products → product → Set Category.'}`;
@@ -4295,7 +4299,7 @@ async function handleCategoryCallback(env,chatId,data,messageId){
   match=data.match(/^adm_cat_icon_(\d+)$/);if(match){await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_icon',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,'Send an emoji or a Telegram Custom Emoji ID. Send /remove to clear it. No icon is used by default.',[[{text:'Cancel',callback_data:`adm_cat_view_${match[1]}`}]]);return true;}
   match=data.match(/^adm_cat_create_(\d+)$/);if(match){await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_name',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,'Enter a category name (1–60 characters), e.g. AI Tools, VPN or Streaming.',[[{text:'Cancel',callback_data:match[1]==='0'?'adm_categories_0':`adm_cat_product_${match[1]}_0`}]]);return true;}
   match=data.match(/^adm_cat_assign_(\d+)_(\d+)$/);if(match){const category=Number(match[2]);if(category&&!await env.DB.prepare('SELECT id FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first())return true;await env.DB.prepare('UPDATE products SET shop_category_id=?,category_override=1 WHERE id=?').bind(category||null,match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
-  match=data.match(/^adm_cat_default_(\d+)$/);if(match){await env.DB.prepare('UPDATE products SET shop_category_id=(SELECT id FROM product_categories WHERE id=products.provider_category_id AND is_deleted=0),category_override=0 WHERE id=?').bind(match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
+  match=data.match(/^adm_cat_default_(\d+)$/);if(match){await env.DB.prepare('UPDATE products SET shop_category_id=NULL,provider_category_id=NULL,category_override=0 WHERE id=?').bind(match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
   match=data.match(/^adm_cat_view_(\d+)$/);if(match){await clearAdminState(env,chatId);await showCategoryAdminDetail(env,chatId,match[1],messageId);return true;}
   match=data.match(/^adm_cat_(delete|confirmdelete)_(\d+)$/);if(match){
     const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(match[2]).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return true;}
@@ -4316,7 +4320,7 @@ async function handleCategoryText(env,chatId,text,state,msg=null){
     const proof="EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)";
     const saved=await env.DB.batch([
       env.DB.prepare(`INSERT OR IGNORE INTO category_name_aliases(name,category_id) SELECT name,id FROM product_categories WHERE id=? AND is_deleted=0 AND ${proof}`).bind(cat.id,chatId,state.state,state.data),
-      env.DB.prepare(`UPDATE product_categories SET name=? WHERE id=? AND is_deleted=0 AND ${proof}`).bind(name,cat.id,chatId,state.state,state.data),
+      env.DB.prepare(`UPDATE product_categories SET name=?,admin_managed=1 WHERE id=? AND is_deleted=0 AND ${proof}`).bind(name,cat.id,chatId,state.state,state.data),
       env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data)
     ]);
     providerCatalogCache.delete(env.DB);
@@ -4326,7 +4330,7 @@ async function handleCategoryText(env,chatId,text,state,msg=null){
     const entity=msg?.entities?.find(e=>e.type==='custom_emoji');
     const icon=text==='/remove'?null:entity?.custom_emoji_id||String(text).trim();
     if(icon!==null&&!/^\d{10,22}$/.test(icon)&&!validProductIcon(icon)){await sendMsg(env,chatId,'Send one emoji, a Custom Emoji ID, or /remove.');return true;}
-    await env.DB.prepare('UPDATE product_categories SET custom_icon=? WHERE id=? AND is_deleted=0').bind(icon,state.data).run();await clearAdminState(env,chatId);await showCategoryAdminDetail(env,chatId,state.data);return true;
+    await env.DB.prepare('UPDATE product_categories SET custom_icon=?,admin_managed=1 WHERE id=? AND is_deleted=0').bind(icon,state.data).run();await clearAdminState(env,chatId);await showCategoryAdminDetail(env,chatId,state.data);return true;
   }
   if(state.state!=='awaiting_category_name')return false;
   const name=String(text).trim();if(!name||name.length>60||/[\r\n]/.test(name)||name==='অন্যান্য'){await sendMsg(env,chatId,'Enter a unique category name of 1–60 characters. This name is reserved for the default category.');return true;}
