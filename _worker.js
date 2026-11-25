@@ -3663,7 +3663,7 @@ async function showAdminUserProfile(env,chatId,userId,messageId=null){
   if(latestDeposit)text+=`\n\nLatest deposit: #${latestDeposit.id} · $${adminMoney(latestDeposit.amount_usd)}\n${adminSnippet(latestDeposit.method,20)} · ${adminSnippet(latestDeposit.status,30)}`;
   if(latestOrder)text+=`\n\nLatest order: #${latestOrder.id} · $${adminMoney(latestOrder.amount_usd)} · ${adminSnippet(latestOrder.status,30)}`;
   const cleanUsername=String(user.username||'').replace(/^@/,'');
-  const buttons=[[{text:user.is_blocked?'✅ Unblock User':'🚫 Block User',callback_data:`adm_access_${user.is_blocked?'unblock':'block'}_${user.user_id}`,style:user.is_blocked?'success':'danger'}],[{text:'📒 Balance History',callback_data:`adm_wallet_history_${user.user_id}_0`}],[{text:'Reset Balance to Zero',callback_data:`adm_wallet_zero_${user.user_id}`,style:'danger'}],[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
+  const buttons=[[{text:user.is_blocked?'✅ Unblock User':'🚫 Block User',callback_data:`adm_access_${user.is_blocked?'unblock':'block'}_${user.user_id}`,style:user.is_blocked?'success':'danger'}],[{text:'📒 Balance History',callback_data:`adm_wallet_history_${user.user_id}_0`}],[{text:'➕ Add Balance',callback_data:`adm_wallet_add_${user.user_id}`,style:'success'},{text:'Reset Balance to Zero',callback_data:`adm_wallet_zero_${user.user_id}`,style:'danger'}],[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showAdminUserHistory(env,chatId,userId,type,page=0,messageId=null){
@@ -3708,6 +3708,24 @@ async function handleAdminUserCallback(env,chatId,data,messageId){
       env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='confirm_user_access' AND data=?").bind(chatId,state.data)
     ]);
     await showAdminUserProfile(env,chatId,draft.userId,messageId);return true;
+  }
+  let credit=data.match(/^(?:adm_wallet_add|adm_credit)_(\d+)$/);
+  if(credit){
+    const user=await env.DB.prepare('SELECT * FROM users WHERE user_id=?').bind(credit[1]).first();
+    if(!user){await sendMsg(env,chatId,'Customer not found.');return true;}
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_wallet_credit',?)").bind(chatId,String(user.user_id)).run();
+    await editMsg(env,chatId,messageId,`➕ <b>Add Wallet Balance</b>\n\nCustomer: ${escapeHtml(user.first_name||user.username||'Customer')}\nUser ID: <code>${user.user_id}</code>\nCurrent balance: <b>$${adminMoney(user.balance_usd)} USD</b>\n\nEnter the USD amount to add, e.g. 5.00. This adds to the existing balance. You will review and confirm before any funds are added.`,[[{text:'Cancel',callback_data:`adm_user_view_${user.user_id}`}]]);return true;
+  }
+  credit=data.match(/^adm_wallet_add_ok_([a-f0-9]{32})$/);
+  if(credit){
+    const state=await env.DB.prepare("SELECT data FROM admin_states WHERE user_id=? AND state='confirm_wallet_credit'").bind(chatId).first();let draft;try{draft=JSON.parse(state?.data||'null');}catch{}
+    if(!draft||draft.token!==credit[1]||draft.expires<Date.now()){await sendMsg(env,chatId,'This confirmation has expired or was already used. Open the customer profile to start again.');return true;}
+    const reference='admin:'+chatId+':credit:'+draft.token;
+    const result=await env.DB.batch([
+      env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd=(ROUND(COALESCE(balance_usd,0)*100)+?)/100.0,balance_bdt=(ROUND(COALESCE(balance_bdt,0)*100)+?)/100.0 WHERE user_id=? AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='confirm_wallet_credit' AND data=?) AND NOT EXISTS(SELECT 1 FROM wallet_history WHERE user_id=? AND reason='admin_credit' AND reference=?)",'admin_credit',reference)).bind(draft.cents,draft.bdtMinor,draft.userId,chatId,state.data,draft.userId,reference),
+      env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='confirm_wallet_credit' AND data=?").bind(chatId,state.data)
+    ]);
+    await sendMsg(env,chatId,result[0].meta?.changes?`✅ Added <b>$${(draft.cents/100).toFixed(2)} USD</b> to the customer's wallet. Recorded in Balance History.`:'Nothing was added. The customer is unavailable or this confirmation was already used.',[[{text:'Customer Profile',callback_data:`adm_user_view_${draft.userId}`}],[{text:'Balance History',callback_data:`adm_wallet_history_${draft.userId}_0`}]]);return true;
   }
   let reset=data.match(/^adm_wallet_zero_(\d+)$/);
   if(reset){
@@ -4135,7 +4153,7 @@ async function showWalletHistory(env,chatId,userId,page=0,messageId=null){
   const user=await env.DB.prepare('SELECT balance_usd,balance_bdt FROM users WHERE user_id=?').bind(userId).first();if(!user){await sendMsg(env,chatId,'Customer not found.');return;}
   page=adminUserPage(page);
   const {results}=await env.DB.prepare('SELECT * FROM wallet_history WHERE user_id=? ORDER BY id DESC LIMIT 11 OFFSET ?').bind(userId,page*10).all();
-  const labels={opening:'Opening balance (history starts here)',deposit:'Deposit credited',purchase:'Wallet purchase',refund:'Order refund',redeem:'Redeem credit',referral:'Referral commission',admin_reset:'Admin reset to zero',unspecified:'Other balance change'};
+  const labels={opening:'Opening balance (history starts here)',deposit:'Deposit credited',purchase:'Wallet purchase',refund:'Order refund',redeem:'Redeem credit',referral:'Referral commission',admin_credit:'Admin balance credit',admin_reset:'Admin reset to zero',unspecified:'Other balance change'};
   const signed=value=>`${Number(value)>0?'+':''}${(Number(value)/100).toFixed(2)}`;
   let text=`📒 <b>Balance History</b> · Page ${page+1}\nUser: <code>${userId}</code>\nCurrent: <b>$${adminMoney(user.balance_usd)}</b> · ${adminMoney(user.balance_bdt)} BDT\n\n`;
   if(!results.length)text+='No entries on this page.';
@@ -4159,6 +4177,17 @@ async function handleOrderSearchText(env,chatId,text,state){
 
 async function handleAdminCoreText(env,chatId,text,state){
   if(!adminUserAccess(env,chatId))return false;
+  if(state.state==='awaiting_wallet_credit'){
+    const amount=parseMarginInput(text);
+    if(!Number.isFinite(amount)||amount<=0||amount>1000000||String(text).trim().endsWith('%')){await sendMsg(env,chatId,'Enter a positive USD amount with up to 2 decimal places (maximum $1,000,000).');return true;}
+    const [user,rateValue]=await Promise.all([env.DB.prepare('SELECT * FROM users WHERE user_id=?').bind(state.data).first(),getSetting(env,'usd_to_bdt_rate','125')]);
+    if(!user){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Customer not found.');return true;}
+    const rate=Number(rateValue);if(!Number.isFinite(rate)||rate<=0||rate>1000000){await sendMsg(env,chatId,'Set a valid USD to BDT exchange rate first.');return true;}
+    const cents=Math.round(amount*100),bdtMinor=Math.round(cents*rate),token=crypto.randomUUID().replace(/-/g,''),draft=JSON.stringify({userId:user.user_id,cents,bdtMinor,rate,token,expires:Date.now()+300000});
+    const saved=await env.DB.prepare("UPDATE admin_states SET state='confirm_wallet_credit',data=? WHERE user_id=? AND state=? AND data=?").bind(draft,chatId,state.state,state.data).run();
+    if(!saved.meta?.changes){await sendMsg(env,chatId,'This entry session was already used. Open Add Balance again.');return true;}
+    await sendMsg(env,chatId,`➕ <b>Confirm Wallet Credit</b>\n\nCustomer: ${escapeHtml(user.first_name||user.username||'Customer')}\nUser ID: <code>${user.user_id}</code>\nCurrent balance: <b>$${adminMoney(user.balance_usd)} USD</b>\nAmount to add: <b>+$${(cents/100).toFixed(2)} USD</b>\nBDT credit: ${adminMoney(bdtMinor/100)} BDT (1 USD = ${rate} BDT)\nBalance after addition: <b>$${adminMoney(Number(user.balance_usd||0)+cents/100)} USD</b>\n\nThe amount is added to the balance at confirmation time. This is an admin credit, not a verified deposit. Confirmation expires in 5 minutes.`,[[{text:`Confirm Add $${(cents/100).toFixed(2)}`,callback_data:`adm_wallet_add_ok_${token}`,style:'success'}],[{text:'Cancel',callback_data:`adm_user_view_${user.user_id}`}]]);return true;
+  }
   if(state.state==='awaiting_product_rename'){
     const name=String(text).trim();
     if(!name||[...name].length>120||/[\r\n\x00-\x1f\x7f]/.test(name)){await sendMsg(env,chatId,'Enter a product name in one line, between 1 and 120 characters.');return true;}
