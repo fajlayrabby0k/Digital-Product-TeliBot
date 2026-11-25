@@ -1,0 +1,31 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,showWalletHistory,walletChangeSql,handleOrderSearchText,sendOrders};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);
+ db.prepare('INSERT INTO users(user_id,balance_usd,balance_bdt) VALUES(99,12.34,1543)').run();
+ const balance=()=>db.prepare('SELECT balance_usd usd,balance_bdt bdt FROM users WHERE user_id=99').get();
+ const confirm=()=>buttons().find(b=>b.callback_data?.startsWith('adm_wallet_zero_ok_')).callback_data;
+ await cb('adm_user_view_99');assert(buttons().some(b=>b.callback_data==='adm_wallet_zero_99'));
+ await cb('adm_wallet_zero_99',99);assert.equal(balance().usd,12.34);
+ await cb('adm_wallet_zero_99');const cancelled=confirm();assert.equal(balance().usd,12.34);
+ await cb('adm_user_view_99');await cb(cancelled);assert.equal(balance().usd,12.34);
+ await cb('adm_wallet_zero_99');const stale=confirm();
+ db.prepare('UPDATE users SET balance_usd=15 WHERE user_id=99').run();await cb(stale);assert.equal(balance().usd,15);
+ await cb('adm_wallet_zero_99');const expired=confirm();let state=JSON.parse(db.prepare('SELECT data FROM admin_states WHERE user_id=1').get().data);state.expires=1;
+ db.prepare('UPDATE admin_states SET data=? WHERE user_id=1').run(JSON.stringify(state));await cb(expired);assert.equal(balance().usd,15);
+ await cb('adm_wallet_zero_99');const ok=confirm();await cb(ok,99);assert.equal(balance().usd,15);
+ await Promise.all([cb(ok),cb(ok)]);
+ assert.equal(balance().usd,0);assert.equal(balance().bdt,0);
+ const rows=db.prepare("SELECT * FROM wallet_history WHERE user_id=99 AND reason='admin_reset'").all();assert.equal(rows.length,1);assert.equal(rows[0].usd_delta_cents,-1500);assert.equal(rows[0].usd_before_cents,1500);assert.equal(rows[0].usd_after_cents,0);assert.equal(rows[0].bdt_delta_minor,-154300);assert(rows[0].reference.startsWith('admin:1:reset:'));
+ // A used confirmation must never remove later deposits.
+ db.prepare('UPDATE users SET balance_usd=5,balance_bdt=625 WHERE user_id=99').run();await cb(ok);assert.equal(balance().usd,5);
+ await cb('adm_wallet_history_99_0');assert(last().text.includes('Admin reset to zero'));
+ await cb('adm_wallet_zero_999999');assert(last().text.includes('Customer not found'));
+ console.log('PASS: admin-only wallet reset, confirmation/cancel/expiry, changed-balance guard, atomic single-use, ledger and replay protection');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

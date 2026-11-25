@@ -15,3 +15,9 @@ My Orders lists all paid/completed/refunded order history in pages of five with 
 ## Referral earnings
 
 Home and My Profile show **Referral Commission Earned** immediately below the main wallet amount. Refer & Earn shows the same total. Referral commission continues to credit the main spendable wallet; the displayed earnings total is not a second balance. It sums positive USD cent entries with reason `referral` in the customer's wallet history. Purchases, deposits, refunds, redeem credits and other customers' earnings are excluded, and spending does not reduce total earned. Historical commission before wallet-history tracking cannot be reconstructed from an opening balance and is not guessed.
+
+## Admin wallet reset
+
+Admin Panel → Users / Find Customer → Customer Profile → **Reset Balance to Zero** opens an explicit five-minute confirmation showing the customer ID and current USD/BDT balances. Confirming resets both stored balances to zero and records an `admin_reset` adjustment in Balance History, including before/after values and the admin ID in its reference. Referral earnings, orders and deposit histories are unchanged.
+
+Only the configured admin can open or confirm a reset. The confirmation is bound to a random token, customer and balance snapshot. A balance change requires a fresh confirmation; cancellation, expiry and replay cannot clear later deposits. The balance update and single-use confirmation removal are atomic. No user funds are reset merely by displaying the confirmation.

@@ -3613,7 +3613,7 @@ async function showAdminUserProfile(env,chatId,userId,messageId=null){
   if(latestDeposit)text+=`\n\nLatest deposit: #${latestDeposit.id} · $${adminMoney(latestDeposit.amount_usd)}\n${adminSnippet(latestDeposit.method,20)} · ${adminSnippet(latestDeposit.status,30)}`;
   if(latestOrder)text+=`\n\nLatest order: #${latestOrder.id} · $${adminMoney(latestOrder.amount_usd)} · ${adminSnippet(latestOrder.status,30)}`;
   const cleanUsername=String(user.username||'').replace(/^@/,'');
-  const buttons=[[{text:'📒 Balance History',callback_data:`adm_wallet_history_${user.user_id}_0`}],[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
+  const buttons=[[{text:'📒 Balance History',callback_data:`adm_wallet_history_${user.user_id}_0`}],[{text:'Reset Balance to Zero',callback_data:`adm_wallet_zero_${user.user_id}`,style:'danger'}],[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showAdminUserHistory(env,chatId,userId,type,page=0,messageId=null){
@@ -3635,6 +3635,25 @@ async function handleAdminUserSearch(env,chatId,text,state){
 }
 async function handleAdminUserCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
+  let reset=data.match(/^adm_wallet_zero_(\d+)$/);
+  if(reset){
+    const user=await env.DB.prepare('SELECT user_id,first_name,balance_usd,balance_bdt FROM users WHERE user_id=?').bind(reset[1]).first();
+    if(!user){await sendMsg(env,chatId,'Customer not found.');return true;}
+    const token=crypto.randomUUID().replace(/-/g,''),snapshot=JSON.stringify({userId:user.user_id,usd:Number(user.balance_usd||0),bdt:Number(user.balance_bdt||0),token,expires:Date.now()+300000});
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'confirm_wallet_zero',?)").bind(chatId,snapshot).run();
+    await editMsg(env,chatId,messageId,`⚠️ <b>Reset Wallet Balance?</b>\n\nCustomer: ${escapeHtml(user.first_name||'Customer')}\nUser ID: <code>${user.user_id}</code>\nCurrent balance: <b>$${adminMoney(user.balance_usd)} USD</b> / ${adminMoney(user.balance_bdt)} BDT\nNew balance: <b>$0.00 USD / 0.00 BDT</b>\n\nThis removes the available wallet funds. The adjustment will be recorded in Balance History. Orders, deposits and total referral earnings stay unchanged.\n\nConfirmation expires in 5 minutes.`,[[{text:'Confirm Reset to Zero',callback_data:`adm_wallet_zero_ok_${token}`,style:'danger'}],[{text:'Cancel',callback_data:`adm_user_view_${user.user_id}`}]]);return true;
+  }
+  reset=data.match(/^adm_wallet_zero_ok_([a-f0-9]{32})$/);
+  if(reset){
+    const state=await env.DB.prepare("SELECT data FROM admin_states WHERE user_id=? AND state='confirm_wallet_zero'").bind(chatId).first();
+    let snapshot;try{snapshot=JSON.parse(state?.data||'null');}catch{}
+    if(!snapshot||snapshot.token!==reset[1]||snapshot.expires<Date.now()){await sendMsg(env,chatId,'This confirmation has expired or was already used. Open the customer profile to start again.');return true;}
+    const result=await env.DB.batch([
+      env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd=0,balance_bdt=0 WHERE user_id=? AND COALESCE(balance_usd,0)=? AND COALESCE(balance_bdt,0)=? AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='confirm_wallet_zero' AND data=?)",'admin_reset','admin:'+chatId+':reset:'+snapshot.token)).bind(snapshot.userId,snapshot.usd,snapshot.bdt,chatId,state.data),
+      env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='confirm_wallet_zero' AND data=?").bind(chatId,state.data)
+    ]);
+    await sendMsg(env,chatId,result[0].meta?.changes?'✅ Wallet balance reset to $0.00 USD / 0.00 BDT. The adjustment is recorded in Balance History.':'Balance was not reset because the customer balance changed or the confirmation was already used. Review the current balance and try again.',[[{text:'Customer Profile',callback_data:`adm_user_view_${snapshot.userId}`}],[{text:'Balance History',callback_data:`adm_wallet_history_${snapshot.userId}_0`}]]);return true;
+  }
   if(data==='adm_users'){await showAdminUsersMenu(env,chatId,messageId);return true;}
   if(data==='adm_user_search'){
     await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_user_search','')").bind(chatId).run();
@@ -4042,7 +4061,7 @@ async function showWalletHistory(env,chatId,userId,page=0,messageId=null){
   const user=await env.DB.prepare('SELECT balance_usd,balance_bdt FROM users WHERE user_id=?').bind(userId).first();if(!user){await sendMsg(env,chatId,'Customer not found.');return;}
   page=adminUserPage(page);
   const {results}=await env.DB.prepare('SELECT * FROM wallet_history WHERE user_id=? ORDER BY id DESC LIMIT 11 OFFSET ?').bind(userId,page*10).all();
-  const labels={opening:'Opening balance (history starts here)',deposit:'Deposit credited',purchase:'Wallet purchase',refund:'Order refund',redeem:'Redeem credit',referral:'Referral commission',unspecified:'Other balance change'};
+  const labels={opening:'Opening balance (history starts here)',deposit:'Deposit credited',purchase:'Wallet purchase',refund:'Order refund',redeem:'Redeem credit',referral:'Referral commission',admin_reset:'Admin reset to zero',unspecified:'Other balance change'};
   const signed=value=>`${Number(value)>0?'+':''}${(Number(value)/100).toFixed(2)}`;
   let text=`📒 <b>Balance History</b> · Page ${page+1}\nUser: <code>${userId}</code>\nCurrent: <b>$${adminMoney(user.balance_usd)}</b> · ${adminMoney(user.balance_bdt)} BDT\n\n`;
   if(!results.length)text+='No entries on this page.';
