@@ -6,7 +6,7 @@ Open a record to see the customer, method, USD/BDT amount, transaction ID, curre
 
 ## Delete pending only
 
-Pending payment details show **Delete Pending**. There is no manual payment approval. Deletion requires a five-minute single-use confirmation bound to the invoice, submitted ID, amount and admin. It changes the pending invoice to cancelled and closes its SMS invoice, removing it from Pending. The audit record remains; no wallet credit, refund or product delivery is made. Consumed confirmations, changed details and payments reserved by automatic claims cannot be deleted. Returning to details cancels the confirmation.
+Each pending payment row has a red payment-details button and a **Delete** button beside it. Paid/completed/cancelled rows have no list delete button. Pending payment details also show **Delete Pending**. There is no manual payment approval. Deletion requires a five-minute single-use confirmation bound to the invoice, submitted ID, amount and admin. It changes the pending invoice to cancelled and closes its SMS invoice, removing it from Pending. The audit record remains; no wallet credit, refund or product delivery is made. Consumed confirmations, changed details and payments reserved by automatic claims cannot be deleted. Returning to details cancels the confirmation.
 
 After independently checking the received payment, delete the pending request first, then open **View Customer / Add Balance** and credit the desired amount. The wallet addition is a separate admin adjustment. It does not automatically complete or fulfill the deleted order. This prevents the original pending invoice from automatically settling after the manual wallet adjustment.
 

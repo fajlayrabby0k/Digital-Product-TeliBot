@@ -17,8 +17,10 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  await c.api.recordPaymentVerification(env,'deposit',b,99,'BEP20','0x'+'a'.repeat(64),'confirmations');
  await cb('admin_panel');assert(buttons().some(b=>b.callback_data==='adm_paydash_pending_0'));
  await cb('adm_paydash_pending_0');assert(last().text.includes('Pending: <b>3</b>'));assert(last().text.includes('Completed: <b>1</b>'));assert(last().text.includes('delivery pending: <b>1</b>'));
+ const pendingRows=last().reply_markup.inline_keyboard.filter(row=>row[0]?.callback_data?.startsWith('adm_paydetail_'));assert.equal(pendingRows.length,3);for(const row of pendingRows){assert.equal(row.length,2);assert.equal(row[0].style,'danger');assert.equal(row[1].text,'🗑️ Delete');assert.equal(row[1].callback_data,row[0].callback_data.replace('adm_paydetail_','adm_payreview_cancel_'));}
  await cb('adm_paydash_issues_0');assert.equal(buttons().filter(b=>b.callback_data?.startsWith('adm_paydetail_')).length,2);
  await cb('adm_paydetail_deposit_'+d);assert(last().text.includes('Binance API rejected'));assert(last().text.includes('Attempts recorded: 2'));assert(last().text.includes('RECEIPT88'));assert(buttons().some(b=>b.callback_data==='adm_user_view_99'));
+ await cb('adm_paydash_delivery_0');assert(!buttons().some(b=>b.callback_data?.startsWith('adm_payreview_cancel_')));
  await cb('adm_paydetail_order_1');assert(last().text.includes('product delivery is pending'));assert(!last().text.includes('RECEIPT88'));
  await cb('adm_paydetail_deposit_'+b);assert(last().text.includes('12 blockchain confirmations'));
  await cb('adm_paydetail_deposit_'+mobile);assert(last().text.includes('No verification attempt recorded'));
