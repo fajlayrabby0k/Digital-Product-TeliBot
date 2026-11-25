@@ -1,0 +1,1 @@
+package android.content;public class SharedPreferences {public boolean enabled=true;public boolean getBoolean(String k,boolean d){return enabled;}public String getString(String k,String d){return k.equals("url")?"https://test.invalid/api/mobile-receipt":"test-secret";}}

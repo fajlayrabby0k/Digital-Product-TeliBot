@@ -1,8 +1,18 @@
-# TeliBot Receipt Bridge v0.9 — সহজ ব্যবহার ও Admin Status
+# TeliBot Receipt Bridge v1.0 — সহজ ব্যবহার ও Admin Status
 
-[APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v0.9.apk)
+[APK ডাউনলোড করুন](https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v1.0.apk)
 
 Android 8+। আগের অ্যাপের ওপর **Update** করুন। Uninstall/Clear data করবেন না: একই signing certificate-এ update করলে চাবি, Device ID এবং encrypted pending queue থাকবে। Payment receipt protocol অপরিবর্তিত; নতুন Cloudflare variable লাগে না।
+
+## v1.0: দৃশ্যমান Background relay
+
+1. ওপরের v1.0 APK আগের অ্যাপের ওপর **Update** করুন। Uninstall/Clear data করবেন না।
+2. **সেভ করে চালু করুন / সংযোগ পরীক্ষা** চাপুন। SMS এবং Notification permission দিন।
+3. ফোনের notification-এ **Payment SMS bridge active** এবং অ্যাপে **Foreground relay: active** দেখুন। Notification থেকে Stop করা যায়।
+4. **ফোনের Background / Battery সেটিংস** খুলে অ্যাপের Battery mode **Unrestricted** রাখুন; ফোনে আলাদা Auto-start থাকলে সেটিও চালু করুন।
+5. অ্যাপ নতুন bKash/Nagad payment SMS encrypted queue-তে রাখে, foreground relay দ্রুত পাঠানোর চেষ্টা করে এবং network ফিরে এলে retry করে। Scheduled job ব্যাকআপ হিসেবেও আছে। মূল স্ক্রিনে শেষ company SMS এবং upload-এর ফল দেখা যায়।
+
+Foreground-service/notification/wake-lock permission যোগ হয়েছে; **READ_SMS, SEND_SMS বা contacts permission যোগ হয়নি**। এটি পুরোনো inbox পড়ে না, OTP বা raw SMS সার্ভারে পাঠায় না। Wake-lock কেবল upload-এর সময় সীমিত সময়ের জন্য নেওয়া হয়। রকেট এখনো manual। Android Force Stop, Doze/OEM বা internet restriction এড়ানোর নিশ্চয়তা নেই; restart-এর পর notification না দেখলে অ্যাপ খুলে Start দিন। v1.0-এর background আচরণ বাস্তব ফোনে পরীক্ষা করা প্রয়োজন।
 
 ## v0.9: সংযোগ ব্যর্থ হলেও স্বয়ংক্রিয় retry
 

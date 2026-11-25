@@ -1,0 +1,1 @@
+package org.json;public final class JSONObject {public final boolean accepted;public final String id;public JSONObject(boolean a,String i){accepted=a;id=i;}public boolean optBoolean(String k){return accepted;}public String optString(String k){return id;}}

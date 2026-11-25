@@ -14,7 +14,7 @@ public final class SmsReceiver extends BroadcastReceiver {
    String account=p.getString(method+"Account","");if(!account.matches("01[3-9][0-9]{8}")){capture(c,method,"invalid_account",method+": টাকা পাওয়ার নম্বর সেট করা নেই বা ভুল।");return;}
    JSONObject body=new JSONObject();String id=UUID.randomUUID().toString();body.put("version",1);body.put("eventId",id);body.put("deviceId",p.getString("device",""));body.put("method",method);body.put("account",account);body.put("trxId",r.trx);body.put("amountMinor",r.minor);body.put("receivedAt",System.currentTimeMillis());body.put("paidAt",r.paidAt);
    boolean saved;try(Store db=new Store(c)){saved=db.add(id,body.toString());}
-   capture(c,method,saved?"queued":"queue_full",saved?method+": পেমেন্ট শনাক্ত হয়েছে এবং encrypted queue-তে রাখা হয়েছে।":method+": Queue পূর্ণ; নতুন রেকর্ড রাখা যায়নি।");UploadJob.schedule(c);
+   capture(c,method,saved?"queued":"queue_full",saved?method+": পেমেন্ট শনাক্ত হয়েছে এবং encrypted queue-তে রাখা হয়েছে।":method+": Queue পূর্ণ; নতুন রেকর্ড রাখা যায়নি।");UploadJob.ensureScheduled(c);BridgeService.receiptReady(c);
   }catch(Exception ignored){capture(c,"none","capture_failed","পেমেন্ট রেকর্ড ফোনে সংরক্ষণ/প্রসেস করা যায়নি। অ্যাপ খুলে রিপোর্ট দেখুন।");}
  }
  private static void capture(Context c,String method,String state,String message){Store.prefs(c).edit().putString("capture_state",state).putString("capture_method",method).apply();Store.note(c,"capture",message);HeartbeatJob.sendOnce(c);}
