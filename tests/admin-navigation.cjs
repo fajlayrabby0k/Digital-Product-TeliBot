@@ -20,7 +20,7 @@ const text=(value,id=1)=>api.handleUpdate({message:{chat:{id},from:{first_name:'
   assert.equal(sqlite.prepare('SELECT trx_id FROM orders WHERE id=1').get().trx_id,'','navigation replies must not be processed as payment IDs');
  }
  sqlite.prepare("INSERT INTO admin_states(user_id,state,data) VALUES(1,'awaiting_deposit_amount','1')").run();
- messages.length=0;await text('10');assert(messages.some(m=>m.text?.includes('Deposit unavailable or already processed')));assert.equal(sqlite.prepare('SELECT * FROM admin_states WHERE user_id=1').get(),undefined);assert.equal(sqlite.prepare('SELECT balance_usd FROM users WHERE user_id=1').get().balance_usd,0);
+ messages.length=0;await text('10');assert(messages.some(m=>m.text?.includes('Manual deposit approval is disabled')));assert.equal(sqlite.prepare('SELECT * FROM admin_states WHERE user_id=1').get(),undefined);assert.equal(sqlite.prepare('SELECT balance_usd FROM users WHERE user_id=1').get().balance_usd,0);
  messages.length=0;await text('/start',99);assert(messages.some(m=>m.text?.includes('Welcome to SMART SUBS STORE')));assert(!messages.some(m=>m.text?.includes('Administration Control Center')));
  console.log('PASS: admin /start, /admin, /cancel and addressed commands recover from legacy/admin/quantity states; navigation replies do not submit payments; users retain normal startup');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>sqlite.close());

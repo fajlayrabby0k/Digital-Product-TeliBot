@@ -1,30 +1,17 @@
 # Admin payment dashboard
 
-Open **Admin Panel → Payment Dashboard** after deployment. This is an admin-only view of direct order payments and wallet deposits. Wallet-funded orders and redeem credits are excluded because they are not incoming payment instructions.
+Open **Admin Panel → Payment Dashboard → IDs Submitted** to see pending order/deposit payments with their submitted TrxIDs, including failed automatic verification. Wallet-funded orders and redeem credits are excluded. Lists contain ten records per page; filters include Pending, IDs Submitted, Verification Issues, Completed, Paid / Delivery Pending and Cancelled. Times use Asia/Dhaka.
 
-- **Pending:** unpaid/unresolved invoices, including instructions where the customer has not yet sent a transaction ID.
-- **IDs Submitted:** pending invoices with an ID in the invoice, receiving-phone invoice or new verification log.
-- **Verification Issues:** pending invoices with a saved non-success verification result. Waiting for SMS/confirmations is an issue requiring attention, not proof of a failed transfer.
-- **Completed:** completed invoices.
-- **Cancelled:** deleted/cancelled pending requests retained for audit.
-- **Paid / Delivery Pending:** order records with payment recorded but delivery not completed.
+Open a record to see the customer, method, USD/BDT amount, transaction ID, current status, verification reason and SMS evidence. **View Customer** opens the user's profile and its separate **Add Balance** feature. Refresh reloads information without verification, credit or delivery.
 
-Lists have ten entries per page. Open a record to see its method, USD/BDT amount, customer, invoice status, submitted transaction ID, last verification reason, recorded attempt count and last attempt time in Asia/Dhaka. View Customer opens the existing customer management profile. Refresh only reloads information; it does not retry payment verification, debit a wallet, approve an invoice or deliver a product.
+## Delete pending only
 
-The new `payment_verification_events` table retains the latest submission result per invoice, separately keyed by order/deposit type and ID. Binance Pay and BEP20 submissions record success/rejection codes; mobile-wallet submissions record SMS verification outcomes, invalid ID formats and expired submission windows. Codes are displayed using controlled descriptions; raw provider error bodies, credentials and SMS bodies are not stored. Logging errors do not prevent the existing payment flow.
+Pending payment details show **Delete Pending**. There is no manual payment approval. Deletion requires a five-minute single-use confirmation bound to the invoice, submitted ID, amount and admin. It changes the pending invoice to cancelled and closes its SMS invoice, removing it from Pending. The audit record remains; no wallet credit, refund or product delivery is made. Consumed confirmations, changed details and payments reserved by automatic claims cannot be deleted. Returning to details cancels the confirmation.
 
-Existing payment records are preserved. Past attempts that predate this feature have no invented failure reason. The invoice's current completed/delivery status takes precedence over an old failure result, including payments settled later by receiving-phone SMS. Unsubmitted instructions are not counted as money received. Attempt counts represent recorded submissions, not every background operation or historical retry.
+After independently checking the received payment, delete the pending request first, then open **View Customer / Add Balance** and credit the desired amount. The wallet addition is a separate admin adjustment. It does not automatically complete or fulfill the deleted order. This prevents the original pending invoice from automatically settling after the manual wallet adjustment.
 
-No new API credentials, Android setup, Cloudflare bindings or Cron Trigger are required. After the GitHub deployment succeeds, normal bot startup creates the table.
+Old Approve Payment, Approve Order and Approve Deposit callbacks, stale approval confirmations and legacy deposit-amount input states cannot approve or credit payments. Old rejection callbacks open the new delete confirmation. Historical approval records and claim guards are retained to protect transactions processed before manual approval was removed. Automatic payment verification remains enabled according to existing method settings.
 
-Run `node tests/payment-dashboard.cjs` for SQLite-backed checks of filters, pagination, invoice-type separation, current-status precedence, mobile/legacy IDs, admin authorization and unchanged wallet balances. Existing Binance, BEP20 and mobile payment tests exercise the integrated payment flows.
+`payment_verification_events` retains submitted IDs and results; `admin_payment_reviews` retains cancellation audit details. Missing SMS is not proof of failed payment. Older attempts without records are not reconstructed. No new API credentials, APK, Cloudflare bindings or Cron configuration are required.
 
-## Review pending payments
-
-The pending list shows each submitted TrxID even when automatic verification failed. Open a payment for **Approve Payment** and **Delete Pending**. Each action has a five-minute single-use confirmation showing the customer, method, amount and submitted ID. Returning to details cancels the confirmation. Approval requires an existing positive invoice amount and submitted alphanumeric transaction ID; the admin must check actual receipt of funds. It is a manual override, not proof of automatic verification.
-
-Approval credits the exact saved deposit amount once, or marks an order paid and starts its normal local/API document-delivery workflow. Stock/provider problems remain visible in Delivery Management. No second wallet debit is made for a direct-payment order. Deleting sets the unpaid invoice to cancelled and closes the SMS invoice. It removes the request from Pending and does not erase audit records, refund a transfer or permit cancellation of payments already claimed by automatic verification.
-
-`admin_payment_reviews` records who approved/cancelled, method, amount, submitted ID and time. Database uniqueness, atomic state transitions and automatic-claim insert guards prevent transaction reuse and duplicate manual/automatic credits. Changed IDs/amounts, consumed confirmations and existing claims require review rather than approval. A failed credit rolls back the review and remains retryable. Approved transaction IDs are reserved case-insensitively by method across deposits/orders. Cancelled IDs are not reserved against a separate invoice.
-
-Run `node tests/admin-payment-review.cjs` for approval/cancellation, exact-once credit/document delivery, admin authorization, expired/cancelled/stale confirmations, transaction reuse, automatic-claim exclusion and credit rollback tests. The Android parser-to-worker payment integration also remains passing.
+Tests: `node tests/admin-payment-review.cjs` checks delete-only UI, disabled legacy/stale approvals, authorization, cancel/expiry/replay, automatic-claim exclusion, unchanged wallet/delivery and separate Add Balance. Existing mobile, Binance and BEP20 tests cover automatic verification.
