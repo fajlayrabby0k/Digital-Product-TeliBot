@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-restock-requests-1";
+const DB_SCHEMA_VERSION = "2026-11-category-rename-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -158,6 +158,7 @@ async function initializeDatabase(db, force) {
       `CREATE TABLE IF NOT EXISTS product_notice_state(product_id INTEGER PRIMARY KEY,stock INTEGER NOT NULL,revision INTEGER NOT NULL DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS product_notice_events(id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT UNIQUE NOT NULL,product_id INTEGER NOT NULL,kind TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,retries INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS product_categories(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL COLLATE NOCASE UNIQUE);`,
+      `CREATE TABLE IF NOT EXISTS category_name_aliases(name TEXT PRIMARY KEY COLLATE NOCASE,category_id INTEGER NOT NULL);`,
       `CREATE TABLE IF NOT EXISTS checkout_quotes(user_id INTEGER NOT NULL,product_id INTEGER NOT NULL,quantity INTEGER NOT NULL,total_usd REAL NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(user_id,product_id,quantity));`,
       `CREATE TABLE IF NOT EXISTS broadcast_jobs(id TEXT PRIMARY KEY,body TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'ready',sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS manual_deposit_credits(deposit_id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_usd REAL NOT NULL,amount_bdt REAL NOT NULL,token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
@@ -4195,6 +4196,8 @@ async function guardCheckoutQuote(env,chatId,product,quantity,total){
 
 
 async function ensureCategory(env,name,restore=false){
+  const alias=await env.DB.prepare('SELECT c.id,c.is_deleted FROM category_name_aliases a JOIN product_categories c ON c.id=a.category_id WHERE a.name=? COLLATE NOCASE').bind(name).first();
+  if(alias&&!restore)return alias.is_deleted?null:alias.id;
   await env.DB.prepare('INSERT OR IGNORE INTO product_categories(name) VALUES(?)').bind(name).run();
   if(restore)await env.DB.prepare('UPDATE product_categories SET is_deleted=0 WHERE name=? COLLATE NOCASE').bind(name).run();
   const row=await env.DB.prepare('SELECT id,is_deleted FROM product_categories WHERE name=? COLLATE NOCASE').bind(name).first();
@@ -4247,11 +4250,17 @@ async function handleCategoryCallback(env,chatId,data,messageId){
   orderStage(env,'category.manage');
   match=data.match(/^adm_categories_(\d+)$/);if(match){await showAdminCategories(env,chatId,null,match[1],messageId);return true;}
   match=data.match(/^adm_cat_product_(\d+)_(\d+)$/);if(match){await showAdminCategories(env,chatId,match[1],match[2],messageId);return true;}
+  match=data.match(/^adm_cat_rename_(\d+)$/);if(match){
+    const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(match[1]).first();
+    if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return true;}
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_rename',?)").bind(chatId,String(cat.id)).run();
+    await editMsg(env,chatId,messageId,`✏️ <b>Edit Category Name</b>\n\nCurrent name: <b>${escapeHtml(cat.name)}</b>\n\nSend a unique name in one line (1–60 characters). Products will stay in this category.`,[[{text:'Cancel',callback_data:`adm_cat_view_${cat.id}`}]]);return true;
+  }
   match=data.match(/^adm_cat_icon_(\d+)$/);if(match){await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_icon',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,'Send an emoji or a Telegram Custom Emoji ID. Send /remove to clear it. No icon is used by default.',[[{text:'Cancel',callback_data:`adm_cat_view_${match[1]}`}]]);return true;}
   match=data.match(/^adm_cat_create_(\d+)$/);if(match){await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_category_name',?)").bind(chatId,match[1]).run();await editMsg(env,chatId,messageId,'Enter a category name (1–60 characters), e.g. AI Tools, VPN or Streaming.',[[{text:'Cancel',callback_data:match[1]==='0'?'adm_categories_0':`adm_cat_product_${match[1]}_0`}]]);return true;}
   match=data.match(/^adm_cat_assign_(\d+)_(\d+)$/);if(match){const category=Number(match[2]);if(category&&!await env.DB.prepare('SELECT id FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first())return true;await env.DB.prepare('UPDATE products SET shop_category_id=?,category_override=1 WHERE id=?').bind(category||null,match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
   match=data.match(/^adm_cat_default_(\d+)$/);if(match){await env.DB.prepare('UPDATE products SET shop_category_id=(SELECT id FROM product_categories WHERE id=products.provider_category_id AND is_deleted=0),category_override=0 WHERE id=?').bind(match[1]).run();await showAdminCategories(env,chatId,match[1],0,messageId);return true;}
-  match=data.match(/^adm_cat_view_(\d+)$/);if(match){await showCategoryAdminDetail(env,chatId,match[1],messageId);return true;}
+  match=data.match(/^adm_cat_view_(\d+)$/);if(match){await clearAdminState(env,chatId);await showCategoryAdminDetail(env,chatId,match[1],messageId);return true;}
   match=data.match(/^adm_cat_(delete|confirmdelete)_(\d+)$/);if(match){
     const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(match[2]).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return true;}
     if(match[1]==='delete'){await editMsg(env,chatId,messageId,`Delete <b>${escapeHtml(cat.name)}</b>?\n\nProducts will remain and move to Others Subscription. API sync will not recreate this category unless you create it again.`,[[{text:'Delete Category',callback_data:`adm_cat_confirmdelete_${cat.id}`}],[{text:'Cancel',callback_data:`adm_cat_view_${cat.id}`}]]);return true;}
@@ -4261,6 +4270,22 @@ async function handleCategoryCallback(env,chatId,data,messageId){
 }
 async function handleCategoryText(env,chatId,text,state,msg=null){
   if(!adminUserAccess(env,chatId))return false;
+  if(state.state==='awaiting_category_rename'){
+    const name=String(text).trim();
+    if(!name||[...name].length>60||/[\r\n\x00-\x1f\x7f]/.test(name)||['subscription','others subscription','অন্যান্য'].includes(name.toLowerCase())){await sendMsg(env,chatId,'Enter a unique category name in one line (1–60 characters). Others Subscription is reserved.');return true;}
+    const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(state.data).first();
+    if(!cat){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Category unavailable.');return true;}
+    const conflict=await env.DB.prepare('SELECT id FROM product_categories WHERE name=? COLLATE NOCASE AND id!=? UNION ALL SELECT category_id AS id FROM category_name_aliases WHERE name=? COLLATE NOCASE AND category_id!=?').bind(name,cat.id,name,cat.id).first();
+    if(conflict){await sendMsg(env,chatId,'This category name is already in use. Choose another name.');return true;}
+    const proof="EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)";
+    const saved=await env.DB.batch([
+      env.DB.prepare(`INSERT OR IGNORE INTO category_name_aliases(name,category_id) SELECT name,id FROM product_categories WHERE id=? AND is_deleted=0 AND ${proof}`).bind(cat.id,chatId,state.state,state.data),
+      env.DB.prepare(`UPDATE product_categories SET name=? WHERE id=? AND is_deleted=0 AND ${proof}`).bind(name,cat.id,chatId,state.state,state.data),
+      env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data)
+    ]);
+    providerCatalogCache.delete(env.DB);
+    await sendMsg(env,chatId,saved[1].meta?.changes?`✅ Category name updated to <b>${escapeHtml(name)}</b>.`:'This edit session was already used.',[[{text:'Category',callback_data:`adm_cat_view_${cat.id}`}],[{text:'Categories',callback_data:'adm_categories_0'}]]);return true;
+  }
   if(state.state==='awaiting_category_icon'){
     const entity=msg?.entities?.find(e=>e.type==='custom_emoji');
     const icon=text==='/remove'?null:entity?.custom_emoji_id||String(text).trim();
@@ -4280,7 +4305,7 @@ async function showCategoryAdminDetail(env,chatId,id,messageId){
   if(!adminUserAccess(env,chatId))return;
   const cat=await env.DB.prepare('SELECT * FROM product_categories WHERE id=? AND is_deleted=0').bind(id).first();if(!cat){await showAdminCategories(env,chatId,null,0,messageId);return;}
   const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM products WHERE shop_category_id=? AND is_active=1').bind(id).first();
-  await editMsg(env,chatId,messageId,`<b>${escapeHtml(cat.name)}</b>\n\nActive products: ${count.n}\n\nAssign products from Manage Products → product → Set Category. Deleting a category keeps its products.`,[[{text:'View Products',callback_data:`shopcat_${cat.id}_0`}],[{text:'🎨 Set Category Icon',callback_data:`adm_cat_icon_${cat.id}`}],[{text:'🗑️ Delete Category',callback_data:`adm_cat_delete_${cat.id}`}],[{text:'⬅️ Back to Categories',callback_data:'adm_categories_0'}]]);
+  await editMsg(env,chatId,messageId,`<b>${escapeHtml(cat.name)}</b>\n\nActive products: ${count.n}\n\nAssign products from Manage Products → product → Set Category. Deleting a category keeps its products.`,[[{text:'✏️ Edit Name',callback_data:`adm_cat_rename_${cat.id}`}],[{text:'View Products',callback_data:`shopcat_${cat.id}_0`}],[{text:'🎨 Set Category Icon',callback_data:`adm_cat_icon_${cat.id}`}],[{text:'🗑️ Delete Category',callback_data:`adm_cat_delete_${cat.id}`}],[{text:'⬅️ Back to Categories',callback_data:'adm_categories_0'}]]);
 }
 
 

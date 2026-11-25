@@ -1,0 +1,30 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,drainProductNotices,parseStockItems,executeWalletPurchase,handleCategoryText,ensureCategory};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);db.prepare('INSERT INTO users(user_id) VALUES(1)').run();
+ const id=await c.api.ensureCategory(env,'Original');const other=await c.api.ensureCategory(env,'Existing');
+ const p=db.prepare("INSERT INTO products(name,price_usd,price_bdt,shop_category_id,provider_category_id) VALUES('Sample',5,625,?,?)").run(id,id).lastInsertRowid;
+ const name=()=>db.prepare('SELECT name FROM product_categories WHERE id=?').get(id).name;
+ await cb('adm_cat_view_'+id);assert(buttons().some(b=>b.callback_data==='adm_cat_rename_'+id));
+ await cb('adm_cat_rename_'+id,99);assert(!db.prepare('SELECT * FROM admin_states WHERE user_id=99').get());
+ await cb('adm_cat_rename_'+id);
+ for(const bad of ['Existing','Others Subscription','subscription','bad\nname','x'.repeat(61)]){await text(bad);assert.equal(name(),'Original');}
+ const state=db.prepare('SELECT * FROM admin_states WHERE user_id=1').get();
+ await text('New <Category>');assert.equal(name(),'New <Category>');assert(last().text.includes('New &lt;Category&gt;'));
+ assert.equal(db.prepare('SELECT shop_category_id FROM products WHERE id=?').get(p).shop_category_id,id);
+ assert.equal(await c.api.ensureCategory(env,'Original'),id,'provider original name resolves to renamed category');
+ assert.equal(await c.api.ensureCategory(env,'New <Category>'),id);
+ await c.api.handleCategoryText(env,1,'Replay',state);assert.equal(name(),'New <Category>');
+ await cb('adm_cat_rename_'+id);await cb('adm_cat_view_'+id);await text('Cancelled');assert.equal(name(),'New <Category>');
+ await cb('adm_cat_rename_'+id);await text('Final Name');assert.equal(await c.api.ensureCategory(env,'Original'),id);assert.equal(await c.api.ensureCategory(env,'New <Category>'),id);
+ await cb('adm_cat_rename_'+other);await text('Original');assert.equal(db.prepare('SELECT name FROM product_categories WHERE id=?').get(other).name,'Existing');
+ db.prepare('UPDATE product_categories SET is_deleted=1 WHERE id=?').run(id);assert.equal(await c.api.ensureCategory(env,'Original'),null);
+ await cb('adm_cat_rename_'+id);assert.equal(name(),'Final Name');
+ console.log('PASS: category renaming, uniqueness/reserved names, authorization/cancel/replay, stable assignments and supplier-name aliases');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
