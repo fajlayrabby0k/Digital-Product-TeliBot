@@ -2163,7 +2163,16 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       return;
     }
 
+    const renameProduct=data.match(/^adm_rename_product_(\d+)$/);
+    if(renameProduct){
+      const product=await env.DB.prepare('SELECT * FROM products WHERE id=? AND is_active=1').bind(renameProduct[1]).first();
+      if(!product||product.is_external){await sendMsg(env,chatId,'Choose an active local product to edit its name.');return;}
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_product_rename',?)").bind(chatId,String(product.id)).run();
+      await editMsg(env,chatId,messageId,`✏️ <b>Edit Product Name</b>\n\nCurrent name: <b>${escapeHtml(product.name)}</b>\n\nSend the new name in one line (1–120 characters). This changes the catalog name; existing orders keep their saved product name.`,[[{text:'Cancel',callback_data:`adm_prod_details_${product.id}`}]]);return;
+    }
+
     if (data.startsWith("adm_prod_details_")) {
+      await clearAdminState(env,chatId);
       const prodId = data.replace("adm_prod_details_", "");
       let prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
       if (!prod) return;
@@ -2176,6 +2185,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
         `• Live Stock: <b>${liveStock} items</b>\n\n📝 <b>Description:</b>\n${renderProductDescription(prod.description)}`;
 
       const buttons = [
+        prod.is_external?[]:[{text:"✏️ Edit Name",callback_data:`adm_rename_product_${prod.id}`}],
         [{ text: "💰 Set Custom Price", callback_data: `adm_setprice_${prod.id}` }],
         prod.is_external?[]:[{text:"💵 Set Purchase Cost",callback_data:`adm_local_cost_${prod.id}`}],
         [{ text: "🎨 Set Product Icon", callback_data: `adm_icon_${prod.id}` }],
@@ -4085,6 +4095,15 @@ async function handleOrderSearchText(env,chatId,text,state){
 
 async function handleAdminCoreText(env,chatId,text,state){
   if(!adminUserAccess(env,chatId))return false;
+  if(state.state==='awaiting_product_rename'){
+    const name=String(text).trim();
+    if(!name||[...name].length>120||/[\r\n\x00-\x1f\x7f]/.test(name)){await sendMsg(env,chatId,'Enter a product name in one line, between 1 and 120 characters.');return true;}
+    const saved=await env.DB.batch([
+      env.DB.prepare("UPDATE products SET name=? WHERE id=? AND is_active=1 AND COALESCE(is_external,0)=0 AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)").bind(name,state.data,chatId,state.state,state.data),
+      env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data)
+    ]);
+    await sendMsg(env,chatId,saved[0].meta?.changes?`✅ Product name updated to <b>${escapeHtml(name)}</b>.`:'Product unavailable or this edit session was already used.',[[{text:'Product',callback_data:`adm_prod_details_${state.data}`}],[{text:'Manage Products',callback_data:'adm_manage_products'}]]);return true;
+  }
   const settingMap={awaiting_rate:'usd_to_bdt_rate',awaiting_ref_comm:'referral_commission_percent',awaiting_support_contact:'support_admin',awaiting_force_channel:'force_channel_username',awaiting_force_group:'force_group_username',awaiting_api_url:'external_api_url',awaiting_api_key:'external_api_key'};
   if(state.state==='awaiting_broadcast'){
     const body=String(text).trim();if(!body||body.length>500){await sendMsg(env,chatId,'Enter a broadcast text of 1–500 characters.');return true;}

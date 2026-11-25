@@ -1,0 +1,28 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,drainProductNotices,parseStockItems,executeWalletPurchase,handleAdminCoreText};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);
+ db.prepare('INSERT INTO users(user_id) VALUES(1)').run();
+ const p=db.prepare("INSERT INTO products(name,description,price_usd,price_bdt) VALUES('Old Name','Saved description',5,625)").run().lastInsertRowid;
+ const q=db.prepare("INSERT INTO products(name,price_usd,price_bdt,is_external) VALUES('Provider name',2,250,1)").run().lastInsertRowid;
+ const product=()=>db.prepare('SELECT * FROM products WHERE id=?').get(p);
+ db.prepare('INSERT INTO inventory(product_id,item_data) VALUES(?,?)').run(p,'private-stock');
+ await cb('adm_prod_details_'+p);assert(buttons().some(b=>b.callback_data==='adm_rename_product_'+p));
+ await cb('adm_rename_product_'+p,99);assert(!db.prepare('SELECT * FROM admin_states WHERE user_id=99').get());
+ await cb('adm_rename_product_'+q);assert.equal(db.prepare('SELECT name FROM products WHERE id=?').get(q).name,'Provider name');
+ await cb('adm_rename_product_'+p);await text('invalid\nname');assert.equal(product().name,'Old Name');
+ await text('x'.repeat(121));assert.equal(product().name,'Old Name');
+ const state=db.prepare('SELECT * FROM admin_states WHERE user_id=1').get();
+ await text('New <Premium> Name');assert.equal(product().name,'New <Premium> Name');assert(last().text.includes('New &lt;Premium&gt; Name'));
+ assert.equal(product().description,'Saved description');assert.equal(product().price_usd,5);assert.equal(db.prepare('SELECT item_data FROM inventory WHERE product_id=?').get(p).item_data,'private-stock');
+ await c.api.handleAdminCoreText(env,1,'Replayed rename',state);assert.equal(product().name,'New <Premium> Name');
+ await cb('adm_rename_product_'+p);await cb('adm_prod_details_'+p);await text('Cancelled name');assert.equal(product().name,'New <Premium> Name');
+ await cb('adm_rename_product_'+p);db.prepare('UPDATE products SET is_active=0 WHERE id=?').run(p);await text('Deleted product rename');assert.equal(product().name,'New <Premium> Name');
+ console.log('PASS: local product rename UI, admin authorization, validation, escaping, cancellation, replay and stock/price preservation');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

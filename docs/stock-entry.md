@@ -21,3 +21,7 @@ To add several accounts in one message, place `---` on its own line between comp
 Each nonempty line is a separate stock item. Single-column Markdown tables are also supported. A standalone `---` line automatically selects multiline grouping, including in older single-line sessions. A trailing separator does not create an extra item. Recognizable multiline account fields without a separator are rejected in single-line mode; switch to Multiline Accounts to save them together.
 
 API products use supplier stock and cannot receive local inventory. Stock content is private; stock notifications contain no credentials.
+
+## Rename a local product
+
+Open Admin Panel → Manage Products → select a local product → **Edit Name**. Send the new name on one line (1–120 characters). The catalog name changes without recreating inventory or changing prices, categories or order IDs. Existing orders retain their saved product-name snapshots. Cancel returns to the product and discards the edit session. Supplier API names remain managed by provider sync.
