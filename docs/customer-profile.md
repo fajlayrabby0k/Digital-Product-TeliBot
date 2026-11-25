@@ -11,3 +11,7 @@ The profile previews up to three followed product names and the total count. Fol
 Aggregate queries use the current chat ID, and product/name text is escaped before rendering. Viewing a profile does not change funds or buy products. `node tests/profile-summary.cjs` checks per-user isolation, order statuses versus quantities, completed-only deposits/spending, cent totals, empty profiles, HTML escaping and home navigation.
 
 My Orders lists all paid/completed/refunded order history in pages of five with Previous/Next. Page requests are scoped to the current chat and clamped to the available range. Old order IDs, downloads and support remain accessible. The stored product-name snapshot takes precedence over later catalog name changes, and a missing catalog product does not hide its historical order.
+
+## Referral earnings
+
+Home and My Profile show **Referral Commission Earned** immediately below the main wallet amount. Refer & Earn shows the same total. Referral commission continues to credit the main spendable wallet; the displayed earnings total is not a second balance. It sums positive USD cent entries with reason `referral` in the customer's wallet history. Purchases, deposits, refunds, redeem credits and other customers' earnings are excluded, and spending does not reduce total earned. Historical commission before wallet-history tracking cannot be reconstructed from an opening balance and is not guessed.

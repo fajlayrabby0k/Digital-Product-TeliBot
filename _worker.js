@@ -2855,7 +2855,13 @@ async function sendForceJoinScreen(env, chatId, forceInfo, editMessageId = null)
 // ====================================================================
 // User Interface Views
 // ====================================================================
+async function referralCommissionEarned(env,chatId){
+  const row=await env.DB.prepare("SELECT COALESCE(SUM(usd_delta_cents),0) AS cents FROM wallet_history WHERE user_id=? AND reason='referral' AND usd_delta_cents>0").bind(chatId).first();
+  return (Number(row?.cents||0)/100).toFixed(2);
+}
+
 async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = null) {
+  const referralEarned=await referralCommissionEarned(env,chatId);
   const usdBal = user ? (user.balance_usd || 0).toFixed(2) : "0.00";
   const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
   const bdtBal = user ? Math.round((user.balance_usd || 0) * rate) : 0;
@@ -2864,7 +2870,7 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
     `Hello ${escapeHtml(firstName)}! 👋\n` +
     `Browse subscriptions, manage your wallet and track your orders.\n\n` +
     `<blockquote>💰 <b>Available Wallet Balance</b>\n` +
-    `<b>$${usdBal} USD</b>  ≈  ৳${bdtBal} BDT</blockquote>\n\n` +
+    `<b>$${usdBal} USD</b>  ≈  ৳${bdtBal} BDT\n🎁 Referral Commission Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
     `Choose an option below:`;
 
   const keyboard = [
@@ -3150,6 +3156,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
 }
 
 async function sendProfile(env, chatId, user, editMessageId = null) {
+  const referralEarned=await referralCommissionEarned(env,chatId);
   const usdBal = user ? (user.balance_usd || 0).toFixed(2) : "0.00";
   const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
   const bdtBal = user ? Math.round((user.balance_usd || 0) * rate) : 0;
@@ -3165,7 +3172,7 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
     `<b>${escapeHtml(user?.first_name||'Customer')}</b>${user?.username?' · @'+escapeHtml(user.username):''}\n` +
     `User ID: <code>${chatId}</code>\n` +
     `Member since: ${paymentDashboardTime(user?.created_at)} (Dhaka)\n\n` +
-    `<blockquote>👛 <b>Available Wallet Balance</b>\n<b>$${usdBal} USD</b> ≈ ${bdtBal} BDT</blockquote>\n\n` +
+    `<blockquote>👛 <b>Available Wallet Balance</b>\n<b>$${usdBal} USD</b> ≈ ${bdtBal} BDT\n🎁 Referral Commission Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
     `📦 <b>Orders</b>\n` +
     `Placed: <b>${Number(orders?.placed||0)}</b> · Delivered: <b>${Number(orders?.delivered||0)}</b>\n` +
     `Awaiting delivery: <b>${Number(orders?.awaiting_delivery||0)}</b> · Refunded: <b>${Number(orders?.refunded||0)}</b>\n` +
@@ -3224,6 +3231,7 @@ async function sendOrders(env,chatId,editMessageId=null,requestedPage=0){
 }
 
 async function sendRefer(env, chatId, user, editMessageId = null) {
+  const referralEarned=await referralCommissionEarned(env,chatId);
   const botInfo = await callTg(env, "getMe", {});
   const botUsername = botInfo.result ? botInfo.result.username : "bot";
   const refLink = `https://t.me/${botUsername}?start=ref_${chatId}`;
@@ -3232,7 +3240,7 @@ async function sendRefer(env, chatId, user, editMessageId = null) {
   const refText = `👥 <b>Refer & Earn Program</b>\n\n` +
     `Invite friends and earn <b>${commPct}% instant wallet commission</b> whenever your invited friend purchases any product!\n\n` +
     `🔗 <b>Your Personal Referral Link:</b>\n<code>${refLink}</code>\n\n` +
-    `📊 <b>Your Statistics:</b>\n• Total Referred Members: <b>${user ? user.total_referrals : 0} members</b>\n• Commission Rate: <b>${commPct}% on all purchases</b>`;
+    `📊 <b>Your Statistics:</b>\n• Total Referred Members: <b>${user ? user.total_referrals : 0} members</b>\n• Commission Rate: <b>${commPct}% on all purchases</b>\n• Referral Commission Earned: <b>$${referralEarned} USD</b>\n\nCommission is credited to your main wallet. The total earned is a lifetime summary, not an extra balance.`;
 
   const buttons = [
     [{ text: "📤 Share Referral Link", url: `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent("Check out this digital products store with instant automated delivery!")}` }],
