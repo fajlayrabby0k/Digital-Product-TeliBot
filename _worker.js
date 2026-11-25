@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-admin-only-categories-1";
+const DB_SCHEMA_VERSION = "2026-11-user-access-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -160,6 +160,7 @@ async function initializeDatabase(db, force) {
       `CREATE TABLE IF NOT EXISTS product_categories(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL COLLATE NOCASE UNIQUE);`,
       `CREATE TABLE IF NOT EXISTS category_name_aliases(name TEXT PRIMARY KEY COLLATE NOCASE,category_id INTEGER NOT NULL);`,
       `CREATE TABLE IF NOT EXISTS checkout_quotes(user_id INTEGER NOT NULL,product_id INTEGER NOT NULL,quantity INTEGER NOT NULL,total_usd REAL NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(user_id,product_id,quantity));`,
+      `CREATE TABLE IF NOT EXISTS user_access_events(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL,admin_id INTEGER NOT NULL,is_blocked INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS broadcast_jobs(id TEXT PRIMARY KEY,body TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'ready',sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS manual_deposit_credits(deposit_id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_usd REAL NOT NULL,amount_bdt REAL NOT NULL,token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS wallet_history(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,reason TEXT NOT NULL,reference TEXT,usd_delta_cents INTEGER NOT NULL,bdt_delta_minor INTEGER NOT NULL,usd_before_cents INTEGER NOT NULL,usd_after_cents INTEGER NOT NULL,bdt_before_minor INTEGER NOT NULL,bdt_after_minor INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
@@ -198,6 +199,7 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE products ADD COLUMN price_notice_revision INTEGER DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN product_alerts INTEGER DEFAULT 1;",
       "ALTER TABLE users ADD COLUMN product_alert_scope TEXT NOT NULL DEFAULT 'all';",
+      "ALTER TABLE users ADD COLUMN is_blocked INTEGER NOT NULL DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN product_alert_preference_set INTEGER NOT NULL DEFAULT 0;",
       "ALTER TABLE product_notice_events ADD COLUMN old_price_cents INTEGER DEFAULT NULL;",
       "ALTER TABLE product_notice_events ADD COLUMN new_price_cents INTEGER DEFAULT NULL;",
@@ -876,7 +878,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     orderStage(env,'wallet.reserve');
     const token='WALLET:'+crypto.randomUUID();
     const booked=await env.DB.batch([
-      env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,currency,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,'USD',CURRENT_TIMESTAMP,'paid_pending_delivery' FROM users WHERE user_id=? AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd),
+      env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,currency,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,'USD',CURRENT_TIMESTAMP,'paid_pending_delivery' FROM users WHERE user_id=? AND COALESCE(is_blocked,0)=0 AND balance_usd>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd),
       env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd=balance_usd-?,balance_bdt=balance_bdt-?,total_spent_usd=total_spent_usd+? WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='paid_pending_delivery')",'purchase','wallet:'+token)).bind(totalUsd,totalBdt,totalUsd,chatId,token,chatId)
     ]);
     if(!booked[0].meta?.changes){await sendMsg(env,chatId,'Insufficient wallet balance. No money was deducted.');return;}
@@ -923,7 +925,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
 
   const token='WALLET:'+crypto.randomUUID();
   const localBooking=await env.DB.batch([
-    env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,currency,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,'USD',CURRENT_TIMESTAMP,'completed' FROM users WHERE user_id=? AND balance_usd>=? AND (SELECT COUNT(*) FROM inventory WHERE product_id=? AND is_sold=0)>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd,prod.id,qty),
+    env.DB.prepare("INSERT INTO orders(user_id,username,product_id,quantity,payment_method,trx_id,amount_usd,amount_bdt,amount,product_name,currency,created_at,status) SELECT user_id,?,?,?,'WALLET',?,?,?,?,?,'USD',CURRENT_TIMESTAMP,'completed' FROM users WHERE user_id=? AND COALESCE(is_blocked,0)=0 AND balance_usd>=? AND (SELECT COUNT(*) FROM inventory WHERE product_id=? AND is_sold=0)>=?").bind(username,prod.id,qty,token,totalUsd,totalBdt,totalUsd,prod.name,chatId,totalUsd,prod.id,qty),
     env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd=balance_usd-?,balance_bdt=balance_bdt-?,total_spent_usd=total_spent_usd+? WHERE user_id=? AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='completed')",'purchase','wallet:'+token)).bind(totalUsd,totalBdt,totalUsd,chatId,token,chatId),
     env.DB.prepare("UPDATE inventory SET is_sold=1,order_id=(SELECT id FROM orders WHERE trx_id=?) WHERE id IN (SELECT id FROM inventory WHERE product_id=? AND is_sold=0 ORDER BY id LIMIT ?) AND EXISTS(SELECT 1 FROM orders WHERE trx_id=? AND user_id=? AND status='completed')").bind(token,prod.id,qty,token,chatId)
   ]);
@@ -1344,6 +1346,12 @@ async function showMaintenance(env,update,ctx) {
   return await sendMsg(env,chatId,MAINTENANCE_MESSAGE);
 }
 
+async function denyBlockedUser(env,chatId,user,messageId=null){
+  if(String(chatId)===String(env.ADMIN_ID)||Number(user?.is_blocked)!==1)return false;
+  const text='🚫 <b>Account Blocked</b>\n\nYour access to this bot has been blocked by the administrator. Contact store support if you believe this is a mistake.';
+  if(messageId)await editMsg(env,chatId,messageId,text,[]);else await sendMsg(env,chatId,text);
+  return true;
+}
 async function handleUpdate(update, env, originUrl = "", ctx = null) {
   const actor = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
   if (String(actor) !== String(env.ADMIN_ID)) env = { ...env, __requestSettings: new Map() };
@@ -1373,6 +1381,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first(),
       env.DB.prepare("SELECT * FROM user_states WHERE user_id = ?").bind(chatId).first()
     ]);
+    if(await denyBlockedUser(env,chatId,storedUser))return;
     const userState = navigationCommand ? null : storedState;
     if (navigationCommand && storedState) await env.DB.prepare("DELETE FROM user_states WHERE user_id = ?").bind(chatId).run();
     let user = storedUser;
@@ -1595,6 +1604,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
 
     let user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
+    if(await denyBlockedUser(env,chatId,user,messageId))return;
     const firstName = cb.from.first_name || "Customer";
     const username = cb.from.username ? `@${cb.from.username}` : firstName;
 
@@ -3649,11 +3659,11 @@ async function showAdminUserProfile(env,chatId,userId,messageId=null){
     env.DB.prepare('SELECT id,amount_usd,status FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 1').bind(userId).first()
   ]);
   const name=String(user.first_name||'Customer').slice(0,80),username=String(user.username||'Not set').slice(0,80);
-  let text=`👤 <b>Customer Profile</b>\n\nName: ${escapeHtml(name)}\nUsername: ${escapeHtml(username)}\nUser ID: <code>${user.user_id}</code>\n\nWallet: <b>$${adminMoney(user.balance_usd)} USD</b>\nCompleted deposits: ${dep?.count||0} · $${adminMoney(dep?.total)}\nOrders: ${orders?.count||0}\nCompleted purchases: $${adminMoney(orders?.total)}\nJoined: ${escapeHtml(String(user.created_at||'Unknown').slice(0,35))}`;
+  let text=`👤 <b>Customer Profile</b>\n\nName: ${escapeHtml(name)}\nUsername: ${escapeHtml(username)}\nUser ID: <code>${user.user_id}</code>\n\nStatus: <b>${user.is_blocked?'Blocked':'Active'}</b>\nWallet: <b>$${adminMoney(user.balance_usd)} USD</b>\nCompleted deposits: ${dep?.count||0} · $${adminMoney(dep?.total)}\nOrders: ${orders?.count||0}\nCompleted purchases: $${adminMoney(orders?.total)}\nJoined: ${escapeHtml(String(user.created_at||'Unknown').slice(0,35))}`;
   if(latestDeposit)text+=`\n\nLatest deposit: #${latestDeposit.id} · $${adminMoney(latestDeposit.amount_usd)}\n${adminSnippet(latestDeposit.method,20)} · ${adminSnippet(latestDeposit.status,30)}`;
   if(latestOrder)text+=`\n\nLatest order: #${latestOrder.id} · $${adminMoney(latestOrder.amount_usd)} · ${adminSnippet(latestOrder.status,30)}`;
   const cleanUsername=String(user.username||'').replace(/^@/,'');
-  const buttons=[[{text:'📒 Balance History',callback_data:`adm_wallet_history_${user.user_id}_0`}],[{text:'Reset Balance to Zero',callback_data:`adm_wallet_zero_${user.user_id}`,style:'danger'}],[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
+  const buttons=[[{text:user.is_blocked?'✅ Unblock User':'🚫 Block User',callback_data:`adm_access_${user.is_blocked?'unblock':'block'}_${user.user_id}`,style:user.is_blocked?'success':'danger'}],[{text:'📒 Balance History',callback_data:`adm_wallet_history_${user.user_id}_0`}],[{text:'Reset Balance to Zero',callback_data:`adm_wallet_zero_${user.user_id}`,style:'danger'}],[{text:'🔄 Refresh Customer',callback_data:`adm_user_view_${user.user_id}`}],[{text:'Deposit History',callback_data:`adm_user_history_deposits_${user.user_id}_0`},{text:'Order History',callback_data:`adm_user_history_orders_${user.user_id}_0`}],[{text:'Open Telegram Profile',url:String(user.username||'').startsWith('@')&&/^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(cleanUsername)?`https://t.me/${cleanUsername}`:`tg://user?id=${user.user_id}`}],[{text:'Users Menu',callback_data:'adm_users'},{text:'Search',callback_data:'adm_user_search'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showAdminUserHistory(env,chatId,userId,type,page=0,messageId=null){
@@ -3675,6 +3685,30 @@ async function handleAdminUserSearch(env,chatId,text,state){
 }
 async function handleAdminUserCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
+  let access=data.match(/^adm_access_(block|unblock)_(\d+)$/);
+  if(access){
+    const user=await env.DB.prepare('SELECT * FROM users WHERE user_id=?').bind(access[2]).first();
+    if(!user){await sendMsg(env,chatId,'Customer not found.');return true;}
+    if(String(user.user_id)===String(env.ADMIN_ID)){await sendMsg(env,chatId,'The administrator account cannot be blocked.');return true;}
+    const blocked=access[1]==='block'?1:0;
+    if(Number(user.is_blocked||0)===blocked){await showAdminUserProfile(env,chatId,user.user_id,messageId);return true;}
+    const token=crypto.randomUUID().replace(/-/g,''),draft=JSON.stringify({token,userId:user.user_id,blocked,expires:Date.now()+300000});
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'confirm_user_access',?)").bind(chatId,draft).run();
+    await editMsg(env,chatId,messageId,`<b>${blocked?'Block':'Unblock'} User?</b>\n\n${escapeHtml(user.first_name||user.username||'Customer')}\nUser ID: <code>${user.user_id}</code>\n\n${blocked?'The user will be unable to use bot menus or start new purchases and deposits. Product alerts and broadcasts will stop.':'The user will be able to use the bot again.'}\nWallet funds and existing order/payment records are preserved. Already paid or submitted payments continue normal verification and fulfillment.`,[[{text:blocked?'Confirm Block':'Confirm Unblock',callback_data:`adm_access_ok_${token}`,style:blocked?'danger':'success'}],[{text:'Cancel',callback_data:`adm_user_view_${user.user_id}`}]]);return true;
+  }
+  access=data.match(/^adm_access_ok_([a-f0-9]{32})$/);
+  if(access){
+    const state=await env.DB.prepare("SELECT data FROM admin_states WHERE user_id=? AND state='confirm_user_access'").bind(chatId).first();let draft;try{draft=JSON.parse(state?.data||'null');}catch{}
+    if(!draft||draft.token!==access[1]||draft.expires<Date.now()||String(draft.userId)===String(env.ADMIN_ID)){await sendMsg(env,chatId,'This confirmation has expired or was already used. Open the customer profile to start again.');return true;}
+    const proof="EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='confirm_user_access' AND data=?)";
+    await env.DB.batch([
+      env.DB.prepare(`INSERT OR IGNORE INTO user_access_events(token,user_id,admin_id,is_blocked) SELECT ?,user_id,?,? FROM users WHERE user_id=? AND COALESCE(is_blocked,0)!=? AND ${proof}`).bind(draft.token,chatId,draft.blocked,draft.userId,draft.blocked,chatId,state.data),
+      env.DB.prepare(`UPDATE users SET is_blocked=? WHERE user_id=? AND ${proof}`).bind(draft.blocked,draft.userId,chatId,state.data),
+      env.DB.prepare(`DELETE FROM user_states WHERE user_id=? AND ?=1 AND ${proof}`).bind(draft.userId,draft.blocked,chatId,state.data),
+      env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='confirm_user_access' AND data=?").bind(chatId,state.data)
+    ]);
+    await showAdminUserProfile(env,chatId,draft.userId,messageId);return true;
+  }
   let reset=data.match(/^adm_wallet_zero_(\d+)$/);
   if(reset){
     const user=await env.DB.prepare('SELECT user_id,first_name,balance_usd,balance_bdt FROM users WHERE user_id=?').bind(reset[1]).first();
@@ -4199,7 +4233,7 @@ async function sendBroadcastBatch(env,chatId,id){
   const claim=await env.DB.prepare("UPDATE broadcast_jobs SET lease_until=? WHERE id=? AND status='ready' AND lease_until<?").bind(Date.now()+120000,id,Date.now()).run();
   if(!claim.meta?.changes){await sendMsg(env,chatId,'Broadcast is already finished or a batch is still sending.');return;}
   const job=await env.DB.prepare('SELECT * FROM broadcast_jobs WHERE id=?').bind(id).first();
-  const {results}=await env.DB.prepare('SELECT user_id FROM users WHERE user_id>? AND user_id<=? ORDER BY user_id LIMIT 10').bind(job.cursor,job.max_user_id).all();
+  const {results}=await env.DB.prepare('SELECT user_id FROM users WHERE user_id>? AND user_id<=? AND COALESCE(is_blocked,0)=0 ORDER BY user_id LIMIT 10').bind(job.cursor,job.max_user_id).all();
   let cursor=job.cursor;
   for(const user of results){
     const sent=await sendMsg(env,user.user_id,escapeHtml(job.body));cursor=user.user_id;
@@ -4396,7 +4430,7 @@ async function deliverProductNoticeBatch(env,limit=4,deadline=Date.now()+18000){
   }
   const titles={new_product:'🆕 New Product Added',restock:'✅ Stock Added',sold_out:'📦 Stock Finished',price_drop:'📉 Price Dropped',price_increase:'📈 Price Increased'};
   const text=`<b>${titles[event.kind]||'Product Update'}</b>\n\n${escapeHtml(productDisplayName(product))}\n${['price_drop','price_increase'].includes(event.kind)?`Price: <b>$${adminMoney(event.old_price_cents/100)} → $${adminMoney(event.new_price_cents/100)}</b>`:`Price: <b>$${adminMoney(product.price_usd)}</b>`}\n${event.kind==='sold_out'?'Stock: 0':'Available stock: '+Number(product.stock||0)}\n\n${paymentDashboardTime(event.created_at)} (Dhaka)`;
-  const {results:users}=await env.DB.prepare(`SELECT u.user_id FROM users u WHERE u.user_id>? AND u.user_id<=? AND COALESCE(u.product_alerts,1)=1 AND (COALESCE(u.product_alert_scope,'all')='all' OR EXISTS(SELECT 1 FROM product_follows f WHERE f.user_id=u.user_id AND f.product_id=?)) ORDER BY u.user_id LIMIT ?`).bind(event.cursor,event.max_user_id,event.product_id,limit).all();
+  const {results:users}=await env.DB.prepare(`SELECT u.user_id FROM users u WHERE u.user_id>? AND u.user_id<=? AND COALESCE(u.is_blocked,0)=0 AND COALESCE(u.product_alerts,1)=1 AND (COALESCE(u.product_alert_scope,'all')='all' OR EXISTS(SELECT 1 FROM product_follows f WHERE f.user_id=u.user_id AND f.product_id=?)) ORDER BY u.user_id LIMIT ?`).bind(event.cursor,event.max_user_id,event.product_id,limit).all();
   let cursor=event.cursor,attempted=0;
   for(const user of users){
     if(Date.now()>=deadline)break;

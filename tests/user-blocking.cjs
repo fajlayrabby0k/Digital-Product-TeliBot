@@ -1,0 +1,34 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,showWalletHistory,walletChangeSql,handleOrderSearchText,sendOrders,executeWalletPurchase};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);
+ for(const id of [1,99,100])db.prepare('INSERT INTO users(user_id,balance_usd) VALUES(?,10)').run(id);
+ const user=()=>db.prepare('SELECT * FROM users WHERE user_id=99').get();
+ const confirmation=()=>buttons().find(b=>b.callback_data?.startsWith('adm_access_ok_')).callback_data;
+ await cb('adm_user_view_99');assert(buttons().some(b=>b.callback_data==='adm_access_block_99'));
+ await cb('adm_access_block_99',100);assert.equal(user().is_blocked,0);
+ await cb('adm_access_block_1');assert.equal(db.prepare('SELECT is_blocked FROM users WHERE user_id=1').get().is_blocked,0);
+ await cb('adm_access_block_99');let cancelled=confirmation();await cb('adm_user_view_99');await cb(cancelled);assert.equal(user().is_blocked,0);
+ await cb('adm_access_block_99');const ok=confirmation();await cb(ok,100);assert.equal(user().is_blocked,0);
+ db.prepare("INSERT INTO user_states(user_id,state,data) VALUES(99,'awaiting_binance_receipt','{}')").run();
+ await Promise.all([cb(ok),cb(ok)]);assert.equal(user().is_blocked,1);assert.equal(user().balance_usd,10);
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM user_access_events WHERE user_id=99').get().n,1);assert(!db.prepare('SELECT * FROM user_states WHERE user_id=99').get());
+ assert(buttons().some(b=>b.callback_data==='adm_access_unblock_99'));
+ for(const data of ['home','deposit','shop','paywallet_1_1','product_alert_mode_all']){await cb(data,99);assert(last().text.includes('Account Blocked'));}
+ await c.api.handleUpdate({message:{chat:{id:99},from:{first_name:'Blocked'},text:'/start ref_100'}},env);assert(last().text.includes('Account Blocked'));assert.equal(user().referred_by,0);
+ const p=db.prepare("INSERT INTO products(name,price_usd,price_bdt) VALUES('Local',5,625)").run().lastInsertRowid;
+ db.prepare('INSERT INTO inventory(product_id,item_data) VALUES(?,?)').run(p,'test-stock');
+ await c.api.executeWalletPurchase(env,99,'Blocked',db.prepare('SELECT * FROM products WHERE id=?').get(p),1,5,125,1);
+ assert.equal(user().balance_usd,10);assert.equal(db.prepare('SELECT COUNT(*) n FROM orders WHERE user_id=99').get().n,0);
+ await cb('adm_access_unblock_99');const unblock=confirmation();await cb(unblock);assert.equal(user().is_blocked,0);
+ await cb(ok);assert.equal(user().is_blocked,0,'stale block must not override later unblock');
+ await cb('home',99);assert(last().text.includes('Welcome to'));
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM user_access_events WHERE user_id=99').get().n,2);
+ console.log('PASS: block/unblock, admin-only confirmations, cancel/replay, protected admin, blocked menus/referral/purchase, preserved balance/history and restored access');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
