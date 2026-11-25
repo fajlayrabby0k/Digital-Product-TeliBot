@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-25-foreground-bridge-1";
+const BOT_BUILD="2026-11-26-fast-shop-webhook-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -1324,7 +1324,7 @@ const MAINTENANCE_MESSAGE = `🔧 Bot Under Maintenance
 async function showMaintenance(env,update,ctx) {
   const callback=update.callback_query;
   const chatId=update.message?.chat?.id ?? callback?.message?.chat?.id;
-  if(callback?.id){
+  if(callback?.id&&!env.__callbackAcknowledged){
     const acknowledgement=ansCb(env,callback.id).catch(()=>{});
     if(ctx&&typeof ctx.waitUntil==='function')ctx.waitUntil(acknowledgement);
     else await acknowledgement;
@@ -1574,9 +1574,11 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if ((data.startsWith("adm_") || data.startsWith("admin_")) && String(chatId) !== String(env.ADMIN_ID)) return;
 
     // Immediately acknowledge callback query to clear button loading spinner
-    const acknowledgement = ansCb(env, cb.id).catch(() => {});
-    if (ctx) ctx.waitUntil(acknowledgement);
-    else await acknowledgement;
+    if(!env.__callbackAcknowledged){
+      const acknowledgement = ansCb(env, cb.id).catch(() => {});
+      if (ctx?.waitUntil) ctx.waitUntil(acknowledgement);
+      else await acknowledgement;
+    }
 
     let user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
     const firstName = cb.from.first_name || "Customer";
@@ -3488,9 +3490,13 @@ async function processBotUpdate(update,env,origin,ctx){
   const diagnosticCommand=/^\/diagnostics(?:@\w+)?\s*$/i.test(String(update.message?.text||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim())||update.callback_query?.data==='adm_diagnostics';
   const trace={stage:'database.initialize',orderId:null};const scoped={...env,__orderTrace:trace,__executionContext:ctx};
   try{
+    if(update.callback_query?.id&&ctx?.waitUntil){
+      scoped.__callbackAcknowledged=true;
+      ctx.waitUntil(ansCb(scoped,update.callback_query.id).catch(()=>{}));
+    }
     if(diagnosticCommand){
       if(String(chatId)!==String(env.ADMIN_ID))return;
-      if(update.callback_query?.id)await ansCb(env,update.callback_query.id).catch(()=>{});
+      if(update.callback_query?.id&&!scoped.__callbackAcknowledged)await ansCb(env,update.callback_query.id).catch(()=>{});
       await sendOrderDiagnostics(scoped,chatId);return;
     }
     await handleUpdate(update,scoped,origin,ctx);
@@ -4203,8 +4209,19 @@ async function ensureCategory(env,name,restore=false){
   const row=await env.DB.prepare('SELECT id,is_deleted FROM product_categories WHERE name=? COLLATE NOCASE').bind(name).first();
   return row?.is_deleted?null:row?.id;
 }
+const browsingCatalogSync=new WeakMap();
+async function syncBrowsingCatalog(env,force=false){
+  if(force||!env.__executionContext?.waitUntil)return syncExternalProducts(env,null,null,false,null,force);
+  let pending=browsingCatalogSync.get(env.DB);
+  if(!pending){
+    pending=syncExternalProducts(env,null,null,false,null,false).catch(()=>({success:false})).finally(()=>browsingCatalogSync.delete(env.DB));
+    browsingCatalogSync.set(env.DB,pending);
+  }
+  env.__executionContext.waitUntil(pending);
+  return {success:true,cached:true};
+}
 async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
-  await syncExternalProducts(env,null,null,false,null,force);
+  await syncBrowsingCatalog(env,force);
   const totals=await env.DB.prepare("SELECT (SELECT COUNT(*)+1 FROM product_categories WHERE is_deleted=0 AND LOWER(name) NOT IN ('subscription','others subscription')) AS categories,(SELECT COUNT(*) FROM products WHERE is_active=1) AS products,COALESCE((SELECT SUM(CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=products.id AND is_sold=0) END) FROM products WHERE is_active=1),0) AS stock").first();
   const pages=Math.max(1,Math.ceil(Number(totals?.categories||1)/10));page=Math.min(pages-1,adminUserPage(page));
   const {results}=await env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count,0 AS sort_order FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 AND LOWER(c.name) NOT IN ('subscription','others subscription') GROUP BY c.id UNION ALL SELECT 0 AS id,'Others Subscription' AS name,NULL AS custom_icon,COUNT(*) AS count,1 AS sort_order FROM products WHERE is_active=1 AND (shop_category_id IS NULL OR shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name) IN ('subscription','others subscription') AND is_deleted=0)) ORDER BY sort_order,name COLLATE NOCASE LIMIT 11 OFFSET ?").bind(page*10).all();
@@ -4216,7 +4233,7 @@ async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,force=false){
-  const sync=await syncExternalProducts(env,null,null,false,null,force);
+  const sync=await syncBrowsingCatalog(env,force);
   const cat=category?await env.DB.prepare('SELECT name FROM product_categories WHERE id=? AND is_deleted=0').bind(category).first():{name:'Others Subscription'};
   if(['subscription','others subscription'].includes(cat?.name.toLowerCase())){category=0;cat.name='Others Subscription';}
   if(!cat){await showShopCategories(env,chatId,messageId);return;}
@@ -4226,7 +4243,7 @@ async function sendCategoryProducts(env,chatId,category,page=0,messageId=null,fo
   const buttons=results.map(p=>[productListButton(p,`prod_${p.id}`,!(p.is_external&&!sync.success))]),pager=[];
   if(page>0)pager.push({text:'Previous',callback_data:`shopcat_${category}_${page-1}`});if(page<pages-1)pager.push({text:'Next',callback_data:`shopcat_${category}_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔄 Refresh Stock',callback_data:`shopcatrefresh_${category}_${page}`}],[{text:'⬅️ Back to Categories',callback_data:'shop'},{text:'Main Menu',callback_data:'home'}]);
-  const text=`🛍️ <b>${escapeHtml(cat.name)}</b>\nPage ${page+1}/${pages} · ${count.count} products\n\n${results.length?'Click any product below to view details and order:':'No products in this category yet.'}`;
+  const text=`🛍️ <b>${escapeHtml(cat.name)}</b>\nPage ${page+1}/${pages} · ${count.count} products\n\n${results.length?'Click any product below to view details and order:':'No products in this category yet.'}${sync.cached?'\nStock is from the latest saved sync. Open a product or Refresh Stock to check live availability.':''}`;
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showAdminCategories(env,chatId,productId=null,page=0,messageId=null){
