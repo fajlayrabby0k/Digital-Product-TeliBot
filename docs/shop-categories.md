@@ -67,3 +67,7 @@ No product data is moved or deleted: unassigned products retain NULL shop_catego
 ## Admin-only categories migration
 
 Only admin-created categories and the built-in Others Subscription group are used for new imports. The migration clears old automatic category assignments on API products and clears provider category IDs. Categories with provider references and no recorded admin-management evidence are soft-deleted; their products remain. Categories marked as admin-managed, used by local products or explicit manual assignments, renamed (alias recorded), or customized with an icon are preserved. Old unreferenced categories are retained because their origin cannot be established. Creating/restoring, renaming or editing an icon marks a category as admin-managed. The migration runs once and is batched with existing database setup.
+
+## Single-page customer category list
+
+Shop shows all active categories, including empty categories, in two columns on one page. Others Subscription is the last category. Category Previous/Next buttons and the category page counter are removed. Older `shop_page_*` callbacks still open the complete category list. Product lists within categories and admin category management keep their existing pagination.
