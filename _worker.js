@@ -12,7 +12,7 @@
 // 9. Referral program with automated instant commission
 // ====================================================================
 
-const BOT_BUILD="2026-11-26-fast-shop-webhook-1";
+const BOT_BUILD="2026-11-26-speed-diagnostics-1";
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -556,6 +556,7 @@ async function ansCb(env, id, text = null, showAlert = false) {
 async function getSetting(env, key, defVal) {
   const cache = env.__requestSettings;
   try {
+    if(env.__settingsLoaded&&!cache?.has(key))return defVal;
     let pending = cache?.get(key);
     if (!pending) {
       pending = env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first();
@@ -1338,9 +1339,12 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
   if (String(actor) !== String(env.ADMIN_ID)) env = { ...env, __requestSettings: new Map() };
   await ensureDbReady(env.DB);
   if (actor !== undefined && actor !== null && String(actor) !== String(env.ADMIN_ID)) {
-    // Read on every update so admin changes take effect across Pages instances immediately.
-    const mode=await env.DB.prepare("SELECT value FROM settings WHERE key = 'maintenance_mode'").first();
-    if(mode?.value==='1'){await showMaintenance(env,update,ctx);return;}
+    // One fresh settings snapshot per customer update; no cross-request stale settings.
+    const {results:settings}=await env.DB.prepare('SELECT key,value FROM settings').all();
+    for(const row of settings)env.__requestSettings.set(row.key,Promise.resolve({value:row.value}));
+    env.__settingsLoaded=settings.length>0;
+    const mode=await getSetting(env,'maintenance_mode','0');
+    if(mode==='1'){await showMaintenance(env,update,ctx);return;}
   }
 
   // 1. Text Messages Handler
@@ -3153,7 +3157,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{text:'🎫 Support Tickets',callback_data:'adm_tickets_open_0'}],
     [{text:'🔔 Product Notifications',callback_data:'adm_product_notices'},{text:'📢 Channel Alerts',callback_data:'adm_channel_notices'}],
     [{text:'📂 Categories',callback_data:'adm_categories_0'}],
-    [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'}],
+    [{text:'🔍 API / Order Diagnostics',callback_data:'adm_diagnostics'},{text:'⚡ Speed Test',callback_data:'adm_speed'}],
     [{text:maintenanceOn?'🔧 Maintenance: ON • Turn OFF':'✅ Maintenance: OFF • Turn ON',callback_data:maintenanceOn?'adm_maintenance_off':'adm_maintenance_on',style:maintenanceOn?'danger':'success'}],
     [{ text: "➕ Add Stock", callback_data: "adm_stock_menu" }, { text: "➕ Add New Product", callback_data: "adm_add_product" }],
     [{ text: "💰 Custom Prices", callback_data: "adm_price_menu" }, { text: "📋 Manage Products", callback_data: "adm_manage_products" }],
@@ -3485,6 +3489,17 @@ async function safeDiagnostic(env,value){
   return text.replace(/vxr_live_[A-Za-z0-9_]+/g,'[redacted]').slice(0,200);
 }
 async function ensureDiagnosticTable(db){await db.prepare('CREATE TABLE IF NOT EXISTS bot_runtime_errors(reference TEXT PRIMARY KEY,stage TEXT,chat_id TEXT,order_id INTEGER,detail TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)').run();}
+async function showSpeedDiagnostics(env,chatId){
+  if(!adminUserAccess(env,chatId))return;
+  const started=Date.now(),dbTimes=[];
+  for(let i=0;i<3;i++){const at=Date.now();await env.DB.prepare('SELECT 1 AS ok').first();dbTimes.push(Date.now()-at);}
+  const measure=async method=>{const at=Date.now();try{return {response:await callTg(env,method,{}),ms:Date.now()-at};}catch{return {response:{ok:false},ms:Date.now()-at};}};
+  const [telegram,webhook]=await Promise.all([measure('getMe'),measure('getWebhookInfo')]);
+  const info=webhook.response?.result,expected=new URL(env.BOT_PUBLIC_URL||'https://digital-product-telibot.pages.dev').origin;
+  let configured=false;try{const url=new URL(info?.url);configured=url.origin===expected&&['/api/webhook','/'].includes(url.pathname);}catch{}
+  const text=`⚡ <b>Live Speed Test</b>\n\nBuild: <code>${BOT_BUILD}</code>\nDatabase reads: <b>${dbTimes.join(' / ')} ms</b>\nTelegram API: <b>${telegram.ms} ms</b> (${telegram.response?.ok?'OK':'failed'})\nWebhook check: ${webhook.ms} ms\nWebhook: <b>${!webhook.response?.ok?'Check failed':configured?'Configured correctly':'Needs configuration'}</b>\nPending updates: ${Number(info?.pending_update_count||0)}\nLast webhook error: ${info?.last_error_message?escapeHtml(await safeDiagnostic(env,info.last_error_message)):'None reported'}\nTest duration: ${Date.now()-started} ms\n\nMeasured from the live worker. Telegram API timing is a getMe request; it does not measure phone-to-bot delivery. Shop navigation uses saved catalog data while syncing in the background. Explicit refresh and checkout wait for live verification.`;
+  await sendMsg(env,chatId,text,[[{text:'Run Again',callback_data:'adm_speed'}],[{text:'Admin Panel',callback_data:'admin_panel'}]]);
+}
 async function processBotUpdate(update,env,origin,ctx){
   const chatId=update.message?.chat?.id??update.callback_query?.message?.chat?.id;
   const diagnosticCommand=/^\/diagnostics(?:@\w+)?\s*$/i.test(String(update.message?.text||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim())||update.callback_query?.data==='adm_diagnostics';
@@ -3493,6 +3508,10 @@ async function processBotUpdate(update,env,origin,ctx){
     if(update.callback_query?.id&&ctx?.waitUntil){
       scoped.__callbackAcknowledged=true;
       ctx.waitUntil(ansCb(scoped,update.callback_query.id).catch(()=>{}));
+    }
+    if(update.callback_query?.data==='adm_speed'||/^\/speed(?:@\w+)?\s*$/i.test(String(update.message?.text||'').trim())){
+      if(adminUserAccess(env,chatId)){await ensureDbReady(env.DB);await showSpeedDiagnostics(scoped,chatId);}
+      return;
     }
     if(diagnosticCommand){
       if(String(chatId)!==String(env.ADMIN_ID))return;
