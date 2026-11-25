@@ -22,10 +22,10 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const before=db.prepare('SELECT COUNT(*) n FROM wallet_history').get().n;
  const user=db.prepare('SELECT * FROM users WHERE user_id=99').get();
  for(const show of [()=>c.api.sendHomeDashboard(env,99,user,'Customer'),()=>c.api.sendProfile(env,99,user),()=>c.api.sendRefer(env,99,user)]){
-  await show();assert(last().text.includes('Referral Commission Earned: <b>$0.75 USD</b>'));
+  await show();assert(last().text.includes('Referral Earned: <b>$0.75 USD</b>'));
  }
  assert.equal(db.prepare('SELECT COUNT(*) n FROM wallet_history').get().n,before);
  assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,7.75);
- assert.equal((last().text.match(/Referral Commission Earned/g)||[]).length,1);
+ assert.equal((last().text.match(/Referral Earned/g)||[]).length,1);
  console.log('PASS: referral credits main wallet, lifetime cents total, spend-independent earnings, isolated users and read-only display');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

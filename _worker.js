@@ -2880,7 +2880,7 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
     `Hello ${escapeHtml(firstName)}! 👋\n` +
     `Browse subscriptions, manage your wallet and track your orders.\n\n` +
     `<blockquote>💰 <b>Available Wallet Balance</b>\n` +
-    `<b>$${usdBal} USD</b>  ≈  ৳${bdtBal} BDT\n🎁 Referral Commission Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
+    `<b>$${usdBal} USD</b>  ≈  ৳${bdtBal} BDT\n🎁 Referral Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
     `Choose an option below:`;
 
   const keyboard = [
@@ -3182,7 +3182,7 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
     `<b>${escapeHtml(user?.first_name||'Customer')}</b>${user?.username?' · @'+escapeHtml(user.username):''}\n` +
     `User ID: <code>${chatId}</code>\n` +
     `Member since: ${paymentDashboardTime(user?.created_at)} (Dhaka)\n\n` +
-    `<blockquote>👛 <b>Available Wallet Balance</b>\n<b>$${usdBal} USD</b> ≈ ${bdtBal} BDT\n🎁 Referral Commission Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
+    `<blockquote>👛 <b>Available Wallet Balance</b>\n<b>$${usdBal} USD</b> ≈ ${bdtBal} BDT\n🎁 Referral Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
     `📦 <b>Orders</b>\n` +
     `Placed: <b>${Number(orders?.placed||0)}</b> · Delivered: <b>${Number(orders?.delivered||0)}</b>\n` +
     `Awaiting delivery: <b>${Number(orders?.awaiting_delivery||0)}</b> · Refunded: <b>${Number(orders?.refunded||0)}</b>\n` +
@@ -3250,7 +3250,7 @@ async function sendRefer(env, chatId, user, editMessageId = null) {
   const refText = `👥 <b>Refer & Earn Program</b>\n\n` +
     `Invite friends and earn <b>${commPct}% instant wallet commission</b> whenever your invited friend purchases any product!\n\n` +
     `🔗 <b>Your Personal Referral Link:</b>\n<code>${refLink}</code>\n\n` +
-    `📊 <b>Your Statistics:</b>\n• Total Referred Members: <b>${user ? user.total_referrals : 0} members</b>\n• Commission Rate: <b>${commPct}% on all purchases</b>\n• Referral Commission Earned: <b>$${referralEarned} USD</b>\n\nCommission is credited to your main wallet. The total earned is a lifetime summary, not an extra balance.`;
+    `📊 <b>Your Statistics:</b>\n• Total Referred Members: <b>${user ? user.total_referrals : 0} members</b>\n• Commission Rate: <b>${commPct}% on all purchases</b>\n• Referral Earned: <b>$${referralEarned} USD</b>\n\nCommission is credited to your main wallet. The total earned is a lifetime summary, not an extra balance.`;
 
   const buttons = [
     [{ text: "📤 Share Referral Link", url: `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent("Check out this digital products store with instant automated delivery!")}` }],
