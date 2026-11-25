@@ -2039,12 +2039,24 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       return;
     }
 
-    if (data.startsWith("adm_addstock_")) {
-      const prodId = data.replace("adm_addstock_", "");
-      const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ?").bind(prodId).first();
-      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, 'awaiting_stock', ?)").bind(chatId, prodId).run();
-      await editMsg(env, chatId, messageId, `📥 <b>Add Stock for: ${prod ? prod.name : "Product"}</b>\n\nPlease send the license key or account credentials below.\n<i>💡 You can send multiple items separated by new lines!</i>`, [
-        [{ text: "❌ Cancel", callback_data: "adm_stock_menu" }]
+    if (data.startsWith("adm_addstock_") || data.startsWith("adm_stockmulti_") || data.startsWith("adm_stockline_")) {
+      const multiline = data.startsWith("adm_stockmulti_");
+      const choosing = data.startsWith("adm_addstock_");
+      const prodId = data.replace(/^adm_(?:addstock|stockmulti|stockline)_/, "");
+      const prod = await env.DB.prepare("SELECT * FROM products WHERE id = ? AND is_active=1").bind(prodId).first();
+      if (!prod || prod.is_external) { await editMsg(env,chatId,messageId,'Choose an active local product to add stock.',[[{text:'Back',callback_data:'adm_stock_menu'}]]); return; }
+      if (choosing) {
+        await clearAdminState(env,chatId);
+        await editMsg(env,chatId,messageId,`📥 <b>Add Stock · ${escapeHtml(prod.name)}</b>\n\nChoose how your stock is formatted.\nMultiline: one complete account with all its details.\nSingle-line: one key or account per line.`,[
+          [{text:'📄 Multiline Accounts',callback_data:`adm_stockmulti_${prodId}`}],
+          [{text:'🔑 Single-line Items',callback_data:`adm_stockline_${prodId}`}],
+          [{text:'Cancel',callback_data:'adm_stock_menu'}]
+        ]); return;
+      }
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states (user_id, state, data) VALUES (?, ?, ?)").bind(chatId,multiline?'awaiting_stock_multiline':'awaiting_stock',prodId).run();
+      await editMsg(env, chatId, messageId, `📥 <b>Add Stock · ${escapeHtml(prod.name)}</b>\n\n${multiline ? 'Paste all details of one account in one message. Line breaks and numbering will be kept in the delivered text document.\n\nFor multiple accounts, separate each complete account with a line containing <code>---</code>. Do not use this separator inside an account.' : 'Send one complete stock item per line.'}\n\nUp to 50 items, 1500 characters per item.`, [
+        [{ text: "Back", callback_data: `adm_addstock_${prodId}` }],
+        [{ text: "Cancel", callback_data: "adm_stock_menu" }]
       ]);
       return;
     }
@@ -4070,11 +4082,12 @@ async function handleAdminCoreText(env,chatId,text,state){
     writes.push(env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data));await env.DB.batch(writes);providerCatalogCache.delete(env.DB);
     await sendMsg(env,chatId,key==='external_api_key'?'API key saved.':'Setting saved.',[[{text:key.startsWith('external_')?'API Center':'Admin Panel',callback_data:key.startsWith('external_')?'adm_api_menu':'admin_panel'}]]);return true;
   }
-  if(state.state==='awaiting_stock'){
+  if(state.state==='awaiting_stock'||state.state==='awaiting_stock_multiline'){
     const product=await env.DB.prepare('SELECT * FROM products WHERE id=? AND is_active=1').bind(state.data).first();
     if(!product||product.is_external){await clearAdminState(env,chatId);await sendMsg(env,chatId,'Choose an active local product to add stock.');return true;}
-    const items=parseStockItems(text);
-    if(!items.length||items.length>50||items.some(x=>x.length>1500)){await sendMsg(env,chatId,'Send 1–50 stock items, one per line (up to 1500 characters each).');return true;}
+    const multiline=state.state==='awaiting_stock_multiline';
+    const items=parseStockItems(text,multiline);
+    if(!items.length||items.length>50||items.some(x=>x.length>1500)){await sendMsg(env,chatId,multiline?'Send 1–50 complete accounts (up to 1500 characters each). Separate accounts with a line containing ---; keep each account’s details together.':'Send 1–50 stock items, one per line (up to 1500 characters each).');return true;}
     const writes=items.map(item=>env.DB.prepare('INSERT INTO inventory(product_id,item_data) SELECT ?,? WHERE EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state=? AND data=?)').bind(product.id,item,chatId,state.state,state.data));
     writes.push(env.DB.prepare('DELETE FROM admin_states WHERE user_id=? AND state=? AND data=?').bind(chatId,state.state,state.data));const saved=await env.DB.batch(writes);
     const added=saved.slice(0,-1).reduce((n,r)=>n+Number(r.meta?.changes||0),0);if(added>10)env.__noticeMaxRecipients=4;await sendMsg(env,chatId,`Stock added: ${added} item(s).`,[[{text:'Product',callback_data:`adm_prod_details_${product.id}`}]]);
@@ -4248,7 +4261,8 @@ async function beginProductInCategory(env,chatId,categoryId,messageId=null){
 }
 
 
-function parseStockItems(text){
+function parseStockItems(text,multiline=false){
+  if(multiline)return String(text).replace(/\r\n?/g,'\n').split(/^[ \t]*---[ \t]*$/m).map(item=>item.trim()).filter(Boolean);
   return String(text).split(/\r?\n/).map(line=>line.trim()).filter(line=>line&&!/^[|:\-\s]+$/.test(line)&&!/^```/.test(line)).map(line=>line.startsWith('|')&&line.endsWith('|')?line.slice(1,-1).trim():line).filter(Boolean);
 }
 const noticeDrainRunning=new WeakMap();
