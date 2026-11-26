@@ -1618,10 +1618,14 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
     const broadcastAction=data.match(/^adm_broadcast_send_([a-f0-9-]{36})$/);
     if(broadcastAction){await sendBroadcastBatch(env,chatId,broadcastAction[1]);return;}
-    if(data==='adm_order_find'){
+    const allOrdersPage=data.match(/^adm_orders_page_(\d+)$/),allOrderView=data.match(/^adm_orders_view_(\d+)_(\d+)$/),orderSearch=data.match(/^adm_order_search(?:_(\d+))?$/);
+    if(data==='adm_order_find'||allOrdersPage){await showAllAdminOrders(env,chatId,allOrdersPage?.[1]||0,messageId);return;}
+    if(allOrderView){if(adminUserAccess(env,chatId)){await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,allOrderView[1],messageId,adminUserPage(allOrderView[2]));}return;}
+    if(orderSearch){
       if(!adminUserAccess(env,chatId))return;
-      await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_order_search','')").bind(chatId).run();
-      await editMsg(env,chatId,messageId,'🔎 <b>Find Order</b>\n\nSend the 5-digit Order ID, e.g. 58241. This is this store’s Order ID, not a payment transaction ID. Older #number references are also accepted.',[[{text:'Cancel',callback_data:'admin_panel'}]]);return;
+      const page=adminUserPage(orderSearch[1]||0);
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_order_search',?)").bind(chatId,String(page)).run();
+      await editMsg(env,chatId,messageId,'🔎 <b>Find Order</b>\n\nSend the 5-digit Order ID, e.g. 58241. This is this store’s Order ID, not a payment transaction ID. Older #number references are also accepted.',[[{text:'Back to Orders',callback_data:`adm_orders_page_${page}`}]]);return;
     }
     let walletHistoryMatch=data.match(/^wallet_history_(\d+)$/);
     if(walletHistoryMatch){await showWalletHistory(env,chatId,chatId,walletHistoryMatch[1],messageId);return;}
@@ -3144,7 +3148,7 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
 
   const buttons = [
     [{text:'⏱️ Automatic Sync',callback_data:'adm_periodic'},{text:'📖 User Guide Settings',callback_data:'adm_guide'}],
-    [{text:'👥 Users / Find Customer',callback_data:'adm_users'},{text:'🔎 Find Order',callback_data:'adm_order_find'}],
+    [{text:'👥 Users / Find Customer',callback_data:'adm_users'},{text:'📦 Orders',callback_data:'adm_order_find'}],
     [{text:'📊 Sales & Profit Reports',callback_data:'adm_sales_today'}],
     [{text:'💳 Payment Dashboard',callback_data:'adm_payments_home'},{text:'📡 Payment & SMS Status',callback_data:'adm_payment_health'}],
     [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
@@ -4119,7 +4123,20 @@ async function showDeliveryAdminList(env,chatId,filter='pending',page=0,messageI
   buttons.push([{text:'Pending Delivery',callback_data:'adm_delivery_list_pending_0'},{text:'Processing',callback_data:'adm_delivery_list_processing_0'}],[{text:'Completed',callback_data:'adm_delivery_list_completed_0'},{text:'🔄 Refresh',callback_data:`adm_delivery_list_${filter}_${page}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
-async function showDeliveryAdminOrder(env,chatId,id,messageId=null){
+async function showAllAdminOrders(env,chatId,page=0,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  await clearAdminState(env,chatId);
+  const count=await env.DB.prepare('SELECT COUNT(*) AS total FROM orders').first(),total=Number(count?.total||0),pages=Math.max(1,Math.ceil(total/10));
+  page=Math.min(pages-1,adminUserPage(page));
+  const {results}=await env.DB.prepare('SELECT o.*,p.name AS current_product_name,u.first_name AS customer_name FROM orders o LEFT JOIN products p ON p.id=o.product_id LEFT JOIN users u ON u.user_id=o.user_id ORDER BY o.id DESC LIMIT 10 OFFSET ?').bind(page*10).all();
+  let text=`📦 <b>All Orders</b>\nTotal: <b>${total}</b> · Page ${page+1}/${pages}\n\n${results.length?'Newest orders first. Open an order for details or use Find Order.':'No orders yet.'}`;
+  if(results.length)text+='\n\n'+results.map(o=>`<b>Order ID ${orderDisplayId(o)}</b> · ${adminSnippet(o.status,28)}\n${adminSnippet(o.product_name||o.current_product_name||'Unavailable product',65)} · $${adminMoney(o.amount_usd)}\nCustomer: ${adminSnippet(o.customer_name||'Customer',40)} · ${customerTelegramId(o.user_id)}`).join('\n\n');
+  const buttons=results.map(o=>[{text:`${orderDisplayId(o)} · ${String(o.product_name||o.current_product_name||'Product').slice(0,28)} · $${adminMoney(o.amount_usd)}`,callback_data:`adm_orders_view_${o.id}_${page}`}]);
+  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_orders_page_${page-1}`});if(page+1<pages)pager.push({text:'Next',callback_data:`adm_orders_page_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'🔎 Find Order',callback_data:`adm_order_search_${page}`}],[{text:'🔄 Refresh',callback_data:`adm_orders_page_${page}`},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null){
   if(!adminUserAccess(env,chatId))return;
   const order=await env.DB.prepare('SELECT o.*,p.name,p.is_external,p.external_id FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=?').bind(id).first();
   if(!order){await sendMsg(env,chatId,'Order not found.');return;}
@@ -4127,10 +4144,10 @@ async function showDeliveryAdminOrder(env,chatId,id,messageId=null){
   const canRetry=order.status==='paid_pending_delivery'&&order.is_external!=null&&(!order.is_external||order.provider_request_id);
   let help=order.status==='completed'?'Delivered. No further purchase or stock allocation will be performed.':order.status==='delivering'?'Processing or interrupted during delivery. Check supplier history and refresh; automatic restart is blocked to avoid duplicate fulfillment.':order.status==='paid_pending_delivery'?(order.is_external&&!order.provider_request_id?'This older API order has no supplier request ID. Reconcile supplier history before taking further action.':order.is_external?'Check Delivery looks up the existing supplier request and resumes it safely. A provider rejection can refund a wallet order through the existing refund rules.':'Restock this local product, then Check Delivery. Previously allocated items are reused; only missing items are allocated.'):'This order is unpaid or closed; delivery cannot be started here.';
   if(order.is_external==null&&order.status==='paid_pending_delivery')help='Product record is missing. Admin reconciliation is required.';
-  const text=`📦 <b>Delivery · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: <code>${order.user_id}</code>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nOrder total: <b>$${adminMoney(order.amount_usd)}</b>\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
+  const text=`📦 <b>${listPage===null?'Delivery':'Order Details'} · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: <code>${order.user_id}</code>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nOrder total: <b>$${adminMoney(order.amount_usd)}</b>\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
   const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
   if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
-  buttons.push([adminUserProfileButton(order.user_id)],[{text:'🔄 Refresh',callback_data:`adm_delivery_view_${order.id}`}],[{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  buttons.push([adminUserProfileButton(order.user_id)],[{text:'🔄 Refresh',callback_data:listPage===null?`adm_delivery_view_${order.id}`:`adm_orders_view_${order.id}_${listPage}`}],[listPage===null?{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'}:{text:'All Orders',callback_data:`adm_orders_page_${listPage}`},{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function retryDeliveryAdmin(env,chatId,id,messageId){
@@ -4275,7 +4292,7 @@ async function handleOrderSearchText(env,chatId,text,state){
   const digits=match[1],legacy=String(text).trim().startsWith('#')||digits.length!==5;
   const order=await env.DB.prepare(legacy?'SELECT id FROM orders WHERE id=?':'SELECT id FROM orders WHERE public_order_id=?').bind(digits).first();
   if(!order){await sendMsg(env,chatId,'No order found with this ID. Check the number and try again.');return true;}
-  await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,order.id);return true;
+  await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,order.id,null,adminUserPage(state.data));return true;
 }
 
 

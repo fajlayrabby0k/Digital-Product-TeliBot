@@ -1,0 +1,27 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,showWalletHistory,walletChangeSql,handleOrderSearchText,sendOrders};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);for(const id of [1,99,100])db.prepare('INSERT INTO users(user_id,balance_usd) VALUES(?,10)').run(id);
+ await cb('adm_order_find');assert(last().text.includes('No orders yet.'));assert(buttons().some(b=>b.callback_data==='adm_order_search_0'));
+ const statuses=['pending','completed','cancelled','paid_pending_delivery','delivering','refunded','wallet_credited'];
+ for(let i=0;i<23;i++)db.prepare('INSERT INTO orders(user_id,product_id,product_name,payment_method,amount_usd,status) VALUES(?,1,?,?,5,?)').run(i%2?99:100,'Saved Product '+i,'WALLET',statuses[i%statuses.length]);
+ const records=db.prepare('SELECT * FROM orders ORDER BY id DESC').all(),before=JSON.stringify(records),money=db.prepare('SELECT SUM(balance_usd) n FROM users').get().n;
+ const ids=()=>buttons().filter(b=>b.callback_data?.startsWith('adm_orders_view_')).map(b=>Number(b.callback_data.split('_')[3]));
+ await cb('admin_panel');assert(buttons().some(b=>b.text==='📦 Orders'&&b.callback_data==='adm_order_find'));
+ await cb('adm_order_find');assert(last().text.includes('Total: <b>23</b>'));assert.deepEqual(ids(),records.slice(0,10).map(o=>o.id));assert(buttons().some(b=>b.callback_data==='adm_orders_page_1'));
+ await cb('adm_orders_page_1');assert.deepEqual(ids(),records.slice(10,20).map(o=>o.id));
+ await cb('adm_orders_view_'+records[12].id+'_1');assert(last().text.includes('Order Details'));assert(last().text.includes('Saved Product 10'));assert(buttons().some(b=>b.callback_data==='adm_orders_page_1'));
+ await cb('adm_orders_page_2');assert.deepEqual(ids(),records.slice(20).map(o=>o.id));assert(!buttons().some(b=>b.text==='Next'));
+ await cb('adm_orders_page_999');assert(last().text.includes('Page 3/3'));
+ await cb('adm_order_search_2');await text(records[0].public_order_id);assert(last().text.includes('Order ID '+records[0].public_order_id));assert(buttons().some(b=>b.callback_data==='adm_orders_page_2'));
+ await cb('adm_order_search_0');await text('999999999999');assert(last().text.includes('No order found'));await cb('adm_orders_page_0');assert(!db.prepare('SELECT * FROM admin_states WHERE user_id=1').get());
+ let n=messages.length;await cb('adm_order_find',99);await cb('adm_orders_page_0',99);await cb('adm_orders_view_'+records[0].id+'_0',99);assert(!messages.slice(n).some(m=>m.text?.includes('All Orders')||m.text?.includes('Order Details')));
+ assert.equal(JSON.stringify(db.prepare('SELECT * FROM orders ORDER BY id DESC').all()),before);assert.equal(db.prepare('SELECT SUM(balance_usd) n FROM users').get().n,money);
+ console.log('PASS: all customers/all order statuses, newest-first pagination, details/back page, exact search, empty list, clamped pages, admin-only and unchanged orders/funds');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
