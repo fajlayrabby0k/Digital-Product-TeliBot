@@ -1,0 +1,26 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,showWalletHistory,walletChangeSql,handleOrderSearchText,sendOrders};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);for(const id of [1,99])db.prepare('INSERT INTO users(user_id,balance_usd) VALUES(?,10)').run(id);
+ const p=db.prepare("INSERT INTO products(name,price_usd,price_bdt) VALUES('No stock',5,625)").run().lastInsertRowid;
+ const api=db.prepare("INSERT INTO products(name,price_usd,price_bdt,is_external) VALUES('API product',5,625,1)").run().lastInsertRowid;
+ const add=(product,status)=>db.prepare("INSERT INTO orders(user_id,product_id,payment_method,amount_usd,amount_bdt,status) VALUES(99,?,'NAGAD',5,625,?)").run(product,status).lastInsertRowid;
+ const unpaid=add(p,'pending'),stock=add(p,'paid_pending_delivery'),supplier=add(api,'paid_pending_delivery'),processing=add(p,'delivering'),done=add(p,'completed');
+ db.prepare("INSERT INTO payment_verification_events(invoice_type,invoice_id,user_id,method,trx_id,reason) VALUES('order',?,99,'nagad','TEST1234','missing')").run(unpaid);
+ db.prepare('UPDATE orders SET provider_error=? WHERE id=?').run('Supplier unavailable',supplier);
+ await cb('adm_orders_list_pending_0');assert(buttons().some(b=>b.text.includes('SMS missing')));assert(buttons().some(b=>b.text.includes('Stock unavailable')));assert(buttons().some(b=>b.text.includes('Supplier issue')));assert(buttons().some(b=>b.text.includes('Delivery processing')));
+ await cb(`adm_orders_item_${unpaid}_pending_0`);assert(last().text.includes('Why this order is pending'));assert(last().text.includes('Receiving-phone SMS record has not arrived'));
+ await cb(`adm_orders_item_${stock}_pending_0`);assert(last().text.includes('stock is insufficient: 0 item(s)'));
+ db.prepare('INSERT INTO inventory(product_id,item_data) VALUES(?,?)').run(p,'PRIVATE-CONTENT');await cb(`adm_orders_item_${stock}_pending_0`);assert(last().text.includes('stock is now sufficient'));assert(!last().text.includes('PRIVATE-CONTENT'));
+ await cb(`adm_orders_item_${supplier}_pending_0`);assert(last().text.includes('supplier has not confirmed'));assert(last().text.includes('Supplier unavailable'));
+ await cb(`adm_orders_item_${processing}_pending_0`);assert(last().text.includes('Delivery is processing or was interrupted'));
+ await cb(`adm_orders_item_${done}_completed_0`);assert(!last().text.includes('Why this order is pending'));assert(last().text.includes('Delivered.'));
+ assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,10);assert.equal(db.prepare('SELECT COUNT(*) n FROM inventory WHERE product_id=? AND is_sold=0').get(p).n,1);
+ console.log('PASS: pending order reasons for payment/SMS, missing/restored stock, supplier issues and processing, delivered-only completion and no financial/stock mutation');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());

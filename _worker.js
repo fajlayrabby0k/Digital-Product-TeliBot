@@ -4143,30 +4143,53 @@ async function showAdminOrdersMenu(env,chatId,messageId=null){
   const buttons=[[{text:`✅ Completed Orders (${totals?.completed||0})`,callback_data:'adm_orders_list_completed_0',style:'success'}],[{text:`⏳ Pending Orders (${totals?.pending||0})`,callback_data:'adm_orders_list_pending_0'}],[{text:'🔎 Find Order',callback_data:'adm_order_search_0'}],[{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
+function pendingOrderLabel(order){
+  if(order.status==='pending')return ({missing:'SMS missing',mismatch:'Payment mismatch',not_found:'Payment not found',payment_expired:'Payment expired',used:'TrxID already used',invalid_format:'Invalid TrxID'})[order.verification_reason]||'Payment pending';
+  if(order.status==='delivering')return 'Delivery processing';
+  if(order.status!=='paid_pending_delivery')return '';
+  if(order.is_external==null)return 'Product unavailable';
+  if(Number(order.provider_retry_at||0)>Date.now())return 'Retry cooldown';
+  if(order.is_external===1)return order.provider_error?'Supplier issue':'Supplier delivery pending';
+  if(Number(order.available_items||0)<Number(order.quantity||1))return 'Stock unavailable';
+  return order.provider_error?'Delivery issue':'Awaiting delivery';
+}
+function pendingOrderExplanation(order){
+  if(order.status==='pending'){
+    if(order.verification_reason&&order.verification_reason!=='verified')return 'Payment is not confirmed. '+paymentDashboardReason(order.verification_reason);
+    if(order.verification_reason==='verified')return 'A payment verification result was recorded, but order processing is not complete. Review Payment Details before retrying.';
+    return 'Payment has not been confirmed. '+(order.trx_id||order.verification_trx?'A transaction ID is saved; check its payment verification details.':'No transaction ID is saved in this order; the customer may not have paid or submitted payment details yet.');
+  }
+  if(order.status==='delivering')return 'Delivery is processing or was interrupted. Do not create another purchase; check saved delivery and supplier status.';
+  if(order.status!=='paid_pending_delivery')return '';
+  if(order.is_external==null)return 'Payment is recorded, but the product record is missing. Admin review is required.';
+  if(order.is_external===1)return 'Payment is recorded, but the supplier has not confirmed complete delivery. '+(order.provider_error?'The saved supplier issue is shown below.':'No specific supplier error was recorded; check the existing supplier request.');
+  if(Number(order.available_items||0)<Number(order.quantity||1))return `Payment is recorded, but local stock is insufficient: ${Number(order.available_items||0)} item(s) available or reserved for this order; ${Number(order.quantity||1)} required.`;
+  return 'Payment is recorded and local stock is now sufficient. Delivery has not completed; check the saved issue below and use Check Delivery.';
+}
 async function showAllAdminOrders(env,chatId,page=0,messageId=null,filter='all'){
   if(!adminUserAccess(env,chatId))return;
   await clearAdminState(env,chatId);
   const where=filter==='completed'?"status='completed'":filter==='pending'?"status IN ('pending','paid_pending_delivery','delivering')":'1=1';
   const count=await env.DB.prepare(`SELECT COUNT(*) AS total FROM orders WHERE ${where}`).first(),total=Number(count?.total||0),pages=Math.max(1,Math.ceil(total/10));
   page=Math.min(pages-1,adminUserPage(page));
-  const {results}=await env.DB.prepare(`SELECT o.*,u.first_name AS customer_name FROM orders o LEFT JOIN users u ON u.user_id=o.user_id WHERE ${where.replace(/status/g,'o.status')} ORDER BY o.id DESC LIMIT 10 OFFSET ?`).bind(page*10).all();
+  const {results}=await env.DB.prepare(`SELECT o.*,u.first_name AS customer_name,p.is_external,v.trx_id AS verification_trx,v.reason AS verification_reason,(SELECT COUNT(*) FROM inventory i WHERE i.product_id=o.product_id AND (i.is_sold=0 OR i.order_id=o.id)) AS available_items FROM orders o LEFT JOIN users u ON u.user_id=o.user_id LEFT JOIN products p ON p.id=o.product_id LEFT JOIN payment_verification_events v ON v.invoice_type='order' AND v.invoice_id=o.id WHERE ${where.replace(/status/g,'o.status')} ORDER BY o.id DESC LIMIT 10 OFFSET ?`).bind(page*10).all();
   let text=`📦 <b>${filter==='completed'?'Completed Orders':filter==='pending'?'Pending Orders':'All Orders'}</b>\nTotal: <b>${total}</b> · Page ${page+1}/${pages}\n\n${results.length?'Newest orders first. Open an order for details or use Find Order.':'No orders yet.'}`;
 
-  const buttons=results.map(o=>[{text:`📦 Order ID ${orderDisplayId(o)} · ${o.status}`,callback_data:adminOrdersItemData(o.id,filter,page)}]);
+  const buttons=results.map(o=>[{text:`📦 Order ID ${orderDisplayId(o)} · ${pendingOrderLabel(o)||o.status}`,callback_data:adminOrdersItemData(o.id,filter,page)}]);
   const pager=[];if(page>0)pager.push({text:'Previous',callback_data:adminOrdersListData(filter,page-1)});if(page+1<pages)pager.push({text:'Next',callback_data:adminOrdersListData(filter,page+1)});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔎 Find Order',callback_data:filter==='all'?`adm_order_search_${page}`:`adm_order_search_${filter}_${page}`}],[{text:'🔄 Refresh',callback_data:adminOrdersListData(filter,page)},{text:'⬅️ Orders',callback_data:'adm_order_find'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null,listFilter='all'){
   if(!adminUserAccess(env,chatId))return;
-  const order=await env.DB.prepare('SELECT o.*,p.name,p.is_external,p.external_id,u.first_name AS customer_name,u.username AS customer_username FROM orders o LEFT JOIN products p ON p.id=o.product_id LEFT JOIN users u ON u.user_id=o.user_id WHERE o.id=?').bind(id).first();
+  const order=await env.DB.prepare(`SELECT o.*,p.name,p.is_external,p.external_id,u.first_name AS customer_name,u.username AS customer_username,v.trx_id AS verification_trx,v.reason AS verification_reason,(SELECT COUNT(*) FROM inventory i WHERE i.product_id=o.product_id AND (i.is_sold=0 OR i.order_id=o.id)) AS available_items FROM orders o LEFT JOIN products p ON p.id=o.product_id LEFT JOIN users u ON u.user_id=o.user_id LEFT JOIN payment_verification_events v ON v.invoice_type='order' AND v.invoice_id=o.id WHERE o.id=?`).bind(id).first();
   if(!order){await sendMsg(env,chatId,'Order not found.');return;}
   const source=order.sale_origin==='api'?'Supplier API':order.sale_origin==='local'?'Local store inventory':order.is_external===1?'Supplier API (current product)':order.is_external===0?'Local store inventory (current product)':'Not recorded';
   const error=order.provider_error?await safeDiagnostic(env,order.provider_error):'No provider error recorded.';
   const canRetry=order.status==='paid_pending_delivery'&&order.is_external!=null&&(!order.is_external||order.provider_request_id);
   let help=order.status==='wallet_credited'?'Payment amount was credited to the wallet by admin. This original order is closed and will not be delivered.':order.status==='completed'?'Delivered. No further purchase or stock allocation will be performed.':order.status==='delivering'?'Processing or interrupted during delivery. Check supplier history and refresh; automatic restart is blocked to avoid duplicate fulfillment.':order.status==='paid_pending_delivery'?(order.is_external&&!order.provider_request_id?'This older API order has no supplier request ID. Reconcile supplier history before taking further action.':order.is_external?'Check Delivery looks up the existing supplier request and resumes it safely. A provider rejection can refund a wallet order through the existing refund rules.':'Restock this local product, then Check Delivery. Previously allocated items are reused; only missing items are allocated.'):'This order is unpaid or closed; delivery cannot be started here.';
   if(order.is_external==null&&order.status==='paid_pending_delivery')help='Product record is missing. Admin reconciliation is required.';
-  const text=`📦 <b>${listPage===null?'Delivery':'Order Details'} · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: ${adminSnippet(order.customer_name||order.username||'Customer',80)}\nTelegram ID: ${customerTelegramId(order.user_id,order.customer_username)}\nSource: <b>${source}</b>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nUnit price: $${adminMoney(Number(order.amount_usd||0)/Number(order.quantity||1))} USD\nOrder total: <b>$${adminMoney(order.amount_usd)} USD</b> · ${adminMoney(order.amount_bdt)} BDT\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
+  const text=`📦 <b>${listPage===null?'Delivery':'Order Details'} · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: ${adminSnippet(order.customer_name||order.username||'Customer',80)}\nTelegram ID: ${customerTelegramId(order.user_id,order.customer_username)}\nSource: <b>${source}</b>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nUnit price: $${adminMoney(Number(order.amount_usd||0)/Number(order.quantity||1))} USD\nOrder total: <b>$${adminMoney(order.amount_usd)} USD</b> · ${adminMoney(order.amount_bdt)} BDT\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)${pendingOrderExplanation(order)?'\n\n<b>Why this order is pending</b>\n'+escapeHtml(pendingOrderExplanation(order)):''}\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
   const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
   if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
   buttons.push([adminUserProfileButton(order.user_id),{text:'💬 Message User',url:customerTelegramUrl(order.user_id,order.customer_username)}],[{text:'🔄 Refresh',callback_data:listPage===null?`adm_delivery_view_${order.id}`:adminOrdersItemData(order.id,listFilter,listPage)}],[listPage===null?{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'}:{text:listFilter==='all'?'All Orders':listFilter==='pending'?'Pending Orders':'Completed Orders',callback_data:adminOrdersListData(listFilter,listPage)},{text:'Admin Panel',callback_data:'admin_panel'}]);

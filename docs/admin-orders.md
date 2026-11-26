@@ -15,3 +15,9 @@ Order details show the customer name and clickable Telegram ID, saved source (Su
 The Orders landing page now offers **Completed Orders** and **Pending Orders** with counts, plus Find Order and Admin Panel. Completed contains only delivered orders (`completed`). Pending contains unpaid, paid-awaiting-delivery and processing orders (`pending`, `paid_pending_delivery`, `delivering`). Closed/cancelled/refunded/wallet-credited records are not mislabeled pending or delivered; they remain available through global Order ID search and historical all-order callback links.
 
 Each list uses order buttons only, ten per page. Details, Refresh, search results and Back preserve the selected list and page. Find Order checks all order records, including orders outside the currently selected list. No payment or delivery state changes are made by browsing.
+
+## Pending reasons
+
+Completed Orders remains delivered-only. Pending order buttons display a short reason instead of a technical status: payment pending, missing SMS, amount/method/time mismatch, payment not found/expired, stock unavailable, supplier issue, retry cooldown, or delivery processing. Opening the order shows **Why this order is pending**, the recorded verification explanation and saved supplier/delivery issue. No cause is invented when evidence is missing.
+
+Local stock explanations count both unsold items and items already reserved for that order, so a partially allocated order is not reported as having zero usable stock. Refresh reflects restored stock and explains that delivery is still awaiting completion. API delivery is not called a stock shortage without evidence; its saved supplier issue is shown. Browsing never allocates stock, credits balances or starts delivery. tests/pending-order-reasons.cjs covers payment/SMS, insufficient/restored local stock, supplier failure, processing and completed details.
