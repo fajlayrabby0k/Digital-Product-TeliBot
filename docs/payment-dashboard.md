@@ -20,3 +20,11 @@ Old Approve Payment, Approve Order and Approve Deposit callbacks, stale approval
 `payment_verification_events` retains submitted IDs and results; `admin_payment_reviews` retains cancellation audit details. Missing SMS is not proof of failed payment. Older attempts without records are not reconstructed. No new API credentials, APK, Cloudflare bindings or Cron configuration are required.
 
 Tests: `node tests/admin-payment-review.cjs` checks delete-only UI, disabled legacy/stale approvals, authorization, cancel/expiry/replay, automatic-claim exclusion, unchanged wallet/delivery and separate Add Balance. Existing mobile, Binance and BEP20 tests cover automatic verification.
+
+## Immediate pending-payment admin alerts
+
+After a customer submits a valid-looking transaction ID and verification fails or remains pending, the bot immediately attempts a private message to the configured administrator. It includes order/deposit, customer ID, method, saved USD/BDT amount, submitted TrxID, a controlled verification explanation, and Payment Details / View Customer buttons. It does not approve, cancel, credit or deliver anything. Existing manual-method submission notices remain in place.
+
+The alert is keyed by invoice type/ID, normalized submitted ID and failure reason. Concurrent/repeated attempts with the same information send once; a changed ID/reason may send a new alert. Success, closed invoices, admin review outcomes and blank IDs do not alert. Failed Telegram sends remain unsent and retry on another recorded verification attempt; there is no claim of guaranteed delivery during a Telegram outage. A short database lease guards concurrent sends. In webhook processing the notification runs in the execution context so user-facing responses do not wait on Telegram delivery.
+
+Run `node tests/pending-payment-alerts.cjs` for notification content, links, concurrency/deduplication, retry after Telegram rejection, method coverage and unchanged financial state.

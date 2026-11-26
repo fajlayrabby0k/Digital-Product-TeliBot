@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-admin-payment-review-1";
+const DB_SCHEMA_VERSION = "2026-11-pending-admin-alerts-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -167,6 +167,7 @@ async function initializeDatabase(db, force) {
       `CREATE TABLE IF NOT EXISTS support_tickets(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id INTEGER NOT NULL,user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open',created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS support_ticket_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,ticket_id INTEGER NOT NULL,sender_id INTEGER NOT NULL,is_admin INTEGER NOT NULL,body TEXT NOT NULL,submission_token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS admin_payment_reviews(invoice_type TEXT NOT NULL,invoice_id INTEGER NOT NULL,user_id INTEGER NOT NULL,admin_id INTEGER NOT NULL,action TEXT NOT NULL,method TEXT NOT NULL,trx_key TEXT NOT NULL,trx_id TEXT NOT NULL,amount_usd REAL NOT NULL,amount_bdt REAL NOT NULL,token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(invoice_type,invoice_id));`,
+      `CREATE TABLE IF NOT EXISTS payment_pending_alerts(invoice_type TEXT NOT NULL,invoice_id INTEGER NOT NULL,trx_key TEXT NOT NULL,reason TEXT NOT NULL,sent INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0,lease_token TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(invoice_type,invoice_id,trx_key,reason));`,
       `CREATE TABLE IF NOT EXISTS payment_verification_events(invoice_type TEXT NOT NULL,invoice_id INTEGER NOT NULL,user_id INTEGER NOT NULL,method TEXT NOT NULL,trx_id TEXT,reason TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 1,updated_at TEXT DEFAULT CURRENT_TIMESTAMP,PRIMARY KEY(invoice_type,invoice_id));`,
       `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE NOT NULL, username TEXT, first_name TEXT, balance_usd REAL DEFAULT 0, balance_bdt REAL DEFAULT 0, referred_by INTEGER DEFAULT 0, total_referrals INTEGER DEFAULT 0, total_spent_usd REAL DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT, price_usd REAL NOT NULL, price_bdt REAL NOT NULL, is_active INTEGER DEFAULT 1, is_external INTEGER DEFAULT 0, external_id TEXT DEFAULT '', cost_price_usd REAL DEFAULT 0, custom_price_usd REAL DEFAULT 0, api_stock INTEGER DEFAULT 0);`,
@@ -3942,7 +3943,28 @@ async function recordPaymentVerification(env,type,id,userId,method,trx,reason){
   const code=/^[a-z_]{1,50}$/.test(String(reason))?String(reason):'unavailable';
   try{await env.DB.prepare(`INSERT INTO payment_verification_events(invoice_type,invoice_id,user_id,method,trx_id,reason) VALUES(?,?,?,?,?,?)
     ON CONFLICT(invoice_type,invoice_id) DO UPDATE SET trx_id=excluded.trx_id,reason=excluded.reason,attempts=attempts+1,updated_at=CURRENT_TIMESTAMP`)
-    .bind(type,id,userId,String(method).slice(0,20),(/^[A-Za-z0-9]{6,100}$/.test(String(trx||''))?String(trx):''),code).run();}catch{console.error('Payment dashboard event could not be saved');}
+    .bind(type,id,userId,String(method).slice(0,20),(/^[A-Za-z0-9]{6,100}$/.test(String(trx||''))?String(trx):''),code).run();
+    if(!['verified','admin_approved','admin_cancelled','closed'].includes(code)&&/^[A-Za-z0-9]{6,100}$/.test(String(trx||''))){
+      const alert=notifyPendingPaymentAdmin(env,type,id,userId,method,String(trx),code).catch(()=>console.error('Pending payment admin alert needs retry'));
+      if(env.__executionContext?.waitUntil)env.__executionContext.waitUntil(alert);else await alert;
+    }
+  }catch{console.error('Payment dashboard event or admin alert could not be saved');}
+}
+async function notifyPendingPaymentAdmin(env,type,id,userId,method,trx,reason){
+  if(!env.ADMIN_ID)return;
+  const table=type==='order'?'orders':'deposits',invoice=await env.DB.prepare(`SELECT * FROM ${table} WHERE id=? AND user_id=? AND status='pending'`).bind(id,userId).first();
+  if(!invoice)return;
+  const key=trx.toUpperCase(),token=crypto.randomUUID(),now=Date.now();
+  await env.DB.prepare('INSERT OR IGNORE INTO payment_pending_alerts(invoice_type,invoice_id,trx_key,reason) VALUES(?,?,?,?)').bind(type,id,key,reason).run();
+  const claimed=await env.DB.prepare('UPDATE payment_pending_alerts SET lease_token=?,lease_until=? WHERE invoice_type=? AND invoice_id=? AND trx_key=? AND reason=? AND sent=0 AND lease_until<=?').bind(token,now+60000,type,id,key,reason,now).run();
+  if(!claimed.meta?.changes)return;
+  let delivered=false;
+  try{
+    const result=await sendMsg(env,env.ADMIN_ID,`⚠️ <b>Payment Pending · Verification Failed</b>\n\n${type==='order'?'Order':'Deposit'} ${type==='order'?orderDisplayId(invoice):id}\nCustomer: <code>${userId}</code>\nMethod: <b>${escapeHtml(String(method).toUpperCase())}</b>\nAmount: <b>$${adminMoney(invoice.amount_usd)} USD</b> · ${adminMoney(invoice.amount_bdt)} BDT\nTrxID: <code>${escapeHtml(trx)}</code>\n\nReason: ${escapeHtml(paymentDashboardReason(reason))}\n\nThis attempt did not verify the payment. Open Payment Details for the latest status.`,[[{text:'Payment Details',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'View Customer',callback_data:`adm_user_view_${userId}`}]]);
+    delivered=Boolean(result?.ok);
+  }finally{
+    await env.DB.prepare('UPDATE payment_pending_alerts SET sent=?,lease_until=0,lease_token=NULL WHERE invoice_type=? AND invoice_id=? AND trx_key=? AND reason=? AND lease_token=?').bind(delivered?1:0,type,id,key,reason,token).run();
+  }
 }
 function paymentDashboardSource(){return `(SELECT 'order' AS kind,id,user_id,payment_method AS method,amount_usd,amount_bdt,trx_id,status,created_at FROM orders WHERE UPPER(payment_method) NOT IN ('WALLET','REDEEM') UNION ALL SELECT 'deposit',id,user_id,method,amount_usd,amount_bdt,trx_id,status,created_at FROM deposits WHERE UPPER(method) NOT IN ('WALLET','REDEEM'))`;}
 function paymentDashboardReason(code){return ({admin_approved:'Payment manually approved by the administrator.',admin_cancelled:'Pending payment cancelled by the administrator.',verified:'Payment verified. Check invoice status for credit/delivery.',missing:'Receiving-phone SMS record has not arrived.',mismatch:'SMS method, receiving account, amount or time did not match.',used:'Transaction was already used.',already_used:'Payment or invoice was already submitted.',not_found:'Transaction was not found in the payment network/history.',rpc_unavailable:'BNB Smart Chain RPC is unavailable.',tx_failed:'Blockchain transaction failed or its hash did not match.',confirmations:'Waiting for 12 blockchain confirmations.',old_payment:'Payment predates the invoice.',recipient_mismatch:'Supported USDT transfer to the receiving wallet was not found.',unconfirmed:'Waiting for blockchain confirmations.',pending:'Blockchain transaction is pending.',amount_low:'Received amount is below the required amount.',amount_high:'Payment exceeds this method’s limit.',invalid_format:'Submitted transaction ID format is invalid.',invalid_invoice:'Invoice is not payable or its time is invalid.',invalid_payment:'Transaction is not an eligible incoming USDT payment.',payment_expired:'Payment was submitted outside the allowed time.',api_rejected:'Binance API rejected verification; check API permissions/access.',not_configured:'Payment verification credentials are missing.',manual_approval:'Automatic verification is disabled.',no_wallet:'Receiving wallet is not configured.',unavailable:'Verification service is unavailable; retry may be needed.',maintenance:'Verification is paused during maintenance.',membership:'Required channel/group membership is missing.',closed:'Invoice was already processed or closed.',claim_failed:'Payment could not be reserved; check for prior use.'})[code]||`Verification result: ${String(code||'No saved attempt').replace(/[^a-z_ ]/gi,'').slice(0,60)}`;}
