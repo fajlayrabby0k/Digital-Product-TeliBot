@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-pending-admin-alerts-1";
+const DB_SCHEMA_VERSION = "2026-11-admin-order-delete-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -224,6 +224,10 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE products ADD COLUMN category_override INTEGER DEFAULT 0;",
       "ALTER TABLE products ADD COLUMN purchase_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN purchase_unit_cost_usd REAL DEFAULT NULL;",
+      "ALTER TABLE orders ADD COLUMN admin_deleted INTEGER NOT NULL DEFAULT 0;",
+      "ALTER TABLE orders ADD COLUMN admin_deleted_by TEXT;",
+      "ALTER TABLE orders ADD COLUMN admin_deleted_at TEXT;",
+      "ALTER TABLE orders ADD COLUMN admin_delete_token TEXT;",
       "ALTER TABLE orders ADD COLUMN sale_origin TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN provider_unit_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN product_id INTEGER DEFAULT NULL;",
@@ -1618,6 +1622,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     }
     const broadcastAction=data.match(/^adm_broadcast_send_([a-f0-9-]{36})$/);
     if(broadcastAction){await sendBroadcastBatch(env,chatId,broadcastAction[1]);return;}
+    if(await handleAdminOrderDelete(env,chatId,data,messageId))return;
     const allOrdersPage=data.match(/^adm_orders_page_(\d+)$/),allOrderView=data.match(/^adm_orders_view_(\d+)_(\d+)$/),orderSearch=data.match(/^adm_order_search(?:_(\d+))?$/);
     const orderList=data.match(/^adm_orders_list_(pending|completed)_(\d+)$/),orderItem=data.match(/^adm_orders_item_(\d+)_(pending|completed)_(\d+)$/),filteredSearch=data.match(/^adm_order_search_(pending|completed)_(\d+)$/);
     if(data==='adm_order_find'){await showAdminOrdersMenu(env,chatId,messageId);return;}
@@ -4125,7 +4130,7 @@ async function showDeliveryAdminList(env,chatId,filter='pending',page=0,messageI
   if(!adminUserAccess(env,chatId))return;
   await clearAdminState(env,chatId);page=adminUserPage(page);
   const status=filter==='processing'?'delivering':filter==='completed'?'completed':'paid_pending_delivery';
-  const {results}=await env.DB.prepare('SELECT o.id,o.user_id,o.amount_usd,o.product_name,p.name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.status=? ORDER BY o.id DESC LIMIT 11 OFFSET ?').bind(status,page*10).all();
+  const {results}=await env.DB.prepare('SELECT o.id,o.user_id,o.amount_usd,o.product_name,p.name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.status=? AND COALESCE(o.admin_deleted,0)=0 ORDER BY o.id DESC LIMIT 11 OFFSET ?').bind(status,page*10).all();
   const title=filter==='processing'?'Processing':filter==='completed'?'Completed':'Paid / Delivery Pending';
   const text=`📦 <b>Delivery Management</b>\n\n<b>${title}</b> · Page ${page+1}\n\n${results.length?'Choose an order to see its latest delivery status.':'No orders in this list.'}\n\nCheck Delivery resumes the existing paid order. It does not charge the customer again. Processing orders are shown for review and cannot be restarted here.`;
   const buttons=results.slice(0,10).map(o=>[{text:`${orderDisplayId(o)} · ${String(o.product_name||o.name||'Product').slice(0,28)} · $${adminMoney(o.amount_usd)} · ${o.user_id}`,callback_data:`adm_delivery_view_${o.id}`}]);
@@ -4133,12 +4138,33 @@ async function showDeliveryAdminList(env,chatId,filter='pending',page=0,messageI
   buttons.push([{text:'Pending Delivery',callback_data:'adm_delivery_list_pending_0'},{text:'Processing',callback_data:'adm_delivery_list_processing_0'}],[{text:'Completed',callback_data:'adm_delivery_list_completed_0'},{text:'🔄 Refresh',callback_data:`adm_delivery_list_${filter}_${page}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
+async function handleAdminOrderDelete(env,chatId,data,messageId){
+  if(!adminUserAccess(env,chatId))return false;
+  let match=data.match(/^adm_order_delete_(\d+)$/);
+  if(match){
+    const order=await env.DB.prepare('SELECT * FROM orders WHERE id=? AND COALESCE(admin_deleted,0)=0').bind(match[1]).first();
+    if(!order){await showAdminOrdersMenu(env,chatId,messageId);return true;}
+    const token=crypto.randomUUID().replace(/-/g,''),draft=JSON.stringify({token,id:order.id,expires:Date.now()+300000});
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'confirm_order_delete',?)").bind(chatId,draft).run();
+    await editMsg(env,chatId,messageId,`🗑️ <b>Delete Order ${orderDisplayId(order)}?</b>\n\nCustomer: ${customerTelegramId(order.user_id)}\nStatus: ${adminSnippet(order.status,35)}\nAmount: $${adminMoney(order.amount_usd)} USD\n\nThe order will be removed from admin order lists and search. Unpaid, unclaimed orders will be cancelled. Recorded payments, wallet balances, sales history and delivered files will be preserved. Paid or already-processing orders keep their existing payment/delivery handling. No refund or wallet credit is issued.\n\nConfirmation expires in 5 minutes.`,[[{text:'Confirm Delete Order',callback_data:`adm_order_delete_ok_${token}`,style:'danger'}],[{text:'Cancel',callback_data:`adm_orders_view_${order.id}_0`}]]);return true;
+  }
+  match=data.match(/^adm_order_delete_ok_([a-f0-9]{32})$/);if(!match)return false;
+  const state=await env.DB.prepare("SELECT data FROM admin_states WHERE user_id=? AND state='confirm_order_delete'").bind(chatId).first();let d;try{d=JSON.parse(state?.data||'null');}catch{}
+  if(!d||d.token!==match[1]||d.expires<Date.now()){await sendMsg(env,chatId,'This confirmation expired or was already used.',[[{text:'Orders',callback_data:'adm_order_find'}]]);return true;}
+  const results=await env.DB.batch([
+    env.DB.prepare("UPDATE orders SET admin_deleted=1,admin_deleted_by=?,admin_deleted_at=CURRENT_TIMESTAMP,admin_delete_token=? WHERE id=? AND COALESCE(admin_deleted,0)=0 AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='confirm_order_delete' AND data=?)").bind(String(chatId),d.token,d.id,chatId,state.data),
+    env.DB.prepare("UPDATE orders SET status='cancelled' WHERE id=? AND admin_delete_token=? AND status='pending' AND NOT EXISTS(SELECT 1 FROM mobile_payment_claims WHERE invoice_type='order' AND invoice_id=orders.id) AND NOT EXISTS(SELECT 1 FROM binance_payment_claims WHERE invoice_type='order' AND invoice_id=orders.id) AND NOT EXISTS(SELECT 1 FROM bep20_payment_claims WHERE invoice_type='order' AND invoice_id=orders.id)").bind(d.id,d.token),
+    env.DB.prepare("UPDATE mobile_payment_invoices SET status='cancelled' WHERE invoice_type='order' AND invoice_id=? AND status='pending' AND EXISTS(SELECT 1 FROM orders WHERE id=? AND admin_delete_token=? AND status='cancelled')").bind(d.id,d.id,d.token),
+    env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='confirm_order_delete' AND data=?").bind(chatId,state.data)
+  ]);
+  await editMsg(env,chatId,messageId,results[0].meta?.changes?'✅ Order deleted from admin lists. Payment and balance records are preserved.':'This order was already deleted or the confirmation was replaced.',[[{text:'Orders',callback_data:'adm_order_find'}]]);return true;
+}
 function adminOrdersListData(filter,page){return filter==='all'?`adm_orders_page_${page}`:`adm_orders_list_${filter}_${page}`;}
 function adminOrdersItemData(id,filter,page){return filter==='all'?`adm_orders_view_${id}_${page}`:`adm_orders_item_${id}_${filter}_${page}`;}
 async function showAdminOrdersMenu(env,chatId,messageId=null){
   if(!adminUserAccess(env,chatId))return;
   await clearAdminState(env,chatId);
-  const totals=await env.DB.prepare("SELECT SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,SUM(CASE WHEN status IN ('pending','paid_pending_delivery','delivering') THEN 1 ELSE 0 END) pending FROM orders").first();
+  const totals=await env.DB.prepare("SELECT SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,SUM(CASE WHEN status IN ('pending','paid_pending_delivery','delivering') THEN 1 ELSE 0 END) pending FROM orders WHERE COALESCE(admin_deleted,0)=0").first();
   const text='📦 <b>Orders</b>\n\nView completed orders, review pending deliveries, or find a specific order by its ID.';
   const buttons=[[{text:`✅ Completed Orders (${totals?.completed||0})`,callback_data:'adm_orders_list_completed_0',style:'success'}],[{text:`⏳ Pending Orders (${totals?.pending||0})`,callback_data:'adm_orders_list_pending_0'}],[{text:'🔎 Find Order',callback_data:'adm_order_search_0'},{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
@@ -4169,10 +4195,10 @@ function pendingOrderExplanation(order){
 async function showAllAdminOrders(env,chatId,page=0,messageId=null,filter='all'){
   if(!adminUserAccess(env,chatId))return;
   await clearAdminState(env,chatId);
-  const where=filter==='completed'?"status='completed'":filter==='pending'?"status IN ('pending','paid_pending_delivery','delivering')":'1=1';
+  const where="COALESCE(admin_deleted,0)=0 AND "+(filter==='completed'?"status='completed'":filter==='pending'?"status IN ('pending','paid_pending_delivery','delivering')":'1=1');
   const count=await env.DB.prepare(`SELECT COUNT(*) AS total FROM orders WHERE ${where}`).first(),total=Number(count?.total||0),pages=Math.max(1,Math.ceil(total/10));
   page=Math.min(pages-1,adminUserPage(page));
-  const {results}=await env.DB.prepare(`SELECT o.*,u.first_name AS customer_name,p.is_external,v.trx_id AS verification_trx,v.reason AS verification_reason,(SELECT COUNT(*) FROM inventory i WHERE i.product_id=o.product_id AND (i.is_sold=0 OR i.order_id=o.id)) AS available_items FROM orders o LEFT JOIN users u ON u.user_id=o.user_id LEFT JOIN products p ON p.id=o.product_id LEFT JOIN payment_verification_events v ON v.invoice_type='order' AND v.invoice_id=o.id WHERE ${where.replace(/status/g,'o.status')} ORDER BY o.id DESC LIMIT 10 OFFSET ?`).bind(page*10).all();
+  const {results}=await env.DB.prepare(`SELECT o.*,u.first_name AS customer_name,p.is_external,v.trx_id AS verification_trx,v.reason AS verification_reason,(SELECT COUNT(*) FROM inventory i WHERE i.product_id=o.product_id AND (i.is_sold=0 OR i.order_id=o.id)) AS available_items FROM orders o LEFT JOIN users u ON u.user_id=o.user_id LEFT JOIN products p ON p.id=o.product_id LEFT JOIN payment_verification_events v ON v.invoice_type='order' AND v.invoice_id=o.id WHERE ${where.replace(/status/g,'o.status').replace(/admin_deleted/g,'o.admin_deleted')} ORDER BY o.id DESC LIMIT 10 OFFSET ?`).bind(page*10).all();
   let text=`📦 <b>${filter==='completed'?'Completed Orders':filter==='pending'?'Pending Orders':'All Orders'}</b>\nTotal: <b>${total}</b> · Page ${page+1}/${pages}\n\n${results.length?'Newest orders first. Open an order for details or use Find Order.':'No orders yet.'}`;
 
   const buttons=results.map(o=>[{text:`📦 Order ID ${orderDisplayId(o)} · ${pendingOrderLabel(o)||o.status}`,callback_data:adminOrdersItemData(o.id,filter,page)}]);
@@ -4182,8 +4208,8 @@ async function showAllAdminOrders(env,chatId,page=0,messageId=null,filter='all')
 }
 async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null,listFilter='all'){
   if(!adminUserAccess(env,chatId))return;
-  const order=await env.DB.prepare(`SELECT o.*,p.name,p.is_external,p.external_id,u.first_name AS customer_name,u.username AS customer_username,v.trx_id AS verification_trx,v.reason AS verification_reason,(SELECT COUNT(*) FROM inventory i WHERE i.product_id=o.product_id AND (i.is_sold=0 OR i.order_id=o.id)) AS available_items FROM orders o LEFT JOIN products p ON p.id=o.product_id LEFT JOIN users u ON u.user_id=o.user_id LEFT JOIN payment_verification_events v ON v.invoice_type='order' AND v.invoice_id=o.id WHERE o.id=?`).bind(id).first();
-  if(!order){await sendMsg(env,chatId,'Order not found.');return;}
+  const order=await env.DB.prepare(`SELECT o.*,p.name,p.is_external,p.external_id,u.first_name AS customer_name,u.username AS customer_username,v.trx_id AS verification_trx,v.reason AS verification_reason,(SELECT COUNT(*) FROM inventory i WHERE i.product_id=o.product_id AND (i.is_sold=0 OR i.order_id=o.id)) AS available_items FROM orders o LEFT JOIN products p ON p.id=o.product_id LEFT JOIN users u ON u.user_id=o.user_id LEFT JOIN payment_verification_events v ON v.invoice_type='order' AND v.invoice_id=o.id WHERE o.id=? AND COALESCE(o.admin_deleted,0)=0`).bind(id).first();
+  if(!order){await sendMsg(env,chatId,'Order not found or deleted.');return;}
   const source=order.sale_origin==='api'?'Supplier API':order.sale_origin==='local'?'Local store inventory':order.is_external===1?'Supplier API (current product)':order.is_external===0?'Local store inventory (current product)':'Not recorded';
   const error=order.provider_error?await safeDiagnostic(env,order.provider_error):'No provider error recorded.';
   const canRetry=order.status==='paid_pending_delivery'&&order.is_external!=null&&(!order.is_external||order.provider_request_id);
@@ -4192,6 +4218,7 @@ async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null
   const text=`📦 <b>${listPage===null?'Delivery':'Order Details'} · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: ${adminSnippet(order.customer_name||order.username||'Customer',80)}\nTelegram ID: ${customerTelegramId(order.user_id,order.customer_username)}\nSource: <b>${source}</b>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nUnit price: $${adminMoney(Number(order.amount_usd||0)/Number(order.quantity||1))} USD\nOrder total: <b>$${adminMoney(order.amount_usd)} USD</b> · ${adminMoney(order.amount_bdt)} BDT\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)${pendingOrderExplanation(order)?'\n\n<b>Why this order is pending</b>\n'+escapeHtml(pendingOrderExplanation(order)):''}\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
   const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
   if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
+  buttons.push([{text:'🗑️ Delete Order',callback_data:`adm_order_delete_${order.id}`,style:'danger'}]);
   buttons.push([adminUserProfileButton(order.user_id),{text:'💬 Message User',url:customerTelegramUrl(order.user_id,order.customer_username)}],[{text:'🔄 Refresh',callback_data:listPage===null?`adm_delivery_view_${order.id}`:adminOrdersItemData(order.id,listFilter,listPage)}],[listPage===null?{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'}:{text:listFilter==='all'?'All Orders':listFilter==='pending'?'Pending Orders':'Completed Orders',callback_data:adminOrdersListData(listFilter,listPage)},{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
@@ -4335,7 +4362,7 @@ async function handleOrderSearchText(env,chatId,text,state){
   const match=String(text).trim().match(/^(?:order[:# -]*|#)?(\d{1,15})$/i);
   if(!match){await sendMsg(env,chatId,'Enter this store’s 5-digit Order ID, e.g. 58241.');return true;}
   const digits=match[1],legacy=String(text).trim().startsWith('#')||digits.length!==5;
-  const order=await env.DB.prepare(legacy?'SELECT id FROM orders WHERE id=?':'SELECT id FROM orders WHERE public_order_id=?').bind(digits).first();
+  const order=await env.DB.prepare(legacy?'SELECT id FROM orders WHERE id=? AND COALESCE(admin_deleted,0)=0':'SELECT id FROM orders WHERE public_order_id=? AND COALESCE(admin_deleted,0)=0').bind(digits).first();
   if(!order){await sendMsg(env,chatId,'No order found with this ID. Check the number and try again.');return true;}
   let context;try{context=JSON.parse(state.data);}catch{}
   const page=adminUserPage(context?.page??state.data),filter=['pending','completed'].includes(context?.filter)?context.filter:'all';
