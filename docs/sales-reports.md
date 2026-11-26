@@ -12,7 +12,7 @@ New orders preserve origin, selling total, quantity, API provider unit cost or l
 
 - Gross profit = saved selling total − saved unit purchase cost × quantity.
 - Referral commission expense = saved per-order commission cents, for delivered orders only.
-- Net profit = gross profit − referral commission expense.
+- Net profit = combined recorded gross profit − order-linked referral commission expense − previously paid unlinked referral commission in the report period.
 
 Amounts are totaled as integer USD cents with per-order cost rounding. Negative profits are retained. API cost uses the saved catalog purchase price at checkout/order creation, not a guessed later catalog value. No additional operating costs are assumed.
 
@@ -22,8 +22,10 @@ The summary separates API/local sales and gross profits, total commission expens
 
 `order_referral_credits` is unique per order. The referral credit and its ledger entry are atomic; fresh tokens and database uniqueness prevent repeated/concurrent credit. Every production delivery path supplies the order ID. Wallet History references `order:ID`, making commission attributable to its originating order. Failed credits roll back and are retried in bounded batches after webhook activity or scheduled sync. Report rendering itself never credits wallets or mutates orders.
 
-Historical commissions without an order reference are not guessed or re-linked. Existing orders without referral snapshots or cost records are explicitly excluded from net profit. Sales are still reported; gross profit excludes missing-cost orders. When records are incomplete, the report shows the included gross/referral subtotal and excluded count so the displayed net does not imply full historical coverage. Existing funds/history are not reset or retroactively credited.
+Historical commission payouts without an order reference are taken from positive `wallet_history` entries with reason `referral`, by payout date in the selected report period. They are not guessed or re-linked to individual orders. Entries attributable to `order_referral_credits` through their order reference and referrer are excluded from the historical subtotal, preventing double deduction. Aggregate net uses all recorded gross profit less the linked commission obligation and these actual historical payouts. Missing purchase costs remain excluded from gross profit and clearly disclosed; per-order net may remain unknown when historical linkage is missing. Existing funds/history are not reset or retroactively credited.
 
 ## Validation
 
 `tests/exact-sales-profit.cjs` verifies local/API quantity costs, immutable price/rate snapshots, completed-only figures, zero profit from deposits/wallet additions, commission concurrency/reuse/rollback/recovery, negative profits, breakdown and unknown historical records. `tests/sales-reports.cjs` covers period boundaries and historical costs; `tests/referral-earnings.cjs` covers actual main-wallet credits and lifetime earned display. All worker tests and Android parser-to-payment integration passed before release.
+
+Regression: tests/legacy-referral-profit.cjs reproduces a $1.00 recorded gross profit and $0.32 historical referral payment, requiring net $0.68. Adding a new linked $0.25 commission to another $1 gross order requires total expense $0.57 and net $1.43; linked payouts are not counted twice. Changing wallet balances cannot change profit. Historical payouts outside Today remain visible/deducted in All Time.
