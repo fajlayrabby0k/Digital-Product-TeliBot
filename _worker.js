@@ -4140,7 +4140,7 @@ async function showAdminOrdersMenu(env,chatId,messageId=null){
   await clearAdminState(env,chatId);
   const totals=await env.DB.prepare("SELECT SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,SUM(CASE WHEN status IN ('pending','paid_pending_delivery','delivering') THEN 1 ELSE 0 END) pending FROM orders").first();
   const text='📦 <b>Orders</b>\n\nChoose an order list.';
-  const buttons=[[{text:`✅ Completed Orders (${totals?.completed||0})`,callback_data:'adm_orders_list_completed_0',style:'success'},{text:`⏳ Pending Orders (${totals?.pending||0})`,callback_data:'adm_orders_list_pending_0'}],[{text:'🔎 Find Order',callback_data:'adm_order_search_0'},{text:'Admin Panel',callback_data:'admin_panel'}]];
+  const buttons=[[{text:`✅ Completed Orders (${totals?.completed||0})`,callback_data:'adm_orders_list_completed_0',style:'success'}],[{text:`⏳ Pending Orders (${totals?.pending||0})`,callback_data:'adm_orders_list_pending_0'}],[{text:'🔎 Find Order',callback_data:'adm_order_search_0'},{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 function pendingOrderLabel(order){
