@@ -2881,8 +2881,7 @@ async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = n
   const welcome = `🛒 <b>Welcome to SMART SUBS STORE!</b>\n\n` +
     `Hello ${escapeHtml(firstName)}! 👋\n` +
     `Browse subscriptions, manage your wallet and track your orders.\n\n` +
-    `<blockquote>💰 <b>Balance</b>\n` +
-    `<b>$${usdBal} USD</b>  ≈  ৳${bdtBal} BDT\n🎁 Referral Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
+    `<blockquote>💰 <b>Balance: $${usdBal}</b> ≈ ৳${bdtBal}\n🎁 Referral Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
     `Choose an option below:`;
 
   const keyboard = [
