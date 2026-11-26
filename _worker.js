@@ -1377,9 +1377,17 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
   const actor = update.message?.chat?.id ?? update.callback_query?.message?.chat?.id;
   if (String(actor) !== String(env.ADMIN_ID)) env = { ...env, __requestSettings: new Map() };
   await ensureDbReady(env.DB);
+  let requestUser,requestState,requestUserLoaded=false;
   if (actor !== undefined && actor !== null && String(actor) !== String(env.ADMIN_ID)) {
     // One fresh settings snapshot per customer update; no cross-request stale settings.
-    const {results:settings}=await env.DB.prepare('SELECT key,value FROM settings').all();
+    // Independent, read-only snapshots overlap; maintenance still gates every write.
+    const [settingsResult,userSnapshot,stateSnapshot]=await Promise.all([
+      env.DB.prepare('SELECT key,value FROM settings').all(),
+      env.DB.prepare('SELECT * FROM users WHERE user_id = ?').bind(actor).first(),
+      update.message?env.DB.prepare('SELECT * FROM user_states WHERE user_id = ?').bind(actor).first():Promise.resolve(null)
+    ]);
+    const settings=settingsResult.results;
+    requestUser=userSnapshot;requestState=stateSnapshot;requestUserLoaded=true;
     for(const row of settings)env.__requestSettings.set(row.key,Promise.resolve({value:row.value}));
     env.__settingsLoaded=settings.length>0;
     const mode=await getSetting(env,'maintenance_mode','0');
@@ -1399,8 +1407,8 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
 
     // User Registration / Loading & Referral Tracking
     const [storedUser, storedState] = await Promise.all([
-      env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first(),
-      env.DB.prepare("SELECT * FROM user_states WHERE user_id = ?").bind(chatId).first()
+      requestUserLoaded?Promise.resolve(requestUser):env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first(),
+      requestUserLoaded?Promise.resolve(requestState):env.DB.prepare("SELECT * FROM user_states WHERE user_id = ?").bind(chatId).first()
     ]);
     if(await denyBlockedUser(env,chatId,storedUser))return;
     const userState = navigationCommand ? null : storedState;
@@ -1624,7 +1632,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       else await acknowledgement;
     }
 
-    let user = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
+    let user = requestUserLoaded?requestUser:await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(chatId).first();
     if(await denyBlockedUser(env,chatId,user,messageId))return;
     const firstName = cb.from.first_name || "Customer";
     const username = cb.from.username ? `@${cb.from.username}` : firstName;
@@ -2925,9 +2933,9 @@ async function referralCommissionEarned(env,chatId){
 }
 
 async function sendHomeDashboard(env, chatId, user, firstName, editMessageId = null) {
-  const referralEarned=await referralCommissionEarned(env,chatId);
+  const [referralEarned,rateValue]=await Promise.all([referralCommissionEarned(env,chatId),getSetting(env,"usd_to_bdt_rate","125")]);
   const usdBal = user ? (user.balance_usd || 0).toFixed(2) : "0.00";
-  const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
+  const rate = parseFloat(rateValue);
   const bdtBal = user ? Math.round((user.balance_usd || 0) * rate) : 0;
 
   const welcome = `🛒 <b>Welcome to SMART SUBS STORE!</b>\n\n` +
@@ -4535,8 +4543,10 @@ async function syncBrowsingCatalog(env,force=false){
 }
 async function showShopCategories(env,chatId,messageId=null,force=false,page=0){
   await syncBrowsingCatalog(env,force);
-  const totals=await env.DB.prepare("SELECT (SELECT COUNT(*)+1 FROM product_categories WHERE is_deleted=0 AND LOWER(name) NOT IN ('subscription','others subscription')) AS categories,(SELECT COUNT(*) FROM products WHERE is_active=1) AS products,COALESCE((SELECT SUM(CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=products.id AND is_sold=0) END) FROM products WHERE is_active=1),0) AS stock").first();
-  const {results}=await env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count,0 AS sort_order FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 AND LOWER(c.name) NOT IN ('subscription','others subscription') GROUP BY c.id UNION ALL SELECT 0 AS id,'Others Subscription' AS name,NULL AS custom_icon,COUNT(*) AS count,1 AS sort_order FROM products WHERE is_active=1 AND (shop_category_id IS NULL OR shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name) IN ('subscription','others subscription') AND is_deleted=0)) ORDER BY sort_order,name COLLATE NOCASE").all();
+  const [totals,{results}]=await Promise.all([
+    env.DB.prepare("SELECT (SELECT COUNT(*)+1 FROM product_categories WHERE is_deleted=0 AND LOWER(name) NOT IN ('subscription','others subscription')) AS categories,(SELECT COUNT(*) FROM products WHERE is_active=1) AS products,COALESCE((SELECT SUM(CASE WHEN is_external=1 THEN MAX(0,COALESCE(api_stock,0)) ELSE (SELECT COUNT(*) FROM inventory WHERE product_id=products.id AND is_sold=0) END) FROM products WHERE is_active=1),0) AS stock").first(),
+    env.DB.prepare("SELECT c.id,c.name,c.custom_icon,COUNT(p.id) AS count,0 AS sort_order FROM product_categories c LEFT JOIN products p ON p.shop_category_id=c.id AND p.is_active=1 WHERE c.is_deleted=0 AND LOWER(c.name) NOT IN ('subscription','others subscription') GROUP BY c.id UNION ALL SELECT 0 AS id,'Others Subscription' AS name,NULL AS custom_icon,COUNT(*) AS count,1 AS sort_order FROM products WHERE is_active=1 AND (shop_category_id IS NULL OR shop_category_id IN (SELECT id FROM product_categories WHERE LOWER(name) IN ('subscription','others subscription') AND is_deleted=0)) ORDER BY sort_order,name COLLATE NOCASE").all()
+  ]);
   const choices=results.map(c=>categoryButton(c,`shopcat_${c.id}_0`,true)),buttons=[];
   for(let i=0;i<choices.length;i+=2)buttons.push(choices.slice(i,i+2));
   buttons.push([{text:'🔄 Refresh',callback_data:'shop_refresh'},{text:'🏠 Main Menu',callback_data:'home'}]);

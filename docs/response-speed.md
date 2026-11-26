@@ -17,3 +17,9 @@ The bot remains on Cloudflare Pages. No new service, scheduler or payment integr
 Run `node tests/runtime-speed.cjs`, `node tests/shop-pagination.cjs`, `node tests/response-speed.cjs` and the existing payment/stock/icon tests. Runtime tests use actual SQLite plus simulated database round-trip latency. They verify initial installation batching, one-query subsequent cold initialization, migration deduplication, index usage, scoped setting reuse, parallel dashboard queries, membership cache invalidation/fresh checks, provider snapshot reuse and identical-edit handling.
 
 These tests do not measure the deployed bot's Telegram/network response time. Provider API, Telegram, D1 placement and blockchain confirmations can still dominate latency. Deploy the latest Pages code and measure the live interaction before claiming a particular response time.
+
+### Navigation read overlap (2026-11-26)
+
+Customer updates now load settings, the customer record and (for text messages) the input state concurrently, and reuse those records within the update. Maintenance and account blocking still run before user actions or writes. Settings remain fresh for every update. Home loads referral earnings and the exchange rate concurrently; Shop Categories loads totals and buttons concurrently. No cross-request wallet cache was added, and checkout verification remains fresh.
+
+`node tests/settings-speed.cjs` asserts overlapping reads, one customer/state lookup per update, fresh maintenance changes, and shop rendering. A local run with simulated 5 ms read latency measured home navigation at 24.1 ms before and 19.6 ms after; these are mock database measurements, not live Telegram response times. All worker tests passed after this change.
