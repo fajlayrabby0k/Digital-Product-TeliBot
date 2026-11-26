@@ -30,3 +30,5 @@ The alert is keyed by invoice type/ID, normalized submitted ID and failure reaso
 Run `node tests/pending-payment-alerts.cjs` for notification content, links, concurrency/deduplication, retry after Telegram rejection, method coverage and unchanged financial state.
 
 Each payment entry in Pending and Completed shows the customer name and Telegram user ID directly in the list. Names are loaded with a single left join, safely escaped and shortened to keep lists readable. Username is used when a first name is unavailable; missing user records retain the payment and its saved user ID. Redeem credits use the same customer display.
+
+Telegram IDs in payment lists, payment details and pending-payment admin alerts are clickable profile links. A valid stored @username uses https://t.me/username; otherwise the link uses tg://user?id=ID. Payment details also include **Message User** beside View Customer. This opens Telegram for the admin; the bot does not send a private message on the admin's behalf. Opening or messaging remains subject to Telegram client behavior and user privacy restrictions.
