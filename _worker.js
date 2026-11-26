@@ -3981,13 +3981,13 @@ async function showPaymentDashboard(env,chatId,filter='menu',page=0,messageId=nu
   await clearAdminState(env,chatId);page=adminUserPage(page);
   const from=`${paymentDashboardSource()} x LEFT JOIN payment_verification_events e ON e.invoice_type=x.kind AND e.invoice_id=x.id LEFT JOIN mobile_payment_invoices m ON m.invoice_type=x.kind AND m.invoice_id=x.id LEFT JOIN users u ON u.user_id=x.user_id`;
   const hasTrx="COALESCE(NULLIF(TRIM(e.trx_id),''),NULLIF(TRIM(m.trx_id),''),NULLIF(TRIM(x.trx_id),''),'')<>''";
-  const summary=await env.DB.prepare(`SELECT COUNT(*) AS total,SUM(CASE WHEN x.status='pending' AND ${hasTrx} THEN 1 ELSE 0 END) AS pending,SUM(CASE WHEN x.status IN ('paid_pending_delivery','delivering') THEN 1 ELSE 0 END) AS delivery,SUM(CASE WHEN x.status IN ('completed','paid_pending_delivery','delivering') THEN 1 ELSE 0 END) AS completed FROM ${from}`).first();
+  const summary=await env.DB.prepare(`SELECT COUNT(*) AS total,SUM(CASE WHEN x.status='pending' AND ${hasTrx} THEN 1 ELSE 0 END) AS pending,SUM(CASE WHEN x.status IN ('paid_pending_delivery','delivering') THEN 1 ELSE 0 END) AS delivery,SUM(CASE WHEN x.status IN ('completed','paid_pending_delivery','delivering','wallet_credited') THEN 1 ELSE 0 END) AS completed FROM ${from}`).first();
   if(filter==='menu'){
     const text=`💳 <b>Payment Dashboard</b>\n\nChoose a payment list.`;
     const buttons=[[{text:`🔴 Pending Payments (${summary?.pending||0})`,callback_data:'adm_paydash_pending_0',style:'danger'}],[{text:`✅ Completed Payments (${summary?.completed||0})`,callback_data:'adm_paydash_completed_0',style:'success'}],[{text:'⬅️ Admin Panel',callback_data:'admin_panel'}]];
     return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
   }
-  const where=filter==='cancelled'?"x.status IN ('cancelled','rejected')":filter==='completed'?"x.status IN ('completed','paid_pending_delivery','delivering')":filter==='delivery'?"x.status IN ('paid_pending_delivery','delivering')":filter==='issues'?`x.status='pending' AND ${hasTrx} AND e.reason IS NOT NULL AND e.reason<>'verified'`:`x.status='pending' AND ${hasTrx}`;
+  const where=filter==='cancelled'?"x.status IN ('cancelled','rejected')":filter==='completed'?"x.status IN ('completed','paid_pending_delivery','delivering','wallet_credited')":filter==='delivery'?"x.status IN ('paid_pending_delivery','delivering')":filter==='issues'?`x.status='pending' AND ${hasTrx} AND e.reason IS NOT NULL AND e.reason<>'verified'`:`x.status='pending' AND ${hasTrx}`;
   const {results}=await env.DB.prepare(`SELECT x.*,u.first_name AS customer_name,u.username AS customer_username,COALESCE(NULLIF(e.trx_id,''),NULLIF(m.trx_id,''),NULLIF(x.trx_id,'')) AS submitted_trx,e.reason FROM ${from} WHERE ${where} ORDER BY x.created_at DESC,x.kind,x.id DESC LIMIT 11 OFFSET ?`).bind(page*10).all();
   const titles={pending:'Pending',submitted:'IDs Submitted',issues:'Verification Issues',delivery:'Paid / Delivery Pending',completed:'Completed',cancelled:'Cancelled / Deleted'};
   let text=`${filter==='completed'?'✅ Completed Payments':'🔴 '+(filter==='pending'||filter==='submitted'?'Pending Payments':titles[filter]||'Pending Payments')}\n${notice?'\n✅ Pending payment deleted. The list is up to date.\n':''}\nPage ${page+1}\n${results.length?'':'No payments in this list.'}`;
@@ -4009,16 +4009,55 @@ async function showPaymentDashboardDetail(env,chatId,type,id,messageId=null){
   const isRedeem=String(invoice.method).toUpperCase()==='REDEEM';
   const receipt=isRedeem?'Redeem '+invoice.id:event?.trx_id||mobile?.trx_id||invoice.trx_id||'Not submitted';
   const review=await env.DB.prepare('SELECT * FROM admin_payment_reviews WHERE invoice_type=? AND invoice_id=?').bind(type,id).first();
-  let result=invoice.status==='completed'?'Completed.':['paid_pending_delivery','delivering'].includes(invoice.status)?'Payment recorded; product delivery is pending.':event?paymentDashboardReason(event.reason):mobile?.trx_id?'Transaction ID saved; no verification result was recorded.':'No verification attempt recorded. Older attempts may predate this dashboard.';
+  let result=invoice.status==='wallet_credited'?'Payment confirmed by admin. Amount added to wallet; original order closed without product delivery.':invoice.status==='completed'?'Completed.':['paid_pending_delivery','delivering'].includes(invoice.status)?'Payment recorded; product delivery is pending.':event?paymentDashboardReason(event.reason):mobile?.trx_id?'Transaction ID saved; no verification result was recorded.':'No verification attempt recorded. Older attempts may predate this dashboard.';
   if(mobile?.status==='paid'&&invoice.status==='pending')result='Payment matched by SMS; invoice processing needs review.';
   const smsEvidence=mobile?await describeMobileEvidence(env,mobile):'';
   const text=`💳 <b>${isRedeem?'🎁 Redeem Credit':type==='order'?'Order':'Deposit'} #${invoice.id}</b>\n\nCustomer: ${customerTelegramId(invoice.user_id,invoice.customer_username)}\nMethod: ${escapeHtml(invoice.method)}\nAmount: <b>$${adminMoney(invoice.amount_usd)}</b> · ${adminMoney(invoice.amount_bdt)} BDT\nStatus: <b>${escapeHtml(invoice.status)}</b>\nCreated: ${paymentDashboardTime(invoice.created_at)} (Dhaka)\n\n${isRedeem?'Redeem Reference':'Submitted ID'}: <code>${adminSnippet(receipt,100)}</code>\n\n<b>Last verification</b>\n${escapeHtml(result)}\nAttempts recorded: ${event?.attempts||0}\nLast attempt: ${paymentDashboardTime(event?.updated_at)} (Dhaka)${smsEvidence?`\n\n<b>SMS evidence</b>\n${escapeHtml(smsEvidence)}`:''}${mobile?`\nSMS invoice: ${adminSnippet(mobile.status,20)}\nPayment window: ${Date.now()>mobile.expires_ms?'Ended (not proof of payment failure)':'Open'}`:''}`;
-  const buttons=[...(invoice.status==='pending'?[[{text:'🗑️ Delete Pending',callback_data:`adm_payreview_cancel_${type}_${id}`,style:'danger'}]]:[]),...(review?[[{text:`${review.action==='approve'?'Approved':'Cancelled'} by admin ${review.admin_id}`,callback_data:`adm_paydetail_${type}_${id}`}]]:[]),[adminUserProfileButton(invoice.user_id),{text:'💬 Message User',url:customerTelegramUrl(invoice.user_id,invoice.customer_username)}],...(type==='order'&&['paid_pending_delivery','delivering','completed'].includes(invoice.status)?[[{text:'Delivery Details',callback_data:`adm_delivery_view_${id}`}]]:[]),[{text:'🔄 Refresh',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'Payment Dashboard',callback_data:'adm_payments_home'}]];
+  const buttons=[...(invoice.status==='pending'?[[{text:'🗑️ Delete Pending',callback_data:`adm_payreview_cancel_${type}_${id}`,style:'danger'},{text:'✅ Success',callback_data:`adm_paysuccess_${type}_${id}`,style:'success'}]]:[]),...(review?[[{text:`${review.action==='approve'?'Approved':'Cancelled'} by admin ${review.admin_id}`,callback_data:`adm_paydetail_${type}_${id}`}]]:[]),[adminUserProfileButton(invoice.user_id),{text:'💬 Message User',url:customerTelegramUrl(invoice.user_id,invoice.customer_username)}],...(type==='order'&&['paid_pending_delivery','delivering','completed'].includes(invoice.status)?[[{text:'Delivery Details',callback_data:`adm_delivery_view_${id}`}]]:[]),[{text:'🔄 Refresh',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'Payment Dashboard',callback_data:'adm_payments_home'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function adminReviewInvoice(env,type,id){
   if(!['order','deposit'].includes(type))return null;
   return env.DB.prepare(`SELECT x.*,COALESCE(NULLIF(e.trx_id,''),NULLIF(m.trx_id,''),NULLIF(x.trx_id,''),'') AS submitted_trx FROM ${paymentDashboardSource()} x LEFT JOIN payment_verification_events e ON e.invoice_type=x.kind AND e.invoice_id=x.id LEFT JOIN mobile_payment_invoices m ON m.invoice_type=x.kind AND m.invoice_id=x.id WHERE x.kind=? AND x.id=?`).bind(type,id).first();
+}
+async function handlePendingPaymentSuccess(env,chatId,data,messageId){
+  if(!adminUserAccess(env,chatId))return false;
+  let match=data.match(/^adm_paysuccess_(order|deposit)_(\d+)$/);
+  if(match){
+    const type=match[1],invoice=await adminReviewInvoice(env,type,match[2]);
+    if(!invoice||invoice.status!=='pending'){await sendMsg(env,chatId,'This payment is already processed, closed or unavailable.');return true;}
+    if(!Number.isFinite(Number(invoice.amount_usd))||Number(invoice.amount_usd)<=0||!Number.isFinite(Number(invoice.amount_bdt))||Number(invoice.amount_bdt)<0||!/^[A-Za-z0-9]{6,100}$/.test(invoice.submitted_trx)){await sendMsg(env,chatId,'A positive payment amount and submitted transaction ID are required.');return true;}
+    const token=crypto.randomUUID().replace(/-/g,''),draft=JSON.stringify({token,type,id:invoice.id,userId:invoice.user_id,method:invoice.method,trx:invoice.submitted_trx,usd:Number(invoice.amount_usd),bdt:Number(invoice.amount_bdt),expires:Date.now()+300000});
+    await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'confirm_payment_success',?)").bind(chatId,draft).run();
+    await editMsg(env,chatId,messageId,`✅ <b>Confirm Payment & Wallet Credit</b>\n\n${type==='order'?'Order':'Deposit'} ${invoice.id}\nCustomer: ${customerTelegramId(invoice.user_id)}\nMethod: ${escapeHtml(invoice.method)}\nTrxID: <code>${escapeHtml(invoice.submitted_trx)}</code>\nWallet credit: <b>+$${adminMoney(invoice.amount_usd)} USD</b>\nBDT credit: ${adminMoney(invoice.amount_bdt)} BDT\n\nConfirm only after checking that money was received. The saved payment amount will be added to the wallet. No product will be delivered; the original order, if any, will be closed. Do not confirm if you already credited this payment using Add Balance.\n\nConfirmation expires in 5 minutes.`,[[{text:`Confirm Success · $${adminMoney(invoice.amount_usd)}`,callback_data:`adm_paysuccess_ok_${token}`,style:'success'}],[{text:'Back',callback_data:`adm_paydetail_${type}_${invoice.id}`}]]);return true;
+  }
+  match=data.match(/^adm_paysuccess_ok_([a-f0-9]{32})$/);if(!match)return false;
+  const state=await env.DB.prepare("SELECT data FROM admin_states WHERE user_id=? AND state='confirm_payment_success'").bind(chatId).first();let d;try{d=JSON.parse(state?.data||'null');}catch{}
+  if(!d||!['order','deposit'].includes(d.type)||d.token!==match[1]||d.expires<Date.now()){await sendMsg(env,chatId,'This confirmation expired or was already used. Open the payment again.');return true;}
+  const table=d.type==='order'?'orders':'deposits',methodColumn=d.type==='order'?'payment_method':'method';
+  const method=String(d.method).toLowerCase(),key=String(d.trx).toLowerCase(),proof=`EXISTS(SELECT 1 FROM admin_payment_reviews WHERE invoice_type='${d.type}' AND invoice_id=? AND token=? AND action='approve')`;
+  const result=await env.DB.batch([
+    env.DB.prepare(`INSERT OR IGNORE INTO admin_payment_reviews(invoice_type,invoice_id,user_id,admin_id,action,method,trx_key,trx_id,amount_usd,amount_bdt,token)
+      SELECT '${d.type}',id,user_id,?,'approve',?,?,?,?,?,? FROM ${table} WHERE id=? AND user_id=? AND status='pending' AND ${methodColumn}=? AND amount_usd=? AND COALESCE(amount_bdt,0)=?
+      AND EXISTS(SELECT 1 FROM users WHERE user_id=${table}.user_id) AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='confirm_payment_success' AND data=?)
+      AND COALESCE((SELECT NULLIF(trx_id,'') FROM payment_verification_events WHERE invoice_type='${d.type}' AND invoice_id=${table}.id),(SELECT NULLIF(trx_id,'') FROM mobile_payment_invoices WHERE invoice_type='${d.type}' AND invoice_id=${table}.id),NULLIF(trx_id,''),'')=?
+      AND NOT EXISTS(SELECT 1 FROM mobile_payment_claims WHERE (invoice_type='${d.type}' AND invoice_id=${table}.id) OR (LOWER(method)=? AND LOWER(trx_id)=?))
+      AND NOT EXISTS(SELECT 1 FROM binance_payment_claims WHERE (invoice_type='${d.type}' AND invoice_id=${table}.id) OR (?='binance' AND LOWER(transaction_id)=?))
+      AND NOT EXISTS(SELECT 1 FROM bep20_payment_claims WHERE (invoice_type='${d.type}' AND invoice_id=${table}.id) OR (?='bep20' AND LOWER(tx_hash)=?))
+      AND NOT EXISTS(SELECT 1 FROM manual_deposit_credits WHERE '${d.type}'='deposit' AND deposit_id=${table}.id)
+      AND NOT EXISTS(SELECT 1 FROM orders WHERE LOWER(payment_method)=? AND LOWER(trx_id)=? AND status IN ('completed','paid_pending_delivery','delivering','wallet_credited'))
+      AND NOT EXISTS(SELECT 1 FROM deposits other WHERE LOWER(other.method)=? AND LOWER(other.trx_id)=? AND other.status='completed')
+      AND NOT EXISTS(SELECT 1 FROM mobile_payment_invoices WHERE invoice_type='${d.type}' AND invoice_id=${table}.id AND status='paid')`)
+      .bind(chatId,method,key,d.trx,d.usd,d.bdt,d.token,d.id,d.userId,d.method,d.usd,d.bdt,chatId,state.data,d.trx,method,key,method,key,method,key,method,key,method,key),
+    env.DB.prepare(walletChangeSql(`UPDATE users SET balance_usd=(ROUND(COALESCE(balance_usd,0)*100)+?)/100.0,balance_bdt=(ROUND(COALESCE(balance_bdt,0)*100)+?)/100.0 WHERE user_id=? AND EXISTS(SELECT 1 FROM ${table} WHERE id=? AND status='pending') AND ${proof}`,'deposit',d.type==='deposit'?'deposit:'+d.id:'order_wallet_credit:'+d.id)).bind(Math.round(d.usd*100),Math.round(d.bdt*100),d.userId,d.id,d.id,d.token),
+    env.DB.prepare(`UPDATE ${table} SET status='${d.type==='order'?'wallet_credited':'completed'}',trx_id=? WHERE id=? AND status='pending' AND ${proof}`).bind(d.trx,d.id,d.id,d.token),
+    env.DB.prepare(`UPDATE mobile_payment_invoices SET status='manual_paid' WHERE invoice_type='${d.type}' AND invoice_id=? AND status='pending' AND ${proof}`).bind(d.id,d.id,d.token),
+    env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='confirm_payment_success' AND data=?").bind(chatId,state.data)
+  ]);
+  if(!result[0].meta?.changes){await sendMsg(env,chatId,'Nothing was credited. The payment or transaction is already processed/reserved, or its details changed.',[[{text:'Payment Details',callback_data:`adm_paydetail_${d.type}_${d.id}`}]]);return true;}
+  await recordPaymentVerification(env,d.type,d.id,d.userId,d.method,d.trx,'admin_approved');
+  await sendMsg(env,d.userId,`✅ <b>Payment Successful · Wallet Credited</b>\n\nAdmin confirmed your payment.\nAdded to wallet: <b>$${adminMoney(d.usd)} USD</b>\nTrxID: <code>${escapeHtml(d.trx)}</code>`);
+  await showPaymentDashboardDetail(env,chatId,d.type,d.id,messageId);return true;
 }
 async function handleAdminPaymentReview(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
@@ -4059,6 +4098,7 @@ async function handleAdminPaymentReview(env,chatId,data,messageId){
 }
 async function handlePaymentDashboardCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
+  if(await handlePendingPaymentSuccess(env,chatId,data,messageId))return true;
   if(await handleAdminPaymentReview(env,chatId,data,messageId))return true;
   if(data==='adm_payments_home'){await showPaymentDashboard(env,chatId,'menu',0,messageId);return true;}
   if(data==='adm_payment_health'){await showPaymentHealth(env,chatId,messageId);return true;}
