@@ -13,7 +13,13 @@ async function post(body,{secret=env.MOBILE_BRIDGE_SECRET,ts=String(Math.floor(D
 const health=()=>db.prepare('SELECT * FROM mobile_bridge_health WHERE device_id=?').get(env.MOBILE_BRIDGE_DEVICE_ID);
 (async()=>{
  await c.api.ensureDbReady(DB);for(const id of [1,99])db.prepare('INSERT INTO users(user_id,balance_usd) VALUES(?,10)').run(id);db.prepare("UPDATE settings SET value=? WHERE key='bkash_num'").run(account);
- await c.api.showPaymentHealth(env,1);assert(last().text.includes('No authenticated contact'));assert(last().text.includes('Manual approval'));assert(!last().text.includes(env.MOBILE_BRIDGE_SECRET));assert(!last().text.includes(env.BINANCE_API_SECRET));assert(last().text.length<4096);
+ await c.api.showPaymentHealth(env,1);assert(last().text.includes('No authenticated contact'));assert(last().text.includes('Manual review / Add Balance'));assert(!last().text.includes(env.MOBILE_BRIDGE_SECRET));assert(!last().text.includes(env.BINANCE_API_SECRET));assert(last().text.length<4096);
+ const draft=db.prepare("INSERT INTO deposits(user_id,method,amount_usd,amount_bdt) VALUES(99,'BKASH',5,625)").run().lastInsertRowid;
+ db.prepare("INSERT INTO mobile_payment_invoices(invoice_type,invoice_id,user_id,method,account,amount_minor,amount_cents,created_ms,expires_ms) VALUES('deposit',?,99,'bkash',?,62500,500,?,?)").run(draft,account,Date.now(),Date.now()+3600000);
+ await c.api.showPaymentHealth(env,1);assert(last().text.includes('Pending: 0 · IDs submitted: 0'));
+ db.prepare("UPDATE mobile_payment_invoices SET trx_id='HEALTH1234' WHERE invoice_type='deposit' AND invoice_id=?").run(draft);
+ await c.api.showPaymentHealth(env,1);assert(last().text.includes('Pending: 1 · IDs submitted: 1'));
+ db.prepare("UPDATE mobile_payment_invoices SET status='cancelled' WHERE invoice_type='deposit' AND invoice_id=?").run(draft);
  let response=await post(heartbeat(),{secret:'wrong-signature-secret'});assert.equal(response.status,401);assert.equal(health(),undefined);
  response=await post({...heartbeat(),deviceId:'other-phone'});assert.equal(response.status,403);assert.equal(health(),undefined);
  response=await post({...heartbeat(),rawSms:'OTP 123456'});assert.equal(response.status,400);assert.equal(health(),undefined);
