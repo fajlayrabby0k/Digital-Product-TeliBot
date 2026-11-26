@@ -2072,13 +2072,27 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
       await editMsg(env,chatId,messageId,`<b>${PAYMENT_ICON_LABELS[method]} Custom Emoji</b>\n\nSend a Telegram custom emoji or its numeric Custom Emoji ID.\nSend /remove to remove it.`,[[{text:'Cancel',callback_data:'adm_payment_icons'}]]);return;
     }
 
+    const maintenanceConfirm=data.match(/^adm_maintenance_confirm_([a-f0-9-]+)$/);
+    if(maintenanceConfirm){
+      if(String(chatId)!==String(env.ADMIN_ID))return;
+      const state=await env.DB.prepare("SELECT * FROM admin_states WHERE user_id=? AND state='confirm_maintenance'").bind(chatId).first();
+      let saved;try{saved=JSON.parse(state?.data||'null');}catch{}
+      if(!saved||saved.token!==maintenanceConfirm[1]||!Number.isFinite(saved.expires)||saved.expires<Date.now()){
+        await editMsg(env,chatId,messageId,'This confirmation expired or was already used. Open Admin Panel to try again.',[[{text:'Admin Panel',callback_data:'admin_panel'}]]);return;
+      }
+      await env.DB.batch([
+        env.DB.prepare("UPDATE settings SET value=? WHERE key='maintenance_mode' AND value=? AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='confirm_maintenance' AND data=?)").bind(saved.target,saved.previous,chatId,state.data),
+        env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='confirm_maintenance' AND data=?").bind(chatId,state.data)
+      ]);
+      await sendAdminDashboard(env,chatId,messageId);return;
+    }
     const maintenanceAction=data.match(/^adm_maintenance_(on|off)$/);
     if(maintenanceAction){
       if(String(chatId)!==String(env.ADMIN_ID))return;
-      const enabled=maintenanceAction[1]==='on';
-      await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintenance_mode', ?)").bind(enabled?'1':'0').run();
-      await clearAdminState(env,chatId);
-      await sendAdminDashboard(env,chatId,messageId);
+      const enabled=maintenanceAction[1]==='on',previous=await getSetting(env,'maintenance_mode','0');
+      const saved={token:crypto.randomUUID(),previous,target:enabled?'1':'0',expires:Date.now()+5*60*1000};
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'confirm_maintenance',?)").bind(chatId,JSON.stringify(saved)).run();
+      await editMsg(env,chatId,messageId,`🔧 <b>Turn Maintenance ${enabled?'ON':'OFF'}?</b>\n\n${enabled?'Users will temporarily be unable to use the bot. Admin access will remain available.':'Users will be able to use the bot again.'}\n\nConfirm to apply this change. Confirmation expires in 5 minutes.`,[[{text:enabled?'Confirm Turn ON':'Confirm Turn OFF',callback_data:`adm_maintenance_confirm_${saved.token}`,style:enabled?'danger':'success'},{text:'Cancel',callback_data:'admin_panel'}]]);
       return;
     }
 

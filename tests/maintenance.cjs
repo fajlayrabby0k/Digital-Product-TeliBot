@@ -8,14 +8,17 @@ let api=load();const env={DB,ADMIN_ID:1};
 const text=(value,id=99)=>api.handleUpdate({message:{chat:{id},from:{first_name:'Tester'},text:value}},env);
 const cb=(data,id=99)=>api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Tester'},message:{chat:{id},message_id:9}}},env);
 const last=()=>messages.filter(m=>m.text).at(-1);
+const confirmation=()=>last().reply_markup.inline_keyboard.flat().find(b=>b.callback_data?.startsWith('adm_maintenance_confirm_')).callback_data;
 const mode=()=>sqlite.prepare("SELECT value FROM settings WHERE key='maintenance_mode'").get().value;
 const count=table=>sqlite.prepare('SELECT COUNT(*) AS n FROM '+table).get().n;
 (async()=>{
  await api.ensureDbReady(DB);for(const id of [1,99])sqlite.prepare('INSERT INTO users(user_id) VALUES(?)').run(id);
  assert.equal(mode(),'0');await text('/start');assert(last().text.includes('Welcome to SMART SUBS STORE'));
  await text('/admin',1);assert(last().reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='adm_maintenance_on'));
- await cb('adm_maintenance_on',1);assert.equal(mode(),'1');assert(last().text.includes('ON — users paused'));assert(last().reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='adm_maintenance_off'));
- await cb('adm_maintenance_on',1);assert.equal(mode(),'1','repeating Turn ON must be idempotent');
+ await cb('adm_maintenance_on',1);assert.equal(mode(),'0','initial tap must not change mode');const firstConfirm=confirmation();await cb(firstConfirm,99);assert.equal(mode(),'0','only admin may confirm');await cb(firstConfirm,1);assert.equal(mode(),'1');assert(last().text.includes('ON — users paused'));assert(last().reply_markup.inline_keyboard.flat().some(b=>b.callback_data==='adm_maintenance_off'));
+ await cb(firstConfirm,1);assert.equal(mode(),'1','replayed confirmation must not change mode');
+ await cb('adm_maintenance_off',1);const cancelled=confirmation();await cb('admin_panel',1);await cb(cancelled,1);assert.equal(mode(),'1','cancelled confirmation must not apply');
+ await cb('adm_maintenance_off',1);const expired=confirmation();const pending=JSON.parse(sqlite.prepare('SELECT data FROM admin_states WHERE user_id=1').get().data);pending.expires=Date.now()-1;sqlite.prepare('UPDATE admin_states SET data=? WHERE user_id=1').run(JSON.stringify(pending));await cb(expired,1);assert.equal(mode(),'1','expired confirmation must not apply');
  const voucher=await api.createRedeemCode(env,1,500);
  sqlite.prepare("INSERT INTO user_states(user_id,state,data) VALUES(99,'awaiting_redeem_code','{}')").run();
  await text('/start');assert.equal(last().text,api.MAINTENANCE_MESSAGE);
@@ -29,7 +32,7 @@ const count=table=>sqlite.prepare('SELECT COUNT(*) AS n FROM '+table).get().n;
  await text('/start',1);assert(last().text.includes('Welcome to SMART SUBS STORE'));await cb('adm_redeem_generate',1);await text('3',1);assert(last().text.includes('Redeem Code Created'));assert.equal(count('redeem_codes'),2);
  // Maintenance survives new isolates and an explicit migration/setup refresh.
  api=load();await text('/start');assert.equal(last().text,api.MAINTENANCE_MESSAGE);await api.ensureDbReady(DB,true);assert.equal(mode(),'1');
- await cb('adm_maintenance_off',1);assert.equal(mode(),'0');assert(last().text.includes('OFF — bot online'));
+ await cb('adm_maintenance_off',1);assert.equal(mode(),'1','turn off also requires confirmation');await cb(confirmation(),1);assert.equal(mode(),'0');assert(last().text.includes('OFF — bot online'));
  await cb('adm_maintenance_on',99);assert.equal(mode(),'0','users cannot change maintenance mode');
  await text('/start');assert(last().text.includes('Welcome to SMART SUBS STORE'));
  await cb('redeem_open');await text(voucher);assert(last().text.includes('Redeem Successful'));assert.equal(sqlite.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,5);
