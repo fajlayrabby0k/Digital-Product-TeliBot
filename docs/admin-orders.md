@@ -9,3 +9,9 @@ Open a row for order details. Refresh and Back preserve the list page. The exist
 Validation: tests/admin-all-orders.cjs covers all customer/status records, newest-first ordering, pagination/empty/clamped pages, search, back navigation, authorization and unchanged funds/order records. Existing wallet-history and delivery-management tests remain passing.
 
 Order details show the customer name and clickable Telegram ID, saved source (Supplier API or local inventory), product snapshot, quantity, unit/total USD price and saved BDT amount, payment method, TrxID, current status, Dhaka creation time, supplier order/request identifiers and delivery issue/status. Missing historical source is identified rather than invented; current-product fallback is labeled. View Customer and Message User shortcuts are available inside. Wallet-credited original orders explicitly state that no delivery will occur.
+
+## Completed and pending lists
+
+The Orders landing page now offers **Completed Orders** and **Pending Orders** with counts, plus Find Order and Admin Panel. Completed contains only delivered orders (`completed`). Pending contains unpaid, paid-awaiting-delivery and processing orders (`pending`, `paid_pending_delivery`, `delivering`). Closed/cancelled/refunded/wallet-credited records are not mislabeled pending or delivered; they remain available through global Order ID search and historical all-order callback links.
+
+Each list uses order buttons only, ten per page. Details, Refresh, search results and Back preserve the selected list and page. Find Order checks all order records, including orders outside the currently selected list. No payment or delivery state changes are made by browsing.

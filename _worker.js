@@ -1619,7 +1619,17 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     const broadcastAction=data.match(/^adm_broadcast_send_([a-f0-9-]{36})$/);
     if(broadcastAction){await sendBroadcastBatch(env,chatId,broadcastAction[1]);return;}
     const allOrdersPage=data.match(/^adm_orders_page_(\d+)$/),allOrderView=data.match(/^adm_orders_view_(\d+)_(\d+)$/),orderSearch=data.match(/^adm_order_search(?:_(\d+))?$/);
-    if(data==='adm_order_find'||allOrdersPage){await showAllAdminOrders(env,chatId,allOrdersPage?.[1]||0,messageId);return;}
+    const orderList=data.match(/^adm_orders_list_(pending|completed)_(\d+)$/),orderItem=data.match(/^adm_orders_item_(\d+)_(pending|completed)_(\d+)$/),filteredSearch=data.match(/^adm_order_search_(pending|completed)_(\d+)$/);
+    if(data==='adm_order_find'){await showAdminOrdersMenu(env,chatId,messageId);return;}
+    if(orderList){await showAllAdminOrders(env,chatId,orderList[2],messageId,orderList[1]);return;}
+    if(orderItem){if(adminUserAccess(env,chatId)){await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,orderItem[1],messageId,adminUserPage(orderItem[3]),orderItem[2]);}return;}
+    if(filteredSearch){
+      if(!adminUserAccess(env,chatId))return;
+      const page=adminUserPage(filteredSearch[2]),filter=filteredSearch[1];
+      await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'awaiting_order_search',?)").bind(chatId,JSON.stringify({page,filter})).run();
+      await editMsg(env,chatId,messageId,'🔎 <b>Find Order</b>\n\nEnter the 5-digit Order ID. Search checks all orders.',[[{text:'Back to Orders',callback_data:adminOrdersListData(filter,page)}]]);return;
+    }
+    if(allOrdersPage){await showAllAdminOrders(env,chatId,allOrdersPage[1],messageId);return;}
     if(allOrderView){if(adminUserAccess(env,chatId)){await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,allOrderView[1],messageId,adminUserPage(allOrderView[2]));}return;}
     if(orderSearch){
       if(!adminUserAccess(env,chatId))return;
@@ -4123,20 +4133,31 @@ async function showDeliveryAdminList(env,chatId,filter='pending',page=0,messageI
   buttons.push([{text:'Pending Delivery',callback_data:'adm_delivery_list_pending_0'},{text:'Processing',callback_data:'adm_delivery_list_processing_0'}],[{text:'Completed',callback_data:'adm_delivery_list_completed_0'},{text:'🔄 Refresh',callback_data:`adm_delivery_list_${filter}_${page}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
-async function showAllAdminOrders(env,chatId,page=0,messageId=null){
+function adminOrdersListData(filter,page){return filter==='all'?`adm_orders_page_${page}`:`adm_orders_list_${filter}_${page}`;}
+function adminOrdersItemData(id,filter,page){return filter==='all'?`adm_orders_view_${id}_${page}`:`adm_orders_item_${id}_${filter}_${page}`;}
+async function showAdminOrdersMenu(env,chatId,messageId=null){
   if(!adminUserAccess(env,chatId))return;
   await clearAdminState(env,chatId);
-  const count=await env.DB.prepare('SELECT COUNT(*) AS total FROM orders').first(),total=Number(count?.total||0),pages=Math.max(1,Math.ceil(total/10));
-  page=Math.min(pages-1,adminUserPage(page));
-  const {results}=await env.DB.prepare('SELECT o.*,u.first_name AS customer_name FROM orders o LEFT JOIN users u ON u.user_id=o.user_id ORDER BY o.id DESC LIMIT 10 OFFSET ?').bind(page*10).all();
-  let text=`📦 <b>All Orders</b>\nTotal: <b>${total}</b> · Page ${page+1}/${pages}\n\n${results.length?'Newest orders first. Open an order for details or use Find Order.':'No orders yet.'}`;
-
-  const buttons=results.map(o=>[{text:`📦 Order ID ${orderDisplayId(o)} · ${o.status}`,callback_data:`adm_orders_view_${o.id}_${page}`}]);
-  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_orders_page_${page-1}`});if(page+1<pages)pager.push({text:'Next',callback_data:`adm_orders_page_${page+1}`});if(pager.length)buttons.push(pager);
-  buttons.push([{text:'🔎 Find Order',callback_data:`adm_order_search_${page}`}],[{text:'🔄 Refresh',callback_data:`adm_orders_page_${page}`},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  const totals=await env.DB.prepare("SELECT SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,SUM(CASE WHEN status IN ('pending','paid_pending_delivery','delivering') THEN 1 ELSE 0 END) pending FROM orders").first();
+  const text='📦 <b>Orders</b>\n\nChoose an order list.';
+  const buttons=[[{text:`✅ Completed Orders (${totals?.completed||0})`,callback_data:'adm_orders_list_completed_0',style:'success'}],[{text:`⏳ Pending Orders (${totals?.pending||0})`,callback_data:'adm_orders_list_pending_0'}],[{text:'🔎 Find Order',callback_data:'adm_order_search_0'}],[{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
-async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null){
+async function showAllAdminOrders(env,chatId,page=0,messageId=null,filter='all'){
+  if(!adminUserAccess(env,chatId))return;
+  await clearAdminState(env,chatId);
+  const where=filter==='completed'?"status='completed'":filter==='pending'?"status IN ('pending','paid_pending_delivery','delivering')":'1=1';
+  const count=await env.DB.prepare(`SELECT COUNT(*) AS total FROM orders WHERE ${where}`).first(),total=Number(count?.total||0),pages=Math.max(1,Math.ceil(total/10));
+  page=Math.min(pages-1,adminUserPage(page));
+  const {results}=await env.DB.prepare(`SELECT o.*,u.first_name AS customer_name FROM orders o LEFT JOIN users u ON u.user_id=o.user_id WHERE ${where.replace(/status/g,'o.status')} ORDER BY o.id DESC LIMIT 10 OFFSET ?`).bind(page*10).all();
+  let text=`📦 <b>${filter==='completed'?'Completed Orders':filter==='pending'?'Pending Orders':'All Orders'}</b>\nTotal: <b>${total}</b> · Page ${page+1}/${pages}\n\n${results.length?'Newest orders first. Open an order for details or use Find Order.':'No orders yet.'}`;
+
+  const buttons=results.map(o=>[{text:`📦 Order ID ${orderDisplayId(o)} · ${o.status}`,callback_data:adminOrdersItemData(o.id,filter,page)}]);
+  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:adminOrdersListData(filter,page-1)});if(page+1<pages)pager.push({text:'Next',callback_data:adminOrdersListData(filter,page+1)});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'🔎 Find Order',callback_data:filter==='all'?`adm_order_search_${page}`:`adm_order_search_${filter}_${page}`}],[{text:'🔄 Refresh',callback_data:adminOrdersListData(filter,page)},{text:'⬅️ Orders',callback_data:'adm_order_find'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
+async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null,listFilter='all'){
   if(!adminUserAccess(env,chatId))return;
   const order=await env.DB.prepare('SELECT o.*,p.name,p.is_external,p.external_id,u.first_name AS customer_name,u.username AS customer_username FROM orders o LEFT JOIN products p ON p.id=o.product_id LEFT JOIN users u ON u.user_id=o.user_id WHERE o.id=?').bind(id).first();
   if(!order){await sendMsg(env,chatId,'Order not found.');return;}
@@ -4148,7 +4169,7 @@ async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null
   const text=`📦 <b>${listPage===null?'Delivery':'Order Details'} · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: ${adminSnippet(order.customer_name||order.username||'Customer',80)}\nTelegram ID: ${customerTelegramId(order.user_id,order.customer_username)}\nSource: <b>${source}</b>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nUnit price: $${adminMoney(Number(order.amount_usd||0)/Number(order.quantity||1))} USD\nOrder total: <b>$${adminMoney(order.amount_usd)} USD</b> · ${adminMoney(order.amount_bdt)} BDT\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
   const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
   if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
-  buttons.push([adminUserProfileButton(order.user_id),{text:'💬 Message User',url:customerTelegramUrl(order.user_id,order.customer_username)}],[{text:'🔄 Refresh',callback_data:listPage===null?`adm_delivery_view_${order.id}`:`adm_orders_view_${order.id}_${listPage}`}],[listPage===null?{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'}:{text:'All Orders',callback_data:`adm_orders_page_${listPage}`},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  buttons.push([adminUserProfileButton(order.user_id),{text:'💬 Message User',url:customerTelegramUrl(order.user_id,order.customer_username)}],[{text:'🔄 Refresh',callback_data:listPage===null?`adm_delivery_view_${order.id}`:adminOrdersItemData(order.id,listFilter,listPage)}],[listPage===null?{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'}:{text:listFilter==='all'?'All Orders':listFilter==='pending'?'Pending Orders':'Completed Orders',callback_data:adminOrdersListData(listFilter,listPage)},{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function retryDeliveryAdmin(env,chatId,id,messageId){
@@ -4293,7 +4314,9 @@ async function handleOrderSearchText(env,chatId,text,state){
   const digits=match[1],legacy=String(text).trim().startsWith('#')||digits.length!==5;
   const order=await env.DB.prepare(legacy?'SELECT id FROM orders WHERE id=?':'SELECT id FROM orders WHERE public_order_id=?').bind(digits).first();
   if(!order){await sendMsg(env,chatId,'No order found with this ID. Check the number and try again.');return true;}
-  await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,order.id,null,adminUserPage(state.data));return true;
+  let context;try{context=JSON.parse(state.data);}catch{}
+  const page=adminUserPage(context?.page??state.data),filter=['pending','completed'].includes(context?.filter)?context.filter:'all';
+  await clearAdminState(env,chatId);await showDeliveryAdminOrder(env,chatId,order.id,null,page,filter);return true;
 }
 
 
