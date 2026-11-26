@@ -838,7 +838,7 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
         return;
       }
       await sendMsg(env, chatId, `✅ Payment verified for Order ID ${displayId}. Delivery is pending; admin has been notified. Do not pay again.`,[[{text:'Check Delivery',callback_data:`provider_retry_${orderId}`}]]);
-      await notifyAdminForUser(env,chatId, `⚠️ Paid Order ID ${displayId}: ${escapeHtml(apiRes.message||'Delivery unconfirmed')}. Check provider history before retrying.`,[[{text:'Delivery Details',callback_data:`adm_delivery_view_${orderId}`}]]);
+      await notifyAdminForUser(env,chatId, `⚠️ Paid Order ID ${displayId}: ${escapeHtml(apiRes.message||'Delivery unconfirmed')}. Check provider history before retrying.`,[[{text:'Order Details',callback_data:`adm_delivery_view_${orderId}`}]]);
       return;
     }
     const creds = apiRes.credentials;
@@ -874,7 +874,7 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
   } else {
     await env.DB.prepare("UPDATE orders SET status = 'paid_pending_delivery', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     await sendMsg(env, chatId, `✅ <b>Payment Verified!</b>\n\nOrder ID: ${displayId}\n⚠️ Local stock is being restocked. Admin has been notified to deliver your order immediately!`);
-    await notifyAdminForUser(env,chatId, `🚨 <b>Order ID ${displayId} Verified but Local Stock Insufficient!</b> Please deliver manually.`,[[{text:'Delivery Details',callback_data:`adm_delivery_view_${orderId}`}]]);
+    await notifyAdminForUser(env,chatId, `🚨 <b>Order ID ${displayId} Verified but Local Stock Insufficient!</b> Please deliver manually.`,[[{text:'Order Details',callback_data:`adm_delivery_view_${orderId}`}]]);
   }
 }
 
@@ -3185,7 +3185,6 @@ async function sendAdminDashboard(env, chatId, editMessageId = null) {
     [{text:'👥 Users / Find Customer',callback_data:'adm_users'},{text:'📦 Orders',callback_data:'adm_order_find'}],
     [{text:'📊 Sales & Profit Reports',callback_data:'adm_sales_today'}],
     [{text:'💳 Payment Dashboard',callback_data:'adm_payments_home'},{text:'📡 Payment & SMS Status',callback_data:'adm_payment_health'}],
-    [{text:'📦 Delivery Management',callback_data:'adm_delivery_list_pending_0'}],
     [{text:'🎫 Support Tickets',callback_data:'adm_tickets_open_0'}],
     [{text:'🔔 Product Notifications',callback_data:'adm_product_notices'},{text:'📢 Channel Alerts',callback_data:'adm_channel_notices'}],
     [{text:'📂 Categories',callback_data:'adm_categories_0'}],
@@ -4073,7 +4072,7 @@ async function showPaymentDashboardDetail(env,chatId,type,id,messageId=null){
   if(mobile?.status==='paid'&&invoice.status==='pending')result='Payment matched by SMS; invoice processing needs review.';
   const smsEvidence=mobile?await describeMobileEvidence(env,mobile):'';
   const text=`💳 <b>${isRedeem?'🎁 Redeem Credit':type==='order'?'Order':'Deposit'} #${invoice.id}</b>\n\nCustomer: ${customerTelegramId(invoice.user_id,invoice.customer_username)}\nMethod: ${escapeHtml(invoice.method)}\nAmount: <b>$${adminMoney(invoice.amount_usd)}</b> · ${adminMoney(invoice.amount_bdt)} BDT\nStatus: <b>${escapeHtml(invoice.status)}</b>\nCreated: ${paymentDashboardTime(invoice.created_at)} (Dhaka)\n\n${isRedeem?'Redeem Reference':'Submitted ID'}: <code>${adminSnippet(receipt,100)}</code>\n\n<b>Last verification</b>\n${escapeHtml(result)}\nAttempts recorded: ${event?.attempts||0}\nLast attempt: ${paymentDashboardTime(event?.updated_at)} (Dhaka)${smsEvidence?`\n\n<b>SMS evidence</b>\n${escapeHtml(smsEvidence)}`:''}${mobile?`\nSMS invoice: ${adminSnippet(mobile.status,20)}\nPayment window: ${Date.now()>mobile.expires_ms?'Ended (not proof of payment failure)':'Open'}`:''}`;
-  const buttons=[...(invoice.status==='pending'?[[{text:'🗑️ Delete Pending',callback_data:`adm_payreview_cancel_${type}_${id}`,style:'danger'},{text:'✅ Success',callback_data:`adm_paysuccess_${type}_${id}`,style:'success'}]]:[]),...(review?[[{text:`${review.action==='approve'?'Approved':'Cancelled'} by admin ${review.admin_id}`,callback_data:`adm_paydetail_${type}_${id}`}]]:[]),[adminUserProfileButton(invoice.user_id),{text:'💬 Message User',url:customerTelegramUrl(invoice.user_id,invoice.customer_username)}],...(type==='order'&&['paid_pending_delivery','delivering','completed'].includes(invoice.status)?[[{text:'Delivery Details',callback_data:`adm_delivery_view_${id}`}]]:[]),[{text:'🔄 Refresh',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'Payment Dashboard',callback_data:'adm_payments_home'}]];
+  const buttons=[...(invoice.status==='pending'?[[{text:'🗑️ Delete Pending',callback_data:`adm_payreview_cancel_${type}_${id}`,style:'danger'},{text:'✅ Success',callback_data:`adm_paysuccess_${type}_${id}`,style:'success'}]]:[]),...(review?[[{text:`${review.action==='approve'?'Approved':'Cancelled'} by admin ${review.admin_id}`,callback_data:`adm_paydetail_${type}_${id}`}]]:[]),[adminUserProfileButton(invoice.user_id),{text:'💬 Message User',url:customerTelegramUrl(invoice.user_id,invoice.customer_username)}],...(type==='order'&&['paid_pending_delivery','delivering','completed'].includes(invoice.status)?[[{text:'Order Details',callback_data:`adm_delivery_view_${id}`}]]:[]),[{text:'🔄 Refresh',callback_data:`adm_paydetail_${type}_${id}`}],[{text:'Payment Dashboard',callback_data:'adm_payments_home'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function adminReviewInvoice(env,type,id){
@@ -4169,18 +4168,6 @@ async function handlePaymentDashboardCallback(env,chatId,data,messageId){
 }
 
 
-async function showDeliveryAdminList(env,chatId,filter='pending',page=0,messageId=null){
-  if(!adminUserAccess(env,chatId))return;
-  await clearAdminState(env,chatId);page=adminUserPage(page);
-  const status=filter==='processing'?'delivering':filter==='completed'?'completed':'paid_pending_delivery';
-  const {results}=await env.DB.prepare('SELECT o.id,o.user_id,o.amount_usd,o.product_name,p.name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.status=? AND COALESCE(o.admin_deleted,0)=0 ORDER BY o.id DESC LIMIT 11 OFFSET ?').bind(status,page*10).all();
-  const title=filter==='processing'?'Processing':filter==='completed'?'Completed':'Paid / Delivery Pending';
-  const text=`📦 <b>Delivery Management</b>\n\n<b>${title}</b> · Page ${page+1}\n\n${results.length?'Choose an order to see its latest delivery status.':'No orders in this list.'}\n\nCheck Delivery resumes the existing paid order. It does not charge the customer again. Processing orders are shown for review and cannot be restarted here.`;
-  const buttons=results.slice(0,10).map(o=>[{text:`${orderDisplayId(o)} · ${String(o.product_name||o.name||'Product').slice(0,28)} · $${adminMoney(o.amount_usd)} · ${o.user_id}`,callback_data:`adm_delivery_view_${o.id}`}]);
-  const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_delivery_list_${filter}_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_delivery_list_${filter}_${page+1}`});if(pager.length)buttons.push(pager);
-  buttons.push([{text:'Pending Delivery',callback_data:'adm_delivery_list_pending_0'},{text:'Processing',callback_data:'adm_delivery_list_processing_0'}],[{text:'Completed',callback_data:'adm_delivery_list_completed_0'},{text:'🔄 Refresh',callback_data:`adm_delivery_list_${filter}_${page}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]);
-  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
-}
 async function handleAdminOrderDelete(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
   let match=data.match(/^adm_order_delete_(\d+)$/);
@@ -4259,11 +4246,11 @@ async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null
   const canRetry=order.status==='paid_pending_delivery'&&order.is_external!=null&&(!order.is_external||order.provider_request_id);
   let help=order.status==='wallet_credited'?'Payment amount was credited to the wallet by admin. This original order is closed and will not be delivered.':order.status==='completed'?'Delivered. No further purchase or stock allocation will be performed.':order.status==='delivering'?'Processing or interrupted during delivery. Check supplier history and refresh; automatic restart is blocked to avoid duplicate fulfillment.':order.status==='paid_pending_delivery'?(order.is_external&&!order.provider_request_id?'This older API order has no supplier request ID. Reconcile supplier history before taking further action.':order.is_external?'Check Delivery looks up the existing supplier request and resumes it safely. A provider rejection can refund a wallet order through the existing refund rules.':'Restock this local product, then Check Delivery. Previously allocated items are reused; only missing items are allocated.'):'This order is unpaid or closed; delivery cannot be started here.';
   if(order.is_external==null&&order.status==='paid_pending_delivery')help='Product record is missing. Admin reconciliation is required.';
-  const text=`📦 <b>${listPage===null?'Delivery':'Order Details'} · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: ${adminSnippet(order.customer_name||order.username||'Customer',80)}\nTelegram ID: ${customerTelegramId(order.user_id,order.customer_username)}\nSource: <b>${source}</b>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nUnit price: $${adminMoney(Number(order.amount_usd||0)/Number(order.quantity||1))} USD\nOrder total: <b>$${adminMoney(order.amount_usd)} USD</b> · ${adminMoney(order.amount_bdt)} BDT\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)${pendingOrderExplanation(order)?'\n\n<b>Why this order is pending</b>\n'+escapeHtml(pendingOrderExplanation(order)):''}\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
+  const text=`📦 <b>Order Details · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: ${adminSnippet(order.customer_name||order.username||'Customer',80)}\nTelegram ID: ${customerTelegramId(order.user_id,order.customer_username)}\nSource: <b>${source}</b>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nUnit price: $${adminMoney(Number(order.amount_usd||0)/Number(order.quantity||1))} USD\nOrder total: <b>$${adminMoney(order.amount_usd)} USD</b> · ${adminMoney(order.amount_bdt)} BDT\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)${pendingOrderExplanation(order)?'\n\n<b>Why this order is pending</b>\n'+escapeHtml(pendingOrderExplanation(order)):''}\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
   const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
   if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
   if(['pending','paid_pending_delivery','delivering'].includes(order.status))buttons.push([{text:'🗑️ Delete Order',callback_data:`adm_order_delete_${order.id}`,style:'danger'}]);
-  buttons.push([adminUserProfileButton(order.user_id),{text:'💬 Message User',url:customerTelegramUrl(order.user_id,order.customer_username)}],[{text:'🔄 Refresh',callback_data:listPage===null?`adm_delivery_view_${order.id}`:adminOrdersItemData(order.id,listFilter,listPage)}],[listPage===null?{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'}:{text:listFilter==='all'?'All Orders':listFilter==='pending'?'Pending Orders':'Completed Orders',callback_data:adminOrdersListData(listFilter,listPage)},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  buttons.push([adminUserProfileButton(order.user_id),{text:'💬 Message User',url:customerTelegramUrl(order.user_id,order.customer_username)}],[{text:'🔄 Refresh',callback_data:listPage===null?`adm_delivery_view_${order.id}`:adminOrdersItemData(order.id,listFilter,listPage)}],[listPage===null?{text:'Orders',callback_data:'adm_order_find'}:{text:listFilter==='all'?'All Orders':listFilter==='pending'?'Pending Orders':'Completed Orders',callback_data:adminOrdersListData(listFilter,listPage)},{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
 async function retryDeliveryAdmin(env,chatId,id,messageId){
@@ -4287,7 +4274,7 @@ async function resendSavedDelivery(env,chatId,id,messageId){
 }
 async function handleDeliveryAdminCallback(env,chatId,data,messageId){
   if(!adminUserAccess(env,chatId))return false;
-  let match=data.match(/^adm_delivery_list_(pending|processing|completed)_(\d+)$/);if(match){await showDeliveryAdminList(env,chatId,match[1],match[2],messageId);return true;}
+  let match=data.match(/^adm_delivery_list_(pending|processing|completed)_(\d+)$/);if(match){await showAllAdminOrders(env,chatId,match[2],messageId,match[1]==='completed'?'completed':'pending');return true;}
   match=data.match(/^adm_delivery_(view|retry|resend)_(\d+)$/);if(!match)return false;
   if(match[1]==='retry')await retryDeliveryAdmin(env,chatId,match[2],messageId);else if(match[1]==='resend')await resendSavedDelivery(env,chatId,match[2],messageId);else await showDeliveryAdminOrder(env,chatId,match[2],messageId);return true;
 }

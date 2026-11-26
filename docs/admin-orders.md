@@ -29,3 +29,7 @@ Open a Pending order → **Delete Order** → Confirm. Only pending, paid-awaiti
 The five-minute, single-use confirmation is admin-only. Deleted pending records retain the admin ID, timestamp and token and disappear from admin lists/search. Unpaid/unclaimed orders are cancelled atomically with their pending mobile invoice. Recorded payments, balances, sales history, delivered files and paid/processing fulfillment remain intact; no refund, wallet credit or stock restoration occurs.
 
 Tests in admin-order-delete.cjs cover pending deletion, completed UI/callback/database protection, completion races, historical restoration, authorization, cancel/expiry/replay and preserved funds.
+
+## Delivery actions inside Orders
+
+The standalone Delivery Management admin-panel entry is removed. Completed/Pending Orders and their details provide status, pending reasons, Check Delivery and saved-delivery resend where eligible. Old delivery-list callbacks redirect to the relevant Orders list; notification, payment and ticket links open Order Details. Existing supplier retry/idempotency and saved-document delivery guards remain unchanged.
