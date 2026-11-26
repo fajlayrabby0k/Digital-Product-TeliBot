@@ -29,3 +29,7 @@ Historical commission payouts without an order reference are taken from positive
 `tests/exact-sales-profit.cjs` verifies local/API quantity costs, immutable price/rate snapshots, completed-only figures, zero profit from deposits/wallet additions, commission concurrency/reuse/rollback/recovery, negative profits, breakdown and unknown historical records. `tests/sales-reports.cjs` covers period boundaries and historical costs; `tests/referral-earnings.cjs` covers actual main-wallet credits and lifetime earned display. All worker tests and Android parser-to-payment integration passed before release.
 
 Regression: tests/legacy-referral-profit.cjs reproduces a $1.00 recorded gross profit and $0.32 historical referral payment, requiring net $0.68. Adding a new linked $0.25 commission to another $1 gross order requires total expense $0.57 and net $1.43; linked payouts are not counted twice. Changing wallet balances cannot change profit. Historical payouts outside Today remain visible/deducted in All Time.
+
+## Report presentation
+
+The summary uses short sections for customer wallet funds, sales, API/local gross profit, combined gross, referral expenses and a highlighted net-profit block with the numeric subtraction. Long explanatory paragraphs are removed from the Telegram summary. Missing-record warnings appear only when relevant. Detailed accounting rules remain documented here and per-order figures remain in Order Breakdown. This presentation change does not alter any calculation or balance.

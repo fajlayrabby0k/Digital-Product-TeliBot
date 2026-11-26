@@ -17,7 +17,7 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=100').get().balance_usd,0.55);assert.equal(db.prepare('SELECT COUNT(*) n FROM order_referral_credits').get().n,2);
  db.prepare("INSERT INTO deposits(user_id,method,amount_usd,status) VALUES(99,'NAGAD',1000,'completed')").run();db.prepare('UPDATE users SET balance_usd=balance_usd+1000 WHERE user_id=99').run();
  add(local,100,1,'pending');add(local,100,1,'refunded');add(local,100,1,'wallet_credited');
- await c.api.showAdminSalesReport(env,1,'all');assert(last().text.includes('Total sales: <b>$11.00</b>'));assert(last().text.includes('Combined gross profit: $3.00'));assert(last().text.includes('Order commission expense: <b>$0.55</b>'));assert(last().text.includes('Net profit: $2.45'));
+ await c.api.showAdminSalesReport(env,1,'all');assert(last().text.includes('Total sales: <b>$11.00</b>'));assert(last().text.includes('Combined gross profit: $3.00'));assert(last().text.includes('Order commission: <b>$0.55</b>'));assert(last().text.includes('Net profit: $2.45'));
  db.prepare('UPDATE products SET purchase_cost_usd=40,cost_price_usd=40,price_usd=50 WHERE id IN (?,?)').run(local,api);db.prepare("UPDATE settings SET value='50' WHERE key='referral_commission_percent'").run();
  await c.api.showAdminSalesReport(env,1,'all');assert(last().text.includes('Net profit: $2.45'));await c.api.processReferralCommission(env,99,999,'Changed',a);assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=100').get().balance_usd,0.55);
  db.prepare('UPDATE products SET purchase_cost_usd=4 WHERE id=?').run(local);const retry=add(local,5);
@@ -28,7 +28,7 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const grossOrders=db.prepare("SELECT COALESCE(SUM(ROUND(amount_usd*100)-ROUND((CASE WHEN sale_origin='api' THEN provider_unit_cost_usd ELSE purchase_unit_cost_usd END)*quantity*100)),0) n FROM orders WHERE status='completed'").get().n;
  const due=db.prepare("SELECT SUM(referral_commission_cents) n FROM orders WHERE status='completed'").get().n;
  await DB.prepare(c.api.walletChangeSql('UPDATE users SET balance_usd=balance_usd+0.32 WHERE user_id=?','referral','buyer:legacy')).bind(100).run();
- await c.api.showAdminSalesReport(env,1,'all');assert(last().text.includes('Previously paid commission (unlinked orders): <b>$0.32</b>'));assert(last().text.includes('Net profit: $'+((grossOrders-due-32)/100).toFixed(2)));
+ await c.api.showAdminSalesReport(env,1,'all');assert(last().text.includes('Previous paid: <b>$0.32</b>'));assert(last().text.includes('Net profit: $'+((grossOrders-due-32)/100).toFixed(2)));
  await c.api.showAdminSalesReport(env,1,'all');assert(last().text.includes('Net profit: $'+((grossOrders-due-32)/100).toFixed(2)));
  const old=add(local,7);db.prepare('UPDATE orders SET referral_commission_cents=NULL WHERE id=?').run(old);await c.api.showAdminSalesReport(env,1,'all');assert(last().text.includes('Incomplete cost/referral records: <b>1</b>'));
  console.log('PASS: exact per-order gross/net/referral accounting, immutable snapshots, no deposit/wallet profit, completed-only sales, commission dedup/rollback/recovery, negative profit, breakdown and unknown-history disclosure');
