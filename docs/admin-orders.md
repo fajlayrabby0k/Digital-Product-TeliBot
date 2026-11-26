@@ -1,6 +1,6 @@
 # Admin order list and search
 
-Open **Admin Panel → Orders** (older Find Order buttons open the same list). All local order records, across all customers, products, payment methods and statuses, appear newest first. Ten orders are shown per page with Previous/Next. Each entry shows only the five-digit public Order ID, amount, status and customer. Buttons show Order ID and status, never product names or catalog callbacks. Product information appears only after opening an order. Inactive/unavailable catalog products do not hide historical orders.
+Open **Admin Panel → Orders** (older Find Order buttons open the same list). All local order records, across all customers, products, payment methods and statuses, appear newest first. Ten orders are shown per page with Previous/Next. Orders are represented only by buttons below a compact title/count/page header; no per-order text summaries appear above them. Buttons show Order ID and status, never product names or catalog callbacks. Product information appears only after opening an order. Inactive/unavailable catalog products do not hide historical orders.
 
 Open a row for order details. Refresh and Back preserve the list page. The existing delivery-management view keeps its own Delivery List navigation. Browsing does not charge, allocate stock or retry delivery.
 

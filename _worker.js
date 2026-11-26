@@ -4130,7 +4130,7 @@ async function showAllAdminOrders(env,chatId,page=0,messageId=null){
   page=Math.min(pages-1,adminUserPage(page));
   const {results}=await env.DB.prepare('SELECT o.*,u.first_name AS customer_name FROM orders o LEFT JOIN users u ON u.user_id=o.user_id ORDER BY o.id DESC LIMIT 10 OFFSET ?').bind(page*10).all();
   let text=`📦 <b>All Orders</b>\nTotal: <b>${total}</b> · Page ${page+1}/${pages}\n\n${results.length?'Newest orders first. Open an order for details or use Find Order.':'No orders yet.'}`;
-  if(results.length)text+='\n\n'+results.map(o=>`<b>Order ID ${orderDisplayId(o)}</b> · ${adminSnippet(o.status,28)} · $${adminMoney(o.amount_usd)}\nCustomer: ${adminSnippet(o.customer_name||'Customer',40)} · ${customerTelegramId(o.user_id)}`).join('\n\n');
+
   const buttons=results.map(o=>[{text:`📦 Order ID ${orderDisplayId(o)} · ${o.status}`,callback_data:`adm_orders_view_${o.id}_${page}`}]);
   const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_orders_page_${page-1}`});if(page+1<pages)pager.push({text:'Next',callback_data:`adm_orders_page_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔎 Find Order',callback_data:`adm_order_search_${page}`}],[{text:'🔄 Refresh',callback_data:`adm_orders_page_${page}`},{text:'Admin Panel',callback_data:'admin_panel'}]);
