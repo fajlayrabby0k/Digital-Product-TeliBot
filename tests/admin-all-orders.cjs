@@ -14,9 +14,9 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const records=db.prepare('SELECT * FROM orders ORDER BY id DESC').all(),before=JSON.stringify(records),money=db.prepare('SELECT SUM(balance_usd) n FROM users').get().n;
  const ids=()=>buttons().filter(b=>b.callback_data?.startsWith('adm_orders_view_')).map(b=>Number(b.callback_data.split('_')[3]));
  await cb('admin_panel');assert(buttons().some(b=>b.text==='📦 Orders'&&b.callback_data==='adm_order_find'));
- await cb('adm_order_find');assert(last().text.includes('Total: <b>23</b>'));assert.deepEqual(ids(),records.slice(0,10).map(o=>o.id));assert(buttons().some(b=>b.callback_data==='adm_orders_page_1'));
+ await cb('adm_order_find');assert(last().text.includes('Total: <b>23</b>'));assert.deepEqual(ids(),records.slice(0,10).map(o=>o.id));assert(!last().text.includes('Saved Product'));assert(buttons().filter(b=>b.callback_data?.startsWith('adm_orders_view_')).every(b=>b.text.startsWith('📦 Order ID ')&&!b.text.includes('Saved Product')));assert(buttons().some(b=>b.callback_data==='adm_orders_page_1'));
  await cb('adm_orders_page_1');assert.deepEqual(ids(),records.slice(10,20).map(o=>o.id));
- await cb('adm_orders_view_'+records[12].id+'_1');assert(last().text.includes('Order Details'));assert(last().text.includes('Saved Product 10'));assert(buttons().some(b=>b.callback_data==='adm_orders_page_1'));
+ await cb('adm_orders_view_'+records[12].id+'_1');assert(last().text.includes('Order Details'));assert(last().text.includes('Saved Product 10'));assert(last().text.includes('Source: <b>Local store inventory</b>'));assert(last().text.includes('Unit price: $5.00 USD'));assert(last().text.includes('Telegram ID:'));assert(last().text.includes('Created:'));assert(buttons().some(b=>b.text==='💬 Message User'));assert(buttons().some(b=>b.callback_data==='adm_orders_page_1'));
  await cb('adm_orders_page_2');assert.deepEqual(ids(),records.slice(20).map(o=>o.id));assert(!buttons().some(b=>b.text==='Next'));
  await cb('adm_orders_page_999');assert(last().text.includes('Page 3/3'));
  await cb('adm_order_search_2');await text(records[0].public_order_id);assert(last().text.includes('Order ID '+records[0].public_order_id));assert(buttons().some(b=>b.callback_data==='adm_orders_page_2'));
