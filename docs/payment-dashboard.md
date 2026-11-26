@@ -1,6 +1,11 @@
 # Admin payment dashboard
 
-Open **Admin Panel → Payment Dashboard → IDs Submitted** to see pending order/deposit payments with their submitted TrxIDs, including failed automatic verification. Selecting a payment method or opening payment instructions alone does not appear in Pending, IDs Submitted, Verification Issues, or the pending count; a nonblank transaction ID must exist in the invoice, SMS invoice or verification event. Wallet-funded orders and redeem credits are excluded. Lists contain ten records per page; filters include Pending, IDs Submitted, Verification Issues, Completed, Paid / Delivery Pending and Cancelled. Times use Asia/Dhaka.
+Open **Admin Panel → Payment Dashboard**. The landing page contains only **Pending Payments**, **Completed Payments**, and Back to Admin Panel.
+
+- **Pending Payments:** only unresolved invoices with a nonblank submitted TrxID in the payment, SMS invoice or verification event. Payment instructions without an ID are excluded. Each red payment button has Delete beside it.
+- **Completed Payments:** only confirmed incoming payments: completed invoices and orders with payment recorded but delivery pending/processing. Delivery state remains available in payment details. Unpaid, rejected, cancelled and refunded invoices are excluded. Completed rows have no Delete button.
+
+Lists contain ten records per page with Previous/Next when needed, Refresh and Back to Payment Dashboard. IDs Submitted, Verification Issues, Cancelled and Paid / Delivery Pending are removed as visible dashboard filters. Historical callback links remain compatible. Wallet-funded purchases and redeem credits remain excluded from incoming payments. Times use Asia/Dhaka.
 
 Open a record to see the customer, method, USD/BDT amount, transaction ID, current status, verification reason and SMS evidence. **View Customer** opens the user's profile and its separate **Add Balance** feature. Refresh reloads information without verification, credit or delivery.
 
