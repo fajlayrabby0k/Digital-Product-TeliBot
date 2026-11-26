@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-admin-order-delete-1";
+const DB_SCHEMA_VERSION = "2026-11-protect-completed-orders-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -299,6 +299,9 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      db.prepare("UPDATE orders SET admin_deleted=0,admin_delete_token=NULL WHERE status='completed' AND COALESCE(admin_deleted,0)<>0"),
+      db.prepare("CREATE TRIGGER IF NOT EXISTS orders_no_completed_delete BEFORE UPDATE OF admin_deleted ON orders WHEN NEW.status='completed' AND COALESCE(NEW.admin_deleted,0)<>0 BEGIN SELECT RAISE(ABORT,'Completed orders cannot be deleted'); END"),
+      db.prepare("CREATE TRIGGER IF NOT EXISTS orders_completed_visible AFTER UPDATE OF status ON orders WHEN NEW.status='completed' AND COALESCE(NEW.admin_deleted,0)<>0 BEGIN UPDATE orders SET admin_deleted=0,admin_delete_token=NULL WHERE id=NEW.id; END"),
       db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS admin_review_transaction ON admin_payment_reviews(method,trx_key) WHERE action='approve' AND trx_key!=''"),
       ...[['mobile_payment_claims',"LOWER(NEW.method)",'NEW.trx_id'],['binance_payment_claims',"'binance'",'NEW.transaction_id'],['bep20_payment_claims',"'bep20'",'NEW.tx_hash']].map(([table,method,trx])=>db.prepare(`CREATE TRIGGER IF NOT EXISTS ${table}_manual_review_guard BEFORE INSERT ON ${table} WHEN EXISTS(SELECT 1 FROM admin_payment_reviews WHERE (invoice_type=NEW.invoice_type AND invoice_id=NEW.invoice_id) OR (action='approve' AND method=${method} AND trx_key=LOWER(${trx}))) BEGIN SELECT RAISE(ABORT,'Payment already reviewed by admin'); END`)),
       ...categoryPolicyWrites,
@@ -4144,6 +4147,7 @@ async function handleAdminOrderDelete(env,chatId,data,messageId){
   if(match){
     const order=await env.DB.prepare('SELECT * FROM orders WHERE id=? AND COALESCE(admin_deleted,0)=0').bind(match[1]).first();
     if(!order){await showAdminOrdersMenu(env,chatId,messageId);return true;}
+    if(!['pending','paid_pending_delivery','delivering'].includes(order.status)){await sendMsg(env,chatId,'Only pending orders can be deleted. Completed orders are preserved.',[[{text:'Orders',callback_data:'adm_order_find'}]]);return true;}
     const token=crypto.randomUUID().replace(/-/g,''),draft=JSON.stringify({token,id:order.id,expires:Date.now()+300000});
     await env.DB.prepare("INSERT OR REPLACE INTO admin_states(user_id,state,data) VALUES(?,'confirm_order_delete',?)").bind(chatId,draft).run();
     await editMsg(env,chatId,messageId,`🗑️ <b>Delete Order ${orderDisplayId(order)}?</b>\n\nCustomer: ${customerTelegramId(order.user_id)}\nStatus: ${adminSnippet(order.status,35)}\nAmount: $${adminMoney(order.amount_usd)} USD\n\nThe order will be removed from admin order lists and search. Unpaid, unclaimed orders will be cancelled. Recorded payments, wallet balances, sales history and delivered files will be preserved. Paid or already-processing orders keep their existing payment/delivery handling. No refund or wallet credit is issued.\n\nConfirmation expires in 5 minutes.`,[[{text:'Confirm Delete Order',callback_data:`adm_order_delete_ok_${token}`,style:'danger'}],[{text:'Cancel',callback_data:`adm_orders_view_${order.id}_0`}]]);return true;
@@ -4152,12 +4156,12 @@ async function handleAdminOrderDelete(env,chatId,data,messageId){
   const state=await env.DB.prepare("SELECT data FROM admin_states WHERE user_id=? AND state='confirm_order_delete'").bind(chatId).first();let d;try{d=JSON.parse(state?.data||'null');}catch{}
   if(!d||d.token!==match[1]||d.expires<Date.now()){await sendMsg(env,chatId,'This confirmation expired or was already used.',[[{text:'Orders',callback_data:'adm_order_find'}]]);return true;}
   const results=await env.DB.batch([
-    env.DB.prepare("UPDATE orders SET admin_deleted=1,admin_deleted_by=?,admin_deleted_at=CURRENT_TIMESTAMP,admin_delete_token=? WHERE id=? AND COALESCE(admin_deleted,0)=0 AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='confirm_order_delete' AND data=?)").bind(String(chatId),d.token,d.id,chatId,state.data),
+    env.DB.prepare("UPDATE orders SET admin_deleted=1,admin_deleted_by=?,admin_deleted_at=CURRENT_TIMESTAMP,admin_delete_token=? WHERE id=? AND COALESCE(admin_deleted,0)=0 AND status IN ('pending','paid_pending_delivery','delivering') AND EXISTS(SELECT 1 FROM admin_states WHERE user_id=? AND state='confirm_order_delete' AND data=?)").bind(String(chatId),d.token,d.id,chatId,state.data),
     env.DB.prepare("UPDATE orders SET status='cancelled' WHERE id=? AND admin_delete_token=? AND status='pending' AND NOT EXISTS(SELECT 1 FROM mobile_payment_claims WHERE invoice_type='order' AND invoice_id=orders.id) AND NOT EXISTS(SELECT 1 FROM binance_payment_claims WHERE invoice_type='order' AND invoice_id=orders.id) AND NOT EXISTS(SELECT 1 FROM bep20_payment_claims WHERE invoice_type='order' AND invoice_id=orders.id)").bind(d.id,d.token),
     env.DB.prepare("UPDATE mobile_payment_invoices SET status='cancelled' WHERE invoice_type='order' AND invoice_id=? AND status='pending' AND EXISTS(SELECT 1 FROM orders WHERE id=? AND admin_delete_token=? AND status='cancelled')").bind(d.id,d.id,d.token),
     env.DB.prepare("DELETE FROM admin_states WHERE user_id=? AND state='confirm_order_delete' AND data=?").bind(chatId,state.data)
   ]);
-  await editMsg(env,chatId,messageId,results[0].meta?.changes?'✅ Order deleted from admin lists. Payment and balance records are preserved.':'This order was already deleted or the confirmation was replaced.',[[{text:'Orders',callback_data:'adm_order_find'}]]);return true;
+  await editMsg(env,chatId,messageId,results[0].meta?.changes?'✅ Order deleted from admin lists. Payment and balance records are preserved.':'Nothing was deleted. The order completed, closed, or this confirmation was already used.',[[{text:'Orders',callback_data:'adm_order_find'}]]);return true;
 }
 function adminOrdersListData(filter,page){return filter==='all'?`adm_orders_page_${page}`:`adm_orders_list_${filter}_${page}`;}
 function adminOrdersItemData(id,filter,page){return filter==='all'?`adm_orders_view_${id}_${page}`:`adm_orders_item_${id}_${filter}_${page}`;}
@@ -4218,7 +4222,7 @@ async function showDeliveryAdminOrder(env,chatId,id,messageId=null,listPage=null
   const text=`📦 <b>${listPage===null?'Delivery':'Order Details'} · Order ID ${orderDisplayId(order)}</b>\n\nCustomer: ${adminSnippet(order.customer_name||order.username||'Customer',80)}\nTelegram ID: ${customerTelegramId(order.user_id,order.customer_username)}\nSource: <b>${source}</b>\nProduct: ${adminSnippet(order.product_name||order.name||'Product unavailable',150)}\nQuantity: ${order.quantity||1}\nUnit price: $${adminMoney(Number(order.amount_usd||0)/Number(order.quantity||1))} USD\nOrder total: <b>$${adminMoney(order.amount_usd)} USD</b> · ${adminMoney(order.amount_bdt)} BDT\nMethod: ${adminSnippet(order.payment_method,30)}\nTransaction ID: <code>${adminSnippet(order.trx_id||'Not submitted',100)}</code>\nStatus: <b>${adminSnippet(order.status,35)}</b>\nCreated: ${paymentDashboardTime(order.created_at)} (Dhaka)${pendingOrderExplanation(order)?'\n\n<b>Why this order is pending</b>\n'+escapeHtml(pendingOrderExplanation(order)):''}\n\nProvider order: <code>${adminSnippet(order.provider_order_id||'Not recorded',80)}</code>\nSupplier request: <code>${adminSnippet(order.provider_request_id||'Not recorded',80)}</code>\n\n<b>Last delivery issue</b>\n${escapeHtml(error)}\n\n${help}\n\n${Date.now()<Number(order.provider_retry_at||0)?'Please wait for the existing retry cooldown.':''}`;
   const buttons=[];if(canRetry)buttons.push([{text:'🔎 Check Delivery',callback_data:`adm_delivery_retry_${order.id}`}]);
   if(order.status==='completed')buttons.push([{text:'Send Saved Delivery to Customer',callback_data:`adm_delivery_resend_${order.id}`}]);
-  buttons.push([{text:'🗑️ Delete Order',callback_data:`adm_order_delete_${order.id}`,style:'danger'}]);
+  if(['pending','paid_pending_delivery','delivering'].includes(order.status))buttons.push([{text:'🗑️ Delete Order',callback_data:`adm_order_delete_${order.id}`,style:'danger'}]);
   buttons.push([adminUserProfileButton(order.user_id),{text:'💬 Message User',url:customerTelegramUrl(order.user_id,order.customer_username)}],[{text:'🔄 Refresh',callback_data:listPage===null?`adm_delivery_view_${order.id}`:adminOrdersItemData(order.id,listFilter,listPage)}],[listPage===null?{text:'Delivery List',callback_data:'adm_delivery_list_pending_0'}:{text:listFilter==='all'?'All Orders':listFilter==='pending'?'Pending Orders':'Completed Orders',callback_data:adminOrdersListData(listFilter,listPage)},{text:'Admin Panel',callback_data:'admin_panel'}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }

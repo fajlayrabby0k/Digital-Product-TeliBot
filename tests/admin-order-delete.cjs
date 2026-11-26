@@ -11,18 +11,22 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  const add=status=>db.prepare("INSERT INTO orders(user_id,product_id,product_name,payment_method,amount_usd,status,trx_id) VALUES(99,1,'Product','BKASH',5,?,?)").run(status,'PAYMENT'+status).lastInsertRowid;
  const completed=add('completed'),pending=add('pending'),paid=add('paid_pending_delivery'),processing=add('delivering');
  const row=id=>db.prepare('SELECT * FROM orders WHERE id=?').get(id),confirm=()=>buttons().find(b=>b.callback_data?.startsWith('adm_order_delete_ok_')).callback_data;
- await cb('adm_orders_item_'+completed+'_completed_0');assert(buttons().some(b=>b.callback_data==='adm_order_delete_'+completed));
- await cb('adm_order_delete_'+completed,99);assert.equal(row(completed).admin_deleted,0);
- await cb('adm_order_delete_'+completed);const cancelled=confirm();await cb('adm_orders_view_'+completed+'_0');await cb(cancelled);assert.equal(row(completed).admin_deleted,0);
- await cb('adm_order_delete_'+completed);const done=confirm();await Promise.all([cb(done),cb(done)]);assert.equal(row(completed).admin_deleted,1);assert.equal(row(completed).status,'completed');assert.equal(row(completed).admin_deleted_by,'1');assert(row(completed).admin_deleted_at);
- await cb('adm_orders_list_completed_0');assert(!buttons().some(b=>b.callback_data?.startsWith('adm_orders_item_'+completed+'_')));
- await cb('adm_order_search_0');await text(row(completed).public_order_id);assert(last().text.includes('No order found'));
- await cb('adm_order_delete_'+pending);await cb(confirm());assert.equal(row(pending).status,'cancelled');assert.equal(row(pending).admin_deleted,1);
+ await cb('adm_orders_item_'+completed+'_completed_0');assert(!buttons().some(b=>b.callback_data==='adm_order_delete_'+completed));
+ await cb('adm_order_delete_'+completed);assert(last().text.includes('Only pending'));assert.equal(row(completed).admin_deleted,0);
+ assert.throws(()=>db.prepare('UPDATE orders SET admin_deleted=1 WHERE id=?').run(completed),/Completed orders cannot be deleted/);
+ await cb('adm_order_delete_'+pending,99);assert.equal(row(pending).admin_deleted,0);
+ await cb('adm_order_delete_'+pending);const cancelled=confirm();await cb('adm_orders_view_'+pending+'_0');await cb(cancelled);assert.equal(row(pending).admin_deleted,0);
+ await cb('adm_order_delete_'+pending);const ok=confirm();await Promise.all([cb(ok),cb(ok)]);assert.equal(row(pending).admin_deleted,1);assert.equal(row(pending).status,'cancelled');assert.equal(row(pending).admin_deleted_by,'1');
  for(const id of [paid,processing]){const status=row(id).status;await cb('adm_order_delete_'+id);await cb(confirm());assert.equal(row(id).admin_deleted,1);assert.equal(row(id).status,status);}
  await cb('adm_orders_list_pending_0');assert(!buttons().some(b=>b.callback_data?.startsWith('adm_orders_item_')));
- await cb('adm_orders_page_0');assert(last().text.includes('Total: <b>0</b>'));
- const expiry=add('pending');await cb('adm_order_delete_'+expiry);const stale=confirm();let draft=JSON.parse(db.prepare('SELECT data FROM admin_states WHERE user_id=1').get().data);draft.expires=1;db.prepare('UPDATE admin_states SET data=? WHERE user_id=1').run(JSON.stringify(draft));await cb(stale);assert.equal(row(expiry).admin_deleted,0);
- await cb('adm_orders_view_'+completed+'_0');assert(last().text.includes('not found or deleted'));
- assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,10);assert.equal(db.prepare("SELECT COUNT(*) n FROM orders WHERE status='completed'").get().n,1);
- console.log('PASS: pending/completed/processing admin order deletion, authorization/confirmation/cancel/expiry/replay, filtered lists/search, payment history preservation and unchanged balance');
+ await cb('adm_orders_list_completed_0');assert(buttons().some(b=>b.callback_data==='adm_orders_item_'+completed+'_completed_0'));
+ // An order completing after the confirmation was opened cannot be hidden.
+ const race=add('pending');await cb('adm_order_delete_'+race);const stale=confirm();db.prepare("UPDATE orders SET status='completed' WHERE id=?").run(race);await cb(stale);assert.equal(row(race).admin_deleted,0);
+ // A paid archived order that later finishes is restored automatically.
+ db.prepare("UPDATE orders SET status='completed' WHERE id=?").run(paid);assert.equal(row(paid).admin_deleted,0);
+ // Existing hidden completed records are restored during upgrade.
+ db.exec('DROP TRIGGER orders_no_completed_delete');db.prepare('UPDATE orders SET admin_deleted=1 WHERE id=?').run(completed);await c.api.ensureDbReady(DB,true);assert.equal(row(completed).admin_deleted,0);
+ const expiry=add('pending');await cb('adm_order_delete_'+expiry);const expired=confirm();let d=JSON.parse(db.prepare('SELECT data FROM admin_states WHERE user_id=1').get().data);d.expires=1;db.prepare('UPDATE admin_states SET data=? WHERE user_id=1').run(JSON.stringify(d));await cb(expired);assert.equal(row(expiry).admin_deleted,0);
+ assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,10);
+ console.log('PASS: pending-only deletion, protected completed UI/callback/SQL, completion race, restored historical/late completed orders, authorization/cancel/expiry/replay and preserved funds');
 })().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
