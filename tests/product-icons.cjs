@@ -26,7 +26,7 @@ const context = vm.createContext({ console, Intl, setTimeout, clearTimeout, capt
   messages.push({method, ...payload}); return {ok:true};
 }});
 const source = fs.readFileSync(path.join(__dirname, '../_worker.js'), 'utf8').replace('export default {', 'const worker = {');
-vm.runInContext(source + '\nisDbInitialized = true; callTg = capture; globalThis.api = {renderProductDescription,productDisplayName,validProductIcon,saveProductIcon,handleProductIconText,handleUpdate};', context);
+vm.runInContext(source + '\nisDbInitialized = true; callTg = capture; globalThis.api = {productButtonIcon,renderProductDescription,productDisplayName,validProductIcon,saveProductIcon,handleProductIconText,handleUpdate};', context);
 const {api} = context;
 const env = {DB, ADMIN_ID:'1'};
 const callback = (data, id=1) => api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin'},message:{chat:{id},message_id:10}}},env);
@@ -76,6 +76,17 @@ const callback = (data, id=1) => api.handleUpdate({callback_query:{id:'cb',data,
   assert.equal(api.productDisplayName(product),'Updated Provider VPN');
   await callback('adm_iconpick_5_DEFAULT');
   assert.equal(api.productDisplayName(product),'🔥 Updated Provider VPN');
+  await callback('adm_iconcustom_5');
+  await api.handleProductIconText(env,1,'1234567890123456',state);
+  assert.equal(product.custom_icon,'1234567890123456');
+  assert(!api.productDisplayName(product).includes('1234567890123456'));
+  assert.equal(api.productButtonIcon(product).icon_custom_emoji_id,'1234567890123456');
+  await callback('adm_iconcustom_5');
+  await api.handleProductIconText(env,1,'⭐',state,{entities:[{type:'custom_emoji',custom_emoji_id:'5432109876543210'}]});
+  assert.equal(product.custom_icon,'5432109876543210');
+  await callback('adm_iconcustom_5');
+  await api.handleProductIconText(env,1,'/remove',state);
+  assert.equal(product.custom_icon,'');
   const before = writes;
   await callback('adm_iconpick_5_💎',99);
   assert.equal(await api.saveProductIcon(env,99,5,'💎'),false);

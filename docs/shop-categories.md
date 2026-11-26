@@ -71,3 +71,9 @@ Only admin-created categories and the built-in Others Subscription group are use
 ## Single-page customer category list
 
 Shop shows all active categories, including empty categories, in two columns on one page. Others Subscription is the last category. Category Previous/Next buttons and the category page counter are removed. Older `shop_page_*` callbacks still open the complete category list. Product lists within categories and admin category management keep their existing pagination.
+
+### Product editing and custom icons
+
+Admin Panel → Manage Products → select a product now offers Edit Name and Edit Description for both local and API products. API name/description edits are preserved during sync, while provider stock and cost continue updating. Selling prices use the existing custom-price/markup controls; local purchase costs remain editable. API purchase costs and available stock come from the supplier.
+
+Set Product Icon accepts a normal emoji, a Telegram custom emoji message, or its numeric custom emoji ID. Remove Icon hides the icon; Use Original Icon restores the original/provider icon. Category name and custom icon controls remain under Categories → category. Telegram must permit custom emoji icons for the bot; adding an ID does not grant Telegram eligibility. Inline buttons cannot display arbitrary uploaded images as icons.

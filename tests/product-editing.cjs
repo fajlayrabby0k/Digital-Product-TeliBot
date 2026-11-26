@@ -1,0 +1,24 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,fetch:async()=>({ok:true,json:async()=>({data:[{id:"editable-provider",name:"Supplier Name",description:"Supplier description",price:2,stock:7}]})}),Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,drainProductNotices,parseStockItems,executeWalletPurchase,handleCategoryText,ensureCategory,syncExternalProducts,handleAdminCoreText};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);db.prepare('INSERT INTO users(user_id) VALUES(1)').run();
+ db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('external_api_key','fixture')").run();
+ const id=db.prepare("INSERT INTO products(name,description,price_usd,price_bdt,is_external,external_id,cost_price_usd) VALUES('Original','Original description',3,375,1,'editable-provider',2)").run().lastInsertRowid;
+ const current=()=>db.prepare('SELECT * FROM products WHERE id=?').get(id);
+ await cb('adm_rename_product_'+id,99);assert(!db.prepare('SELECT * FROM admin_states WHERE user_id=99').get());
+ await cb('adm_rename_product_'+id);assert(last().text.includes('Edit Product Name'));
+ await text('My API Product');assert.equal(current().name,'My API Product');assert.equal(current().name_override,1);
+ await cb('adm_description_product_'+id);await text('x'.repeat(2001));assert.equal(current().description,'Original description');
+ await text('My warranty\nMy instructions');assert.equal(current().description,'My warranty\nMy instructions');assert.equal(current().description_override,1);
+ const synced=await c.api.syncExternalProducts(env,null,null,false,null,true);assert.equal(synced.success,true,synced.message);
+ assert.equal(current().name,'My API Product');assert.equal(current().description,'My warranty\nMy instructions');assert.equal(current().api_stock,7);assert.equal(current().cost_price_usd,2);
+ await cb('adm_rename_product_2');await text('Local <Pro> & More');await cb('adm_prod_details_2');assert(last().text.includes('Local &lt;Pro&gt; &amp; More'));
+ const local=2;await cb('adm_description_product_'+local);const state=db.prepare('SELECT * FROM admin_states WHERE user_id=1').get();await text('Local replacement');assert.equal(db.prepare('SELECT description FROM products WHERE id=?').get(local).description,'Local replacement');await c.api.handleAdminCoreText(env,1,'Replay',state);assert.equal(db.prepare('SELECT description FROM products WHERE id=?').get(local).description,'Local replacement');
+ console.log('PASS: admin-only local/API editing, validation, replay guards, and persistent API name/description with live stock/cost sync');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
