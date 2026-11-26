@@ -8,7 +8,7 @@ const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{fir
 const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
 (async()=>{
  await c.api.ensureDbReady(DB);for(const id of [1,99,100])db.prepare('INSERT INTO users(user_id,balance_usd) VALUES(?,10)').run(id);
- await cb('adm_order_find');assert(buttons().some(b=>b.text==='✅ Completed Orders (0)'));assert(buttons().some(b=>b.text==='⏳ Pending Orders (0)'));await cb('adm_orders_page_0');assert(last().text.includes('No orders yet.'));assert(buttons().some(b=>b.callback_data==='adm_order_search_0'));
+ await cb('adm_order_find');assert(buttons().some(b=>b.text==='✅ Completed Orders (0)'));assert.deepEqual(Array.from(last().reply_markup.inline_keyboard,row=>row.length),[1,1,2]);assert(buttons().some(b=>b.text==='⏳ Pending Orders (0)'));await cb('adm_orders_page_0');assert(last().text.includes('No orders yet.'));assert(buttons().some(b=>b.callback_data==='adm_order_search_0'));
  const statuses=['pending','completed','cancelled','paid_pending_delivery','delivering','refunded','wallet_credited'];
  for(let i=0;i<23;i++)db.prepare('INSERT INTO orders(user_id,product_id,product_name,payment_method,amount_usd,status) VALUES(?,1,?,?,5,?)').run(i%2?99:100,'Saved Product '+i,'WALLET',statuses[i%statuses.length]);
  const records=db.prepare('SELECT * FROM orders ORDER BY id DESC').all(),before=JSON.stringify(records),money=db.prepare('SELECT SUM(balance_usd) n FROM users').get().n;
