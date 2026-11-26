@@ -33,4 +33,4 @@ Each payment entry in Pending and Completed shows the customer name and Telegram
 
 Telegram IDs in payment lists, payment details and pending-payment admin alerts are clickable profile links. A valid stored @username uses https://t.me/username; otherwise the link uses tg://user?id=ID. Payment details also include **Message User** beside View Customer. This opens Telegram for the admin; the bot does not send a private message on the admin's behalf. Opening or messaging remains subject to Telegram client behavior and user privacy restrictions.
 
-Both Pending and Completed list entries have their own **Message User · customer name** button directly below the payment row. Pending keeps the red payment / Delete row, followed by the contact button; Completed uses the same contact layout without Delete. No additional database queries are needed.
+Message User is shown only after opening a payment's details, for both Pending and Completed payments, including redeem credits. There is no Message User button beside or below each list item. The list retains names and clickable Telegram IDs; Pending retains the red payment / Delete row.

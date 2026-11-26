@@ -3992,10 +3992,10 @@ async function showPaymentDashboard(env,chatId,filter='menu',page=0,messageId=nu
   const titles={pending:'Pending',submitted:'IDs Submitted',issues:'Verification Issues',delivery:'Paid / Delivery Pending',completed:'Completed',cancelled:'Cancelled / Deleted'};
   let text=`${filter==='completed'?'✅ Completed Payments':'🔴 '+(filter==='pending'||filter==='submitted'?'Pending Payments':titles[filter]||'Pending Payments')}\n${notice?'\n✅ Pending payment deleted. The list is up to date.\n':''}\nPage ${page+1}\n${results.length?'':'No payments in this list.'}`;
   if(results.length)text+='\n\n'+results.slice(0,10).map(x=>`${x.method.toUpperCase()==='REDEEM'?'🎁 Redeem Credit':x.kind==='order'?'Order':'Deposit'} ${x.id} · ${escapeHtml(x.method)} · $${adminMoney(x.amount_usd)}\nCustomer: ${adminSnippet(x.customer_name||x.customer_username||'Customer',48)} · ID: ${customerTelegramId(x.user_id,x.customer_username)}\n${x.method.toUpperCase()==='REDEEM'?'Reference: Redeem '+x.id:'TrxID: <code>'+adminSnippet(x.submitted_trx||'Not submitted',100)+'</code>'}${x.status==='pending'?'\nReason: '+(x.reason?adminSnippet(paymentDashboardReason(x.reason),120):'No verification result recorded yet. Open Payment Details.') : ''}`).join('\n\n');
-  const buttons=results.slice(0,10).flatMap(x=>[[
+  const buttons=results.slice(0,10).map(x=>[
     {text:`${x.method.toUpperCase()==='REDEEM'?'🎁 Redeem':x.kind==='order'?'Order':'Deposit'} #${x.id} · ${x.method} · $${adminMoney(x.amount_usd)} · ${x.user_id}`,callback_data:`adm_paydetail_${x.kind}_${x.id}`,...(x.status==='pending'?{style:'danger'}:filter==='completed'?{style:'success'}:{})},
     ...(x.status==='pending'?[{text:'🗑️ Delete',callback_data:`adm_payreview_cancel_${x.kind}_${x.id}`,style:'danger'}]:[])
-  ],[{text:`💬 Message User · ${String(x.customer_name||x.customer_username||x.user_id).replace(/[\r\n]/g,' ').slice(0,24)}`,url:customerTelegramUrl(x.user_id,x.customer_username)}]]);
+  ]);
   if(notice?.userId)buttons.push([{text:'View Customer / Add Balance',callback_data:`adm_user_view_${notice.userId}`}]);
   const pager=[];if(page>0)pager.push({text:'Previous',callback_data:`adm_paydash_${filter}_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_paydash_${filter}_${page+1}`});if(pager.length)buttons.push(pager);
   buttons.push([{text:'🔄 Refresh',callback_data:`adm_paydash_${filter}_${page}`},{text:'⬅️ Payment Dashboard',callback_data:'adm_payments_home'}]);
