@@ -4161,6 +4161,7 @@ async function handlePaymentDashboardCallback(env,chatId,data,messageId){
   if(await handlePendingPaymentSuccess(env,chatId,data,messageId))return true;
   if(await handleAdminPaymentReview(env,chatId,data,messageId))return true;
   if(data==='adm_payments_home'){await showPaymentDashboard(env,chatId,'menu',0,messageId);return true;}
+  if(data==='adm_payment_health_details'){await showPaymentHealth(env,chatId,messageId,true);return true;}
   if(data==='adm_payment_health'){await showPaymentHealth(env,chatId,messageId);return true;}
   let match=data.match(/^adm_paydash_(pending|submitted|issues|delivery|completed|cancelled)_(\d+)$/);
   if(match){await showPaymentDashboard(env,chatId,match[1],match[2],messageId);return true;}
@@ -5028,7 +5029,7 @@ async function describeMobileEvidence(env,invoice){
   if(invoice.submitted_at>invoice.expires_ms)return prefix+'Transaction ID was submitted after the payment window ended.';
   return prefix+'SMS fields match. Check the last verification result, invoice status and delivery status; this screen does not approve payments.';
 }
-async function showPaymentHealth(env,chatId,messageId=null){
+async function showPaymentHealth(env,chatId,messageId=null,detailed=false){
   if(!adminUserAccess(env,chatId))return;
   const [health,sms,summary,issues,bkash,nagad,rocket,binance,bep20,auto]=await Promise.all([
     env.DB.prepare('SELECT * FROM mobile_bridge_health WHERE device_id=?').bind(env.MOBILE_BRIDGE_DEVICE_ID||'').first(),
@@ -5040,6 +5041,23 @@ async function showPaymentHealth(env,chatId,messageId=null){
   const configured=Boolean(env.MOBILE_BRIDGE_SECRET?.length>=32&&env.MOBILE_BRIDGE_DEVICE_ID);
   const fresh=Number(health?.last_heartbeat_ms)>Date.now()-45*60000;
   const state=!configured?'Not configured':!health?.last_contact_ms?'No authenticated contact recorded since tracking began':!health.last_heartbeat_ms?'Contact recorded; heartbeat unavailable':!fresh?'Heartbeat stale — check the phone':health.last_result!=='ok'?'Phone contacted server; configuration needs attention':health.forwarding_enabled===0?'Phone reported forwarding OFF':health.sms_permission===0?'Phone reported SMS permission missing':'Recent heartbeat received';
+  if(!detailed){
+    const connected=Number(health?.last_contact_ms)>Date.now()-45*60000;
+    let title='🟢 SMS Auto Verification: Ready',action='';
+    if(!configured){title='🔴 Setup Required';action='Configure the SMS Bridge in Payment Settings.';}
+    else if(!connected){title='🟡 Phone Connection Not Confirmed';action='Open Bridge v1.1 on the receiving phone and tap Save and Start.';}
+    else if(!fresh){title='🟡 Waiting for Phone Status';action='Open the Bridge app and run its connection check.';}
+    else if(health.last_result!=='ok'){title='🟠 Setup Needs Attention';action=bridgeIssueDescription(health.last_result);}
+    else if(health.forwarding_enabled===0){title='🔴 SMS Collection is OFF';action='Open the Bridge app and turn SMS collection on.';}
+    else if(health.sms_permission===0){title='🔴 SMS Permission Required';action='Allow SMS permission for the Bridge app.';}
+    else if(health.forwarding_enabled!==1||health.sms_permission!==1){title='🟡 SMS Status Not Confirmed';action='Open the Bridge app and check SMS permission and collection.';}
+    else if(['format_mismatch','time_mismatch','invalid_account','queue_full','capture_failed'].includes(health.capture_state)){title='🟠 Last SMS Needs Attention';action=bridgeCaptureDescription(health.capture_state);}
+    else if(Number(health.queue_pending)>0){title='🟡 SMS Waiting to Upload';action='Keep the receiving phone online while queued SMS uploads.';}
+    const lastSms=health?.last_receipt_ms?bridgeHealthTime(health.last_receipt_ms):sms.results?.[0]?paymentDashboardTime(sms.results[0].created_at)+' (Dhaka)':'No payment SMS received yet';
+    const text=`📡 <b>Payment &amp; SMS Status</b>\n\n<b>${escapeHtml(title)}</b>\n\nConnection: ${connected?'🟢 Connected recently':'🟡 Not confirmed'}\nSMS collection: ${bridgeHealthFlag(health?.forwarding_enabled)} · Permission: ${health?.sms_permission===1?'Granted':health?.sms_permission===0?'Missing':'Unknown'}\nWaiting to upload: <b>${health?.queue_pending??'Unknown'}</b>\n\nLast connection: ${bridgeHealthTime(health?.last_contact_ms)}\nLast SMS accepted: ${lastSms}${action?'\n\n<b>What to do</b>\n'+escapeHtml(action):''}\n\n<i>Based on the latest phone report. Individual payments still require matching SMS and TrxID.</i>`;
+    const buttons=[[{text:'🔄 Refresh',callback_data:'adm_payment_health'}],[{text:'📋 Details',callback_data:'adm_payment_health_details'},{text:'Admin Panel',callback_data:'admin_panel'}]];
+    return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+  }
   let text=`📡 <b>Payment &amp; SMS Bridge Status</b>\n\n<b>${escapeHtml(state)}</b>\nLast contact: ${bridgeHealthTime(health?.last_contact_ms)}\nLast heartbeat: ${bridgeHealthTime(health?.last_heartbeat_ms)}\nApp: ${escapeHtml(health?.app_version||'Not reported')} · Queue: ${health?.queue_pending??'Unknown'}\nForwarding: ${bridgeHealthFlag(health?.forwarding_enabled)} · SMS permission: ${bridgeHealthFlag(health?.sms_permission)}\nBattery unrestricted: ${bridgeHealthFlag(health?.battery_exempt)}\n\n<b>Phone SMS capture</b>\n${health?.capture_method==='bkash'?'bKash · ':health?.capture_method==='nagad'?'Nagad · ':''}${escapeHtml(bridgeCaptureDescription(health?.capture_state))}\nReported at: ${bridgeHealthTime(health?.last_capture_ms)}\nLast accepted SMS upload: ${health?.last_receipt_ms?bridgeHealthTime(health.last_receipt_ms):sms.results?.[0]?paymentDashboardTime(sms.results[0].created_at)+' (Dhaka; historical record)':'Not received'}\n`;
   if(health?.last_error)text+=`Last bridge issue: ${escapeHtml(bridgeIssueDescription(health.last_error))}\nIssue time: ${bridgeHealthTime(health.last_error_ms)}\n`;
   text+=`\n<b>Payment configuration</b>\nbKash: ${bridgeMaskedAccount(bkash)} · ${configured?'Bridge configured':'Bridge missing'}\nNagad: ${bridgeMaskedAccount(nagad)} · ${configured?'Bridge configured':'Bridge missing'}\nRocket: ${bridgeMaskedAccount(rocket)} · Manual review / Add Balance\nBinance Pay: ${auto==='1'?(env.BINANCE_API_KEY&&env.BINANCE_API_SECRET&&/^\d+$/.test(binance)?'API credentials configured':'Setup incomplete'):'Manual verification'}\nBEP20: ${/^0x[a-fA-F0-9]{40}$/.test(bep20)?'Receiving address configured':'Setup incomplete'}\n\n<b>Mobile payments</b>\nPending: ${summary?.pending||0} · IDs submitted: ${summary?.submitted||0}\n`;
@@ -5047,7 +5065,7 @@ async function showPaymentHealth(env,chatId,messageId=null){
   else text+='\nNo payment SMS records stored for the enrolled phone.\n';
   if(issues.results?.length){text+='\n<b>Recent verification issues</b>\n';for(const issue of issues.results)text+=`${issue.invoice_type==='order'?'Order':'Deposit'} ${issue.public_order_id||issue.invoice_id} · ${escapeHtml(issue.method)}: ${escapeHtml(paymentDashboardReason(issue.reason))}\n`;}
   text+='\nBridge v0.8 or later is required for periodic phone status; older apps can still send payment receipts. Heartbeat updates approximately every 15 minutes; Android may delay background jobs. A recent report does not prove the phone is online now. Configuration checks do not test live Binance/RPC access.';
-  const buttons=[[{text:'🔄 Refresh Status',callback_data:'adm_payment_health'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Pending Payments',callback_data:'adm_paydash_pending_0'}],[{text:'Payment Settings',callback_data:'adm_payment_settings'},{text:'Admin Panel',callback_data:'admin_panel'}],[{text:'📱 Bridge v1.1 APK',url:'https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v1.1.apk'}]];
+  const buttons=[[{text:'🔄 Refresh Details',callback_data:'adm_payment_health_details'},{text:'⬅️ Status',callback_data:'adm_payment_health'}],[{text:'Verification Issues',callback_data:'adm_paydash_issues_0'},{text:'Pending Payments',callback_data:'adm_paydash_pending_0'}],[{text:'Payment Settings',callback_data:'adm_payment_settings'},{text:'Admin Panel',callback_data:'admin_panel'}],[{text:'📱 Bridge v1.1 APK',url:'https://github.com/fajlayrabby0k/Digital-Product-TeliBot/raw/refs/heads/main/downloads/telibot-receipt-bridge-v1.1.apk'}]];
   for(const issue of issues.results||[])buttons.splice(1,0,[{text:`Inspect ${issue.invoice_type==='order'?'Order':'Deposit'} ${issue.public_order_id||issue.invoice_id}`,callback_data:`adm_paydetail_${issue.invoice_type}_${issue.invoice_id}`}]);
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
