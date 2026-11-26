@@ -3184,7 +3184,7 @@ async function sendProfile(env, chatId, user, editMessageId = null) {
     `<b>${escapeHtml(user?.first_name||'Customer')}</b>${user?.username?' · @'+escapeHtml(user.username):''}\n` +
     `User ID: <code>${chatId}</code>\n` +
     `Member since: ${paymentDashboardTime(user?.created_at)} (Dhaka)\n\n` +
-    `<blockquote>👛 <b>Available Wallet Balance</b>\n<b>$${usdBal} USD</b> ≈ ${bdtBal} BDT\n🎁 Referral Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
+    `<blockquote>👛 <b>Wallet Balance</b>\n<b>$${usdBal} USD</b> ≈ ${bdtBal} BDT\n🎁 Referral Earned: <b>$${referralEarned} USD</b></blockquote>\n\n` +
     `📦 <b>Orders</b>\n` +
     `Placed: <b>${Number(orders?.placed||0)}</b> · Delivered: <b>${Number(orders?.delivered||0)}</b>\n` +
     `Awaiting delivery: <b>${Number(orders?.awaiting_delivery||0)}</b> · Refunded: <b>${Number(orders?.refunded||0)}</b>\n` +
