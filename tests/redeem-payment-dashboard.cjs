@@ -1,0 +1,22 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const {DatabaseSync}=require('node:sqlite'),{webcrypto}=require('node:crypto');const db=new DatabaseSync(':memory:'),messages=[];
+const DB={prepare(sql){let args=[];const q={bind(...a){args=a;return q;},exec(){const r=db.prepare(sql).run(...args);return {success:true,meta:{changes:r.changes,last_row_id:r.lastInsertRowid}};},async run(){return q.exec();},async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};}};return q;},async batch(stmts){db.exec('BEGIN');try{const r=stmts.map(s=>s.exec());db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}};
+const c=vm.createContext({console,Intl,URL,URLSearchParams,TextEncoder,crypto:webcrypto,AbortController,setTimeout,clearTimeout,capture:async(e,method,payload)=>{messages.push({method,...payload});return {ok:true,result:{message_id:1}};}});
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../_worker.js'),'utf8').replace('export default {','const worker={')+'\ncallTg=capture;globalThis.api={ensureDbReady,handleUpdate,showAdminUserProfile,showAdminUserHistory,notifyAdminForUser,recordPaymentVerification,showPaymentDashboard,showPaymentDashboardDetail,createRedeemCode,redeemWalletCode};',c);
+const env={DB,ADMIN_ID:1},last=()=>messages.filter(m=>m.text).at(-1),buttons=()=>last().reply_markup.inline_keyboard.flat();
+const cb=(data,id=1)=>c.api.handleUpdate({callback_query:{id:'cb',data,from:{first_name:'Admin',username:'admin_store'},message:{chat:{id},message_id:1}}},env);
+const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Admin',username:'admin_store'},text:value}},env);
+(async()=>{
+ await c.api.ensureDbReady(DB);for(const id of [1,99])db.prepare('INSERT INTO users(user_id,balance_usd) VALUES(?,0)').run(id);
+ const code=await c.api.createRedeemCode(env,1,750);assert((await c.api.redeemWalletCode(env,99,code)).success);
+ const credit=db.prepare("SELECT * FROM deposits WHERE user_id=99 AND method='REDEEM'").get();assert.equal(credit.amount_usd,7.5);
+ const balance=db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd;
+ await cb('adm_payments_home');assert(buttons().some(b=>b.text==='✅ Completed Payments (1)'));
+ await cb('adm_paydash_completed_0');assert(last().text.includes('🎁 Redeem Credit'));assert(buttons().some(b=>b.text.startsWith('🎁 Redeem')));assert(!buttons().some(b=>b.callback_data?.startsWith('adm_payreview_')));assert(!last().text.includes(code));
+ await cb('adm_paydetail_deposit_'+credit.id);assert(last().text.includes('Redeem Reference'));assert(last().text.includes('Completed.'));assert(buttons().some(b=>b.callback_data==='adm_user_view_99'));assert(!buttons().some(b=>b.callback_data?.startsWith('adm_payreview_')));
+ await cb('adm_paydash_pending_0');assert(!buttons().some(b=>b.callback_data==='adm_paydetail_deposit_'+credit.id));
+ db.prepare("INSERT INTO deposits(user_id,method,amount_usd,trx_id,status) VALUES(99,'REDEEM',9,'REDEEM:fake','pending')").run();await cb('adm_paydash_pending_0');assert(!last().text.includes('REDEEM:fake'));
+ assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,balance);
+ assert(!(await c.api.redeemWalletCode(env,99,code)).success);assert.equal(db.prepare("SELECT COUNT(*) n FROM deposits WHERE method='REDEEM' AND status='completed'").get().n,1);
+ console.log('PASS: actual redeemed wallet credit in completed payments/counts/details, redeem reference, no pending/delete/raw-code exposure, unchanged balance and no duplicate redemption');
+})().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>db.close());
