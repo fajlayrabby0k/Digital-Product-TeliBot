@@ -56,7 +56,7 @@ export default {
     if (url.pathname === "/api/sync") {
       if(!['GET','POST'].includes(request.method))return new Response('Method not allowed',{status:405});
       const result=await runPeriodicSync(env);
-      if(ctx?.waitUntil&&env.DB)ctx.waitUntil(drainAllNotices(env).catch(()=>console.error('Scheduled notification drain paused')));
+      if(ctx?.waitUntil&&env.DB)ctx.waitUntil((async()=>{await settlePendingReferralCommissions(env);await drainAllNotices(env);})().catch(()=>console.error('Scheduled referral/notice work paused')));
       return new Response(JSON.stringify(result.body),{status:result.status,headers:{'Content-Type':'application/json','Cache-Control':'no-store'}});
     }
 
@@ -121,7 +121,7 @@ export default {
 
   // Cloudflare Scheduled Cron Handler (Periodic background live sync)
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async()=>{await runPeriodicSync(env);await drainAllNotices(env);})());
+    ctx.waitUntil((async()=>{await runPeriodicSync(env);await settlePendingReferralCommissions(env);await drainAllNotices(env);})());
   }
 };
 
@@ -129,7 +129,7 @@ export default {
 // Database Setup & Migrations
 // ====================================================================
 // Bump this version whenever schema/default/index migrations change.
-const DB_SCHEMA_VERSION = "2026-11-protect-completed-orders-1";
+const DB_SCHEMA_VERSION = "2026-11-exact-profit-referrals-1";
 let isDbInitialized = false;
 let dbInitializationPromise = null;
 async function ensureDbReady(db, force = false) {
@@ -160,6 +160,7 @@ async function initializeDatabase(db, force) {
       `CREATE TABLE IF NOT EXISTS product_categories(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL COLLATE NOCASE UNIQUE);`,
       `CREATE TABLE IF NOT EXISTS category_name_aliases(name TEXT PRIMARY KEY COLLATE NOCASE,category_id INTEGER NOT NULL);`,
       `CREATE TABLE IF NOT EXISTS checkout_quotes(user_id INTEGER NOT NULL,product_id INTEGER NOT NULL,quantity INTEGER NOT NULL,total_usd REAL NOT NULL,created_ms INTEGER NOT NULL,PRIMARY KEY(user_id,product_id,quantity));`,
+      `CREATE TABLE IF NOT EXISTS order_referral_credits(order_id INTEGER PRIMARY KEY,referrer_id INTEGER NOT NULL,amount_cents INTEGER NOT NULL,bdt_amount INTEGER NOT NULL,token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS user_access_events(token TEXT PRIMARY KEY,user_id INTEGER NOT NULL,admin_id INTEGER NOT NULL,is_blocked INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
       `CREATE TABLE IF NOT EXISTS broadcast_jobs(id TEXT PRIMARY KEY,body TEXT NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,max_user_id INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'ready',sent INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0);`,
       `CREATE TABLE IF NOT EXISTS manual_deposit_credits(deposit_id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,amount_usd REAL NOT NULL,amount_bdt REAL NOT NULL,token TEXT UNIQUE NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);`,
@@ -228,6 +229,9 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE orders ADD COLUMN admin_deleted_by TEXT;",
       "ALTER TABLE orders ADD COLUMN admin_deleted_at TEXT;",
       "ALTER TABLE orders ADD COLUMN admin_delete_token TEXT;",
+      "ALTER TABLE orders ADD COLUMN referral_referrer_id INTEGER;",
+      "ALTER TABLE orders ADD COLUMN referral_percent REAL;",
+      "ALTER TABLE orders ADD COLUMN referral_commission_cents INTEGER;",
       "ALTER TABLE orders ADD COLUMN sale_origin TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN provider_unit_cost_usd REAL DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN product_id INTEGER DEFAULT NULL;",
@@ -235,6 +239,8 @@ async function initializeDatabase(db, force) {
       "ALTER TABLE orders ADD COLUMN currency TEXT DEFAULT 'USD';",
       "ALTER TABLE orders ADD COLUMN product_name TEXT DEFAULT NULL;",
       "ALTER TABLE orders ADD COLUMN created_at TEXT DEFAULT NULL;",
+      "ALTER TABLE users ADD COLUMN referred_by INTEGER DEFAULT 0;",
+      "ALTER TABLE users ADD COLUMN total_referrals INTEGER DEFAULT 0;",
       "ALTER TABLE users ADD COLUMN username TEXT DEFAULT NULL;",
       "ALTER TABLE users ADD COLUMN first_name TEXT DEFAULT NULL;",
       "ALTER TABLE users ADD COLUMN balance_usd REAL DEFAULT 0;",
@@ -299,6 +305,10 @@ async function initializeDatabase(db, force) {
     const localCondition=product=>`EXISTS(SELECT 1 FROM products WHERE id=${product} AND COALESCE(is_external,0)=0)`;
     const publicIdCandidate=`WITH RECURSIVE candidates(code,step) AS (SELECT 10000+ABS(RANDOM()%90000),0 UNION ALL SELECT 10000+((code-10000+1)%90000),step+1 FROM candidates WHERE step<89999) SELECT CAST(code AS TEXT) FROM candidates WHERE NOT EXISTS(SELECT 1 FROM orders WHERE public_order_id=CAST(code AS TEXT)) LIMIT 1`;
     const auditSetup=[
+      db.prepare(`CREATE TRIGGER IF NOT EXISTS orders_capture_referral AFTER INSERT ON orders BEGIN
+        UPDATE orders SET referral_referrer_id=COALESCE((SELECT r.user_id FROM users b JOIN users r ON r.user_id=b.referred_by WHERE b.user_id=NEW.user_id AND r.user_id<>b.user_id),0),
+        referral_percent=MIN(100,MAX(0,COALESCE((SELECT CAST(value AS REAL) FROM settings WHERE key='referral_commission_percent'),5))),
+        referral_commission_cents=CASE WHEN EXISTS(SELECT 1 FROM users b JOIN users r ON r.user_id=b.referred_by WHERE b.user_id=NEW.user_id AND r.user_id<>b.user_id) THEN ROUND(NEW.amount_usd*MIN(100,MAX(0,COALESCE((SELECT CAST(value AS REAL) FROM settings WHERE key='referral_commission_percent'),5)))) ELSE 0 END WHERE id=NEW.id; END`),
       db.prepare("UPDATE orders SET admin_deleted=0,admin_delete_token=NULL WHERE status='completed' AND COALESCE(admin_deleted,0)<>0"),
       db.prepare("CREATE TRIGGER IF NOT EXISTS orders_no_completed_delete BEFORE UPDATE OF admin_deleted ON orders WHEN NEW.status='completed' AND COALESCE(NEW.admin_deleted,0)<>0 BEGIN SELECT RAISE(ABORT,'Completed orders cannot be deleted'); END"),
       db.prepare("CREATE TRIGGER IF NOT EXISTS orders_completed_visible AFTER UPDATE OF status ON orders WHEN NEW.status='completed' AND COALESCE(NEW.admin_deleted,0)<>0 BEGIN UPDATE orders SET admin_deleted=0,admin_delete_token=NULL WHERE id=NEW.id; END"),
@@ -842,7 +852,7 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
     ]);
     await sendOrderDocument(env,chatId,{...order,public_order_id:displayId},creds);
     await notifyAdminForUser(env,chatId, `✅ <b>Order ID ${displayId} Auto-Verified & Delivered via API!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
-    await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
+    await processReferralCommission(env, chatId, order.amount_usd, order.product_name,order.id);
     return;
   }
 
@@ -860,7 +870,7 @@ async function completeSuccessfulOrder(env, order, trxId, chatId) {
     ]);
     await sendOrderDocument(env,chatId,order,lines.join('\n\n'));
     await notifyAdminForUser(env,chatId, `✅ <b>Order ID ${displayId} Auto-Verified & Delivered from Stock!</b>\nProduct: <b>${order.product_name}</b>\nMethod: ${order.payment_method}\nTrxID: <code>${trxId}</code>\nAmount: $${order.amount_usd} USD`);
-    await processReferralCommission(env, chatId, order.amount_usd, order.product_name);
+    await processReferralCommission(env, chatId, order.amount_usd, order.product_name,order.id);
   } else {
     await env.DB.prepare("UPDATE orders SET status = 'paid_pending_delivery', trx_id = ? WHERE id = ?").bind(trxId, orderId).run();
     await sendMsg(env, chatId, `✅ <b>Payment Verified!</b>\n\nOrder ID: ${displayId}\n⚠️ Local stock is being restocked. Admin has been notified to deliver your order immediately!`);
@@ -921,7 +931,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
     ]);
     await sendOrderDocument(env,chatId,{id:orderId,public_order_id:displayId,product_name:prod.name,quantity:qty},creds);
     await notifyAdminForUser(env,chatId,`✅ Wallet Order ID ${displayId} delivered. Customer: <code>${chatId}</code> · $${totalUsd.toFixed(2)} USD · ${escapeHtml(prod.name)}`);
-  await processReferralCommission(env, chatId, totalUsd, prod.name);
+  await processReferralCommission(env, chatId, totalUsd, prod.name,orderId);
     return;
   }
 
@@ -951,7 +961,7 @@ async function executeWalletPurchase(env, chatId, username, prod, qty, totalUsd,
   ]);
   await sendOrderDocument(env,chatId,{id:orderId,public_order_id:displayId,product_name:prod.name,quantity:qty},allocated.map(it=>it.item_data).join('\n\n'));
   await notifyAdminForUser(env,chatId,`✅ Wallet Order ID ${displayId} delivered. Customer: <code>${chatId}</code> · $${totalUsd.toFixed(2)} USD · ${escapeHtml(prod.name)}`);
-  await processReferralCommission(env, chatId, totalUsd, prod.name);
+  await processReferralCommission(env, chatId, totalUsd, prod.name,orderId);
 }
 
 const PAYMENT_ICON_METHODS = ['binance','bep20','bkash','nagad','rocket','redeem'];
@@ -1651,6 +1661,7 @@ async function handleUpdate(update, env, originUrl = "", ctx = null) {
     if(walletHistoryMatch){if(adminUserAccess(env,chatId))await showWalletHistory(env,chatId,walletHistoryMatch[1],walletHistoryMatch[2],messageId);return;}
     if(await handleDeliveryAdminCallback(env,chatId,data,messageId))return;
     if(await handlePaymentDashboardCallback(env,chatId,data,messageId))return;
+    const salesOrders=data.match(/^adm_sales_orders_(today|week|days30|month|all)_(\d+)$/);if(salesOrders){await showSalesOrderBreakdown(env,chatId,salesOrders[1],salesOrders[2],messageId);return;}
     if(/^adm_sales_(today|week|days30|month|all)$/.test(data)){await showAdminSalesReport(env,chatId,data.slice(10),messageId);return;}
     const localCostAction=data.match(/^adm_local_cost_(\d+)$/);
     if(localCostAction){
@@ -2820,20 +2831,25 @@ async function dispatchExternalOrder(env,prod,quantity,orderId){
   }
 }
 
-async function processReferralCommission(env, buyerChatId, orderAmountUsd, productName) {
-  try {
-    const buyer = await env.DB.prepare("SELECT * FROM users WHERE user_id = ?").bind(buyerChatId).first();
-    if (!buyer || !buyer.referred_by || buyer.referred_by === 0) return;
-    const referrerId = buyer.referred_by;
-    const commPct = parseFloat(await getSetting(env, "referral_commission_percent", "5"));
-    const commissionUsd = Number(((orderAmountUsd * commPct) / 100).toFixed(2));
-    if (commissionUsd <= 0) return;
-    const rate = parseFloat(await getSetting(env, "usd_to_bdt_rate", "125"));
-    const commissionBdt = Math.round(commissionUsd * rate);
-
-    await env.DB.prepare(walletChangeSql("UPDATE users SET balance_usd = balance_usd + ?, balance_bdt = balance_bdt + ? WHERE user_id = ?",'referral','buyer:'+buyerChatId)).bind(commissionUsd, commissionBdt, referrerId).run();
-    await sendMsg(env, referrerId, `🎉 <b>Referral Commission Received!</b>\n\nYour referred friend completed a purchase of <b>${productName}</b>!\n💰 Added: <b>+$${commissionUsd.toFixed(2)} USD (≈ ৳${commissionBdt} BDT)</b> (${commPct}% commission) to your wallet balance.`);
-  } catch (e) { console.error("Referral Commission Error:", e); }
+async function processReferralCommission(env,buyerChatId,orderAmountUsd,productName,orderId){
+  try{
+    if(!orderId)return;
+    const order=await env.DB.prepare("SELECT * FROM orders WHERE id=? AND user_id=? AND status='completed'").bind(orderId,buyerChatId).first();
+    if(!order||!order.referral_referrer_id||!(order.referral_commission_cents>0))return;
+    const rate=Number(await getSetting(env,'usd_to_bdt_rate','125'));if(!Number.isFinite(rate)||rate<=0)return;
+    const token=crypto.randomUUID(),bdt=Math.round(order.referral_commission_cents/100*rate);
+    const proof='EXISTS(SELECT 1 FROM order_referral_credits WHERE order_id=? AND token=?)';
+    const result=await env.DB.batch([
+      env.DB.prepare("INSERT OR IGNORE INTO order_referral_credits(order_id,referrer_id,amount_cents,bdt_amount,token) SELECT id,referral_referrer_id,referral_commission_cents,?,? FROM orders WHERE id=? AND user_id=? AND status='completed' AND referral_commission_cents>0 AND EXISTS(SELECT 1 FROM users WHERE user_id=orders.referral_referrer_id)").bind(bdt,token,orderId,buyerChatId),
+      env.DB.prepare(walletChangeSql(`UPDATE users SET balance_usd=(ROUND(COALESCE(balance_usd,0)*100)+?)/100.0,balance_bdt=COALESCE(balance_bdt,0)+? WHERE user_id=? AND ${proof}`,'referral','order:'+orderId)).bind(order.referral_commission_cents,bdt,order.referral_referrer_id,orderId,token)
+    ]);
+    if(!result[0].meta?.changes)return;
+    await sendMsg(env,order.referral_referrer_id,`🎉 <b>Referral Commission Received!</b>\n\nOrder ID: ${orderDisplayId(order)}\nProduct: ${escapeHtml(order.product_name||productName||'Product')}\nAdded: <b>$${(order.referral_commission_cents/100).toFixed(2)} USD</b> (${order.referral_percent}%) to your wallet.`);
+  }catch{console.error('Order referral commission needs retry');}
+}
+async function settlePendingReferralCommissions(env){
+  const {results}=await env.DB.prepare("SELECT id,user_id,amount_usd,product_name FROM orders WHERE status='completed' AND referral_commission_cents>0 AND NOT EXISTS(SELECT 1 FROM order_referral_credits c WHERE c.order_id=orders.id) ORDER BY id LIMIT 3").all();
+  for(const order of results)await processReferralCommission(env,order.user_id,order.amount_usd,order.product_name,order.id);
 }
 
 // Preorder restock and follower alerts share the durable queue and recipient cursor.
@@ -3535,7 +3551,7 @@ async function processBotUpdate(update,env,origin,ctx){
       await sendOrderDiagnostics(scoped,chatId);return;
     }
     await handleUpdate(update,scoped,origin,ctx);
-    if(ctx?.waitUntil)ctx.waitUntil(drainAllNotices(scoped).catch(()=>console.error('Product notice delivery paused')));
+    if(ctx?.waitUntil)ctx.waitUntil((async()=>{await settlePendingReferralCommissions(scoped);await drainAllNotices(scoped);})().catch(()=>console.error('Referral/notice background work paused')));
   }catch(error){
     const reference='ERR-'+crypto.randomUUID().slice(0,8),detail=await safeDiagnostic(scoped,error?.message||error);
     console.error(`Bot error ${reference} at ${trace.stage}: ${detail}`);
@@ -3888,29 +3904,47 @@ function salesReportPeriod(period,now=Date.now()){
   const start=period==='all'?null:new Date(Date.UTC(year,month,period==='month'?1:day-days+1)-6*3600000).toISOString();
   return {start,end:new Date(now).toISOString(),label:period==='all'?'All Time':period==='month'?'This Month':period==='week'?'Last 7 Days':period==='days30'?'Last 30 Days':'Today'};
 }
+const saleCostSql="CASE WHEN sale_origin='api' THEN provider_unit_cost_usd WHEN sale_origin='local' THEN purchase_unit_cost_usd END";
+const saleCostKnownSql=`(${saleCostSql}) IS NOT NULL AND (${saleCostSql})>=0`;
 async function showAdminSalesReport(env,chatId,period='today',messageId=null){
   if(!adminUserAccess(env,chatId))return;
   if(!['today','week','days30','month','all'].includes(period))period='today';
   const range=salesReportPeriod(period),filter=range.start?' AND julianday(created_at)>=julianday(?)':'',args=range.start?[range.start,range.end]:[range.end];
-  const row=await env.DB.prepare(`SELECT COUNT(*) AS completed,COALESCE(SUM(quantity),0) AS items,COALESCE(SUM(amount_usd),0) AS revenue,
-    COALESCE(SUM(CASE WHEN sale_origin='api' THEN amount_usd ELSE 0 END),0) AS api_revenue,
-    COALESCE(SUM(CASE WHEN sale_origin='local' THEN amount_usd ELSE 0 END),0) AS local_revenue,
-    COALESCE(SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN ROUND(provider_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS known_cost,
-    COALESCE(SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN ROUND(amount_usd*100)-ROUND(provider_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS gross_profit,
-    SUM(CASE WHEN sale_origin='api' AND provider_unit_cost_usd IS NOT NULL THEN 1 ELSE 0 END) AS costed,
-    COALESCE(SUM(CASE WHEN sale_origin='local' AND purchase_unit_cost_usd IS NOT NULL THEN ROUND(purchase_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS local_cost,
-    COALESCE(SUM(CASE WHEN sale_origin='local' AND purchase_unit_cost_usd IS NOT NULL THEN ROUND(amount_usd*100)-ROUND(purchase_unit_cost_usd*quantity*100) ELSE 0 END),0)/100.0 AS local_profit,
-    SUM(CASE WHEN sale_origin IS NULL OR (sale_origin='api' AND provider_unit_cost_usd IS NULL) OR (sale_origin='local' AND purchase_unit_cost_usd IS NULL) THEN 1 ELSE 0 END) AS unknown
+  const row=await env.DB.prepare(`SELECT COUNT(*) completed,COALESCE(SUM(quantity),0) items,
+    COALESCE(SUM(ROUND(amount_usd*100)),0) revenue,
+    COALESCE(SUM(CASE WHEN sale_origin='api' THEN ROUND(amount_usd*100) ELSE 0 END),0) api_revenue,
+    COALESCE(SUM(CASE WHEN sale_origin='local' THEN ROUND(amount_usd*100) ELSE 0 END),0) local_revenue,
+    COALESCE(SUM(CASE WHEN sale_origin='api' AND ${saleCostKnownSql} THEN ROUND(provider_unit_cost_usd*quantity*100) ELSE 0 END),0) api_cost,
+    COALESCE(SUM(CASE WHEN sale_origin='local' AND ${saleCostKnownSql} THEN ROUND(purchase_unit_cost_usd*quantity*100) ELSE 0 END),0) local_cost,
+    COALESCE(SUM(CASE WHEN sale_origin='api' AND ${saleCostKnownSql} THEN ROUND(amount_usd*100)-ROUND(provider_unit_cost_usd*quantity*100) ELSE 0 END),0) api_profit,
+    COALESCE(SUM(CASE WHEN sale_origin='local' AND ${saleCostKnownSql} THEN ROUND(amount_usd*100)-ROUND(purchase_unit_cost_usd*quantity*100) ELSE 0 END),0) local_profit,
+    COALESCE(SUM(COALESCE(referral_commission_cents,0)),0) referral_due,
+    COALESCE(SUM(COALESCE((SELECT c.amount_cents FROM order_referral_credits c WHERE c.order_id=orders.id),0)),0) referral_paid,
+    COALESCE(SUM(CASE WHEN ${saleCostKnownSql} AND referral_commission_cents IS NOT NULL THEN ROUND(amount_usd*100)-ROUND((${saleCostSql})*quantity*100)-referral_commission_cents ELSE 0 END),0) net,
+    COALESCE(SUM(CASE WHEN ${saleCostKnownSql} AND referral_commission_cents IS NOT NULL THEN ROUND(amount_usd*100)-ROUND((${saleCostSql})*quantity*100) ELSE 0 END),0) net_gross,
+    COALESCE(SUM(CASE WHEN ${saleCostKnownSql} AND referral_commission_cents IS NOT NULL THEN referral_commission_cents ELSE 0 END),0) net_referral,
+    SUM(CASE WHEN NOT (${saleCostKnownSql}) THEN 1 ELSE 0 END) unknown,
+    SUM(CASE WHEN NOT (${saleCostKnownSql}) OR referral_commission_cents IS NULL THEN 1 ELSE 0 END) incomplete
     FROM orders WHERE status='completed'${filter} AND julianday(created_at)<=julianday(?)`).bind(...args).first();
-  const wallets=await env.DB.prepare(`SELECT COUNT(*) AS users,
-    COALESCE(SUM(ROUND(COALESCE(balance_usd,0)*100)),0)/100.0 AS usd,
-    COALESCE(SUM(ROUND(COALESCE(balance_bdt,0)*100)),0)/100.0 AS bdt,
-    COALESCE(SUM(CASE WHEN COALESCE(balance_usd,0)>0 OR COALESCE(balance_bdt,0)>0 THEN 1 ELSE 0 END),0) AS funded FROM users`).first();
-  const text=`📊 <b>Sales & Profit · ${range.label}</b>\nTimezone: Asia/Dhaka\nBy order creation date · completed orders only\n\n<b>Current Wallet Funds · All Users</b>\nTotal wallet balance: <b>$${adminMoney(wallets?.usd)} USD</b>\nStored BDT equivalent: <b>${adminMoney(wallets?.bdt)} BDT</b>\nWallets with funds: ${wallets?.funded||0} / ${wallets?.users||0}\nCurrent balances across all users, including admin. Independent of the report period; not added to sales or profit.\n\n<b>Sales</b>\nCompleted orders: <b>${row?.completed||0}</b> · Items: <b>${row?.items||0}</b>\nTotal sales: <b>$${adminMoney(row?.revenue)}</b>\nAPI sales: $${adminMoney(row?.api_revenue)}\nLocal product sales: $${adminMoney(row?.local_revenue)}\n\n<b>API product gross profit</b>\nRecorded provider cost: <b>$${adminMoney(row?.known_cost)}</b>\nGross profit: <b>$${adminMoney(row?.gross_profit)}</b>\nCost recorded for ${row?.costed||0} completed API orders.\nProfit = saved selling total − saved provider cost × quantity.\n\n<b>Local product profit</b>\nPurchase cost: <b>$${adminMoney(row?.local_cost)}</b>\nGross profit: <b>$${adminMoney(row?.local_profit)}</b>\n\n<b>Combined gross profit: $${adminMoney(Number(row?.gross_profit||0)+Number(row?.local_profit||0))}</b>\n\nOrders without origin/cost history: <b>${row?.unknown||0}</b> (profit excluded). Orders with missing cost are excluded from profit.\n\nAPI profit uses the API price saved when the order was created. Payment fees, referral commissions and other expenses are excluded. Deposits are not sales.`;
-  const buttons=[[{text:'Today',callback_data:'adm_sales_today'},{text:'7 Days',callback_data:'adm_sales_week'},{text:'30 Days',callback_data:'adm_sales_days30'}],[{text:'This Month',callback_data:'adm_sales_month'},{text:'All Time',callback_data:'adm_sales_all'}],[{text:'🔄 Refresh',callback_data:`adm_sales_${period}`}],[{text:'Admin Panel',callback_data:'admin_panel'}]];
+  const wallets=await env.DB.prepare(`SELECT COUNT(*) users,COALESCE(SUM(ROUND(COALESCE(balance_usd,0)*100)),0)/100.0 usd,COALESCE(SUM(ROUND(COALESCE(balance_bdt,0)*100)),0)/100.0 bdt,COALESCE(SUM(CASE WHEN COALESCE(balance_usd,0)>0 OR COALESCE(balance_bdt,0)>0 THEN 1 ELSE 0 END),0) funded FROM users`).first();
+  const money=cents=>adminMoney(Number(cents||0)/100),gross=Number(row?.api_profit||0)+Number(row?.local_profit||0);
+  const text=`📊 <b>Sales & Profit · ${range.label}</b>\nTimezone: Asia/Dhaka\nBy order creation date · delivered orders only\n\n<b>Current Wallet Funds · All Users</b>\nTotal wallet balance: <b>$${adminMoney(wallets?.usd)} USD</b>\nStored BDT equivalent: <b>${adminMoney(wallets?.bdt)} BDT</b>\nWallets with funds: ${wallets?.funded||0} / ${wallets?.users||0}\nCustomer funds only. Excluded from sales and profit.\n\n<b>Sales</b>\nCompleted orders: <b>${row?.completed||0}</b> · Items: <b>${row?.items||0}</b>\nTotal sales: <b>$${money(row?.revenue)}</b>\nAPI sales: $${money(row?.api_revenue)}\nLocal product sales: $${money(row?.local_revenue)}\n\n<b>API product gross profit</b>\nRecorded provider cost: <b>$${money(row?.api_cost)}</b>\nGross profit: <b>$${money(row?.api_profit)}</b>\n\n<b>Local product profit</b>\nPurchase cost: <b>$${money(row?.local_cost)}</b>\nGross profit: <b>$${money(row?.local_profit)}</b>\n\n<b>Combined gross profit: $${money(gross)}</b>\n\n<b>Referral Commission</b>\nOrder commission expense: <b>$${money(row?.referral_due)}</b>\nCredited to referrers: $${money(row?.referral_paid)}\nAwaiting commission credit: $${money(Math.max(0,Number(row?.referral_due||0)-Number(row?.referral_paid||0)))}\n\n<b>Net profit: $${money(row?.net)}</b>${Number(row?.incomplete||0)>0?`\nFully recorded orders only: gross $${money(row?.net_gross)} − referral $${money(row?.net_referral)}.`:''}\nNet = selling total − saved purchase cost × quantity − order referral commission.\n\nOrders without origin/cost history: <b>${row?.unknown||0}</b> (gross profit excluded).\nIncomplete cost/referral records: <b>${row?.incomplete||0}</b> (net profit excluded; no estimates).\n\nCosts and referral rates are saved per order; later price/rate changes do not rewrite history. Deposits, redeem credits, admin balance additions and unfulfilled wallet-credited orders are not sales. Amounts use per-order USD cents.`;
+  const buttons=[[{text:'Today',callback_data:'adm_sales_today'},{text:'7 Days',callback_data:'adm_sales_week'},{text:'30 Days',callback_data:'adm_sales_days30'}],[{text:'This Month',callback_data:'adm_sales_month'},{text:'All Time',callback_data:'adm_sales_all'}],[{text:'📋 Order Breakdown',callback_data:`adm_sales_orders_${period}_0`}],[{text:'🔄 Refresh',callback_data:`adm_sales_${period}`},{text:'Admin Panel',callback_data:'admin_panel'}]];
   return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
 }
-
+async function showSalesOrderBreakdown(env,chatId,period,page=0,messageId=null){
+  if(!adminUserAccess(env,chatId))return;
+  page=adminUserPage(page);const range=salesReportPeriod(period),filter=range.start?' AND julianday(created_at)>=julianday(?)':'',args=range.start?[range.start,range.end]:[range.end];
+  const {results}=await env.DB.prepare(`SELECT *,CASE WHEN ${saleCostKnownSql} THEN ROUND((${saleCostSql})*quantity*100) END cost_cents,ROUND(amount_usd*100) sale_cents FROM orders WHERE status='completed'${filter} AND julianday(created_at)<=julianday(?) ORDER BY id DESC LIMIT 11 OFFSET ?`).bind(...args,page*10).all();
+  const money=cents=>adminMoney(Number(cents||0)/100);
+  let text=`📋 <b>Order Profit · ${range.label}</b>\nPage ${page+1}\n`;
+  for(const o of results.slice(0,10))text+=`\n<b>Order ID ${orderDisplayId(o)}</b> · ${adminSnippet(o.product_name||'Product',40)} · Qty ${o.quantity||1}\nSales $${money(o.sale_cents)} · Cost ${o.cost_cents==null?'Unknown':'$'+money(o.cost_cents)}\nReferral ${o.referral_commission_cents==null?'Unknown':'$'+money(o.referral_commission_cents)} · Net ${o.cost_cents==null||o.referral_commission_cents==null?'Unknown':'$'+money(o.sale_cents-o.cost_cents-o.referral_commission_cents)}\n`;
+  if(!results.length)text+='\nNo delivered orders in this period.';
+  const buttons=results.slice(0,10).map(o=>[{text:`Order ID ${orderDisplayId(o)}`,callback_data:`adm_delivery_view_${o.id}`}]),pager=[];
+  if(page>0)pager.push({text:'Previous',callback_data:`adm_sales_orders_${period}_${page-1}`});if(results.length>10)pager.push({text:'Next',callback_data:`adm_sales_orders_${period}_${page+1}`});if(pager.length)buttons.push(pager);
+  buttons.push([{text:'Sales & Profit',callback_data:`adm_sales_${period}`},{text:'Admin Panel',callback_data:'admin_panel'}]);
+  return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
+}
 
 function localProfitInfo(cost,price){
   const costCents=Math.round(Number(cost)*100),priceCents=Math.round(Number(price)*100),profit=priceCents-costCents;

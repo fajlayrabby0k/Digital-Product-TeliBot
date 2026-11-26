@@ -1,37 +1,29 @@
 # Sales and profit reports
 
-Open **Admin Panel → Sales & Profit Reports** after deployment. Choose Today, Last 7 Days, Last 30 Days, This Month or All Time; Refresh reloads the selected period. Only the configured admin can access reports.
+Open **Admin Panel → Sales & Profit Reports**. Periods: Today, Last 7 Days, Last 30 Days, This Month, All Time. Asia/Dhaka boundaries and order creation dates are used. Only delivered (`completed`) orders count as sales/profit. Pending, processing, cancelled, refunded and wallet-credited/unfulfilled original orders are excluded.
 
-Periods use Asia/Dhaka (UTC+6). Last 7/30 Days includes today and the previous 6/29 calendar days, from local midnight through now; it is distinct from This Month. Reports are measured by order creation date through the current time. Only completed orders count as sales. Pending, delivering, paid-pending-delivery, cancelled and refunded orders are excluded. Deposits and redeem wallet credits are not sales.
+## Customer wallets are separate
 
-The report shows completed order count, item quantity, total sales and API/local sales. New orders snapshot the product origin and API unit cost with an SQLite insertion trigger, within the order insertion transaction. Subsequent product price changes do not alter that snapshot. A repeated schema migration preserves existing snapshots.
+Current Wallet Funds is a current liability/informational balance across all users, including admin. It never enters revenue, cost or profit calculations. Deposits, redeem credits and administrator balance additions are not sales. Adding money to a wallet cannot increase sales or profit.
 
-API gross profit uses the store’s chosen definition: completed order revenue minus recorded API unit cost multiplied by quantity. The recorded cost is the provider catalog price when the order was created, not a confirmed debit from the provider wallet. Fees, referral commissions and other operating expenses are not deducted. This is not net profit.
+## Per-order accounting
 
-Old orders without saved origin/cost information are counted in total sales but excluded from profit. Their count is displayed. Current product costs are not used to invent historical costs. Local product revenue, purchase cost and gross profit are displayed separately, with combined API/local gross profit. Local profit uses the purchase cost saved on the order; missing historical costs are excluded rather than assumed to be zero.
+New orders preserve origin, selling total, quantity, API provider unit cost or local purchase unit cost, referrer and commission percentage/amount. Cost and referral fields are captured in database insertion triggers. Product price/cost edits and later referral-rate changes cannot rewrite existing snapshots.
 
-No new API credentials or Cloudflare bindings are needed. The initializer adds nullable `orders.sale_origin`, `orders.provider_unit_cost_usd`, `orders.purchase_unit_cost_usd` and `products.purchase_cost_usd` fields and insertion triggers. Existing orders, wallet balances, payment claims and delivery data are preserved.
+- Gross profit = saved selling total − saved unit purchase cost × quantity.
+- Referral commission expense = saved per-order commission cents, for delivered orders only.
+- Net profit = gross profit − referral commission expense.
 
-Run `node tests/sales-reports.cjs` for SQLite-backed coverage of Dhaka period boundaries, snapshots, quantities, unknown costs, completed-only revenue, excluded deposits/refunds, admin authorization and repeated migration.
+Amounts are totaled as integer USD cents with per-order cost rounding. Negative profits are retained. API cost uses the saved catalog purchase price at checkout/order creation, not a guessed later catalog value. No additional operating costs are assumed.
 
-API profit uses saved selling totals and saved costs for each order, so both percentage and fixed-dollar markup rules are reflected without applying today’s margin to past sales. Order cost and profit are summed in cents to avoid floating-point artifacts at display precision.
+The summary separates API/local sales and gross profits, total commission expense, actually credited commission, awaiting commission credit and net profit. Commission expense is deducted even if its wallet credit awaits retry, because it remains owed. Current wallet totals are displayed separately and never added to profit. **Order Breakdown** lists each delivered order's quantity, sale total, cost, referral expense and net result; an order button opens the existing order details.
 
+## Referral credits
 
-## Local purchase and selling prices
+`order_referral_credits` is unique per order. The referral credit and its ledger entry are atomic; fresh tokens and database uniqueness prevent repeated/concurrent credit. Every production delivery path supplies the order ID. Wallet History references `order:ID`, making commission attributable to its originating order. Failed credits roll back and are retried in bounded batches after webhook activity or scheduled sync. Report rendering itself never credits wallets or mutates orders.
 
-**Admin Panel → Add New Product** asks for a saved category, name, description, purchase cost per item in USD and selling price per item in USD. Example: purchase $4, sale $5 gives $1 gross profit and 25% markup on cost. This markup is distinct from gross profit as a percentage of revenue (20% in this example).
+Historical commissions without an order reference are not guessed or re-linked. Existing orders without referral snapshots or cost records are explicitly excluded from net profit. Sales are still reported; gross profit excludes missing-cost orders. When records are incomplete, the report shows the included gross/referral subtotal and excluded count so the displayed net does not imply full historical coverage. Existing funds/history are not reset or retroactively credited.
 
-Existing products: **Manage Products → product → Set Purchase Cost**. Selling price remains editable through Set Custom Price. Local percentage shortcut buttons use purchase cost when available. Purchase cost can be zero; selling price must be positive. Loss-making prices are accepted and show negative gross profit. Cost information is visible to the admin, not customer product details.
+## Validation
 
-New local orders copy purchase cost at insertion within the order transaction. Quantity multiplies the saved unit cost. Changing the product cost or sale price affects future orders, not old ones. Existing orders without a cost snapshot are not backfilled from today's price. Free inventory has an explicitly entered zero cost, distinct from an unknown cost.
-
-These figures are gross profit based on entered costs; fees, referral commissions and overheads remain outside the calculation. API profit uses the recorded catalog cost as purchase cost.
-
-`node tests/local-product-costs.cjs` covers the creation wizard, edits, historical snapshots, quantity totals, zero costs, losses, Bengali inputs, invalid inputs, access checks and cancellation. No extra configuration is needed.
-
-
-## Current total wallet funds
-
-All report periods include **Current Wallet Funds · All Users**: total current USD wallet balance, the separately stored BDT equivalent, and the number of funded wallets out of registered users. This includes the admin account if it has wallet funds. NULL balances count as zero; sums use cents/minor units. The USD and BDT displays are two stored wallet representations, not amounts to add together. Existing stored BDT values are not recomputed using today's rate.
-
-These are live balances across all users, independent of the selected sales period. They are not deposit turnover, supplier balance, revenue or profit and are never added to sales/profit totals. Refresh reloads the current aggregate. This is admin-only and does not mutate wallet funds or ledger entries. The sales-report test covers multiple wallets, admin inclusion, NULL balances, consistent totals across periods and refresh after a balance change.
+`tests/exact-sales-profit.cjs` verifies local/API quantity costs, immutable price/rate snapshots, completed-only figures, zero profit from deposits/wallet additions, commission concurrency/reuse/rollback/recovery, negative profits, breakdown and unknown historical records. `tests/sales-reports.cjs` covers period boundaries and historical costs; `tests/referral-earnings.cjs` covers actual main-wallet credits and lifetime earned display. All worker tests and Android parser-to-payment integration passed before release.

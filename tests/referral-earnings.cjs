@@ -12,8 +12,10 @@ const text=value=>c.api.handleUpdate({message:{chat:{id:1},from:{first_name:'Adm
  db.prepare('INSERT INTO users(user_id,referred_by) VALUES(100,99)').run();
  db.prepare('INSERT INTO users(user_id) VALUES(101)').run();
  assert.equal(await c.api.referralCommissionEarned(env,99),'0.00');
- await c.api.processReferralCommission(env,100,10,'Sample product');
- await c.api.processReferralCommission(env,100,5,'Sample product');
+ const first=db.prepare("INSERT INTO orders(user_id,product_id,payment_method,amount_usd,status) VALUES(100,1,'WALLET',10,'completed')").run().lastInsertRowid;
+ const second=db.prepare("INSERT INTO orders(user_id,product_id,payment_method,amount_usd,status) VALUES(100,1,'WALLET',5,'completed')").run().lastInsertRowid;
+ await c.api.processReferralCommission(env,100,10,'Sample product',first);
+ await c.api.processReferralCommission(env,100,5,'Sample product',second);
  assert.equal(await c.api.referralCommissionEarned(env,99),'0.75');
  assert.equal(await c.api.referralCommissionEarned(env,101),'0.00');
  assert.equal(db.prepare('SELECT balance_usd FROM users WHERE user_id=99').get().balance_usd,10.75);
