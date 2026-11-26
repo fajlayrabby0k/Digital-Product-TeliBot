@@ -3976,7 +3976,7 @@ async function showPaymentDashboard(env,chatId,filter='menu',page=0,messageId=nu
   const summary=await env.DB.prepare(`SELECT COUNT(*) AS total,SUM(CASE WHEN x.status='pending' AND ${hasTrx} THEN 1 ELSE 0 END) AS pending,SUM(CASE WHEN x.status IN ('paid_pending_delivery','delivering') THEN 1 ELSE 0 END) AS delivery,SUM(CASE WHEN x.status IN ('completed','paid_pending_delivery','delivering') THEN 1 ELSE 0 END) AS completed FROM ${from}`).first();
   if(filter==='menu'){
     const text=`💳 <b>Payment Dashboard</b>\n\nChoose a payment list.`;
-    const buttons=[[{text:`🔴 Pending Payments (${summary?.pending||0})`,callback_data:'adm_paydash_pending_0',style:'danger'}],[{text:`✅ Completed Payments (${summary?.completed||0})`,callback_data:'adm_paydash_completed_0',style:'success'}],[{text:'⚠️ Verification Issues',callback_data:'adm_paydash_issues_0'}],[{text:'⬅️ Admin Panel',callback_data:'admin_panel'}]];
+    const buttons=[[{text:`🔴 Pending Payments (${summary?.pending||0})`,callback_data:'adm_paydash_pending_0',style:'danger'}],[{text:`✅ Completed Payments (${summary?.completed||0})`,callback_data:'adm_paydash_completed_0',style:'success'}],[{text:'⬅️ Admin Panel',callback_data:'admin_panel'}]];
     return messageId?editMsg(env,chatId,messageId,text,buttons):sendMsg(env,chatId,text,buttons);
   }
   const where=filter==='cancelled'?"x.status IN ('cancelled','rejected')":filter==='completed'?"x.status IN ('completed','paid_pending_delivery','delivering')":filter==='delivery'?"x.status IN ('paid_pending_delivery','delivering')":filter==='issues'?`x.status='pending' AND ${hasTrx} AND e.reason IS NOT NULL AND e.reason<>'verified'`:`x.status='pending' AND ${hasTrx}`;

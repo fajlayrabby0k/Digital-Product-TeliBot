@@ -1,11 +1,11 @@
 # Admin payment dashboard
 
-Open **Admin Panel → Payment Dashboard**. The landing page contains **Pending Payments**, **Completed Payments**, **Verification Issues**, and Back to Admin Panel.
+Open **Admin Panel → Payment Dashboard**. The landing page contains **Pending Payments**, **Completed Payments**, and Back to Admin Panel.
 
 - **Pending Payments:** only unresolved invoices with a nonblank submitted TrxID in the payment, SMS invoice or verification event. Payment instructions without an ID are excluded. Each red payment button has Delete beside it.
 - **Completed Payments:** only confirmed incoming payments: completed invoices and orders with payment recorded but delivery pending/processing. Delivery state remains available in payment details. Unpaid, rejected, cancelled and refunded invoices are excluded. Completed rows have no Delete button.
 
-Lists contain ten records per page with Previous/Next when needed, Refresh and Back to Payment Dashboard. IDs Submitted, Cancelled and Paid / Delivery Pending remain hidden as separate dashboard filters. Verification Issues is available from the main dashboard; it shows only pending submitted payments with a recorded verification problem. Pending and issue lists show the saved reason below each TrxID, and Payment Details retains complete SMS evidence, timestamps and attempt history. Historical callback links remain compatible. Wallet-funded purchases remain excluded. Successful redeem-code/link wallet credits are included in Completed Payments as Redeem Credit, with customer, amount, date and a redeem reference. Redeem credits never appear in Pending and have no Delete action. Times use Asia/Dhaka.
+Lists contain ten records per page with Previous/Next when needed, Refresh and Back to Payment Dashboard. IDs Submitted, Cancelled and Paid / Delivery Pending remain hidden as separate dashboard filters. Verification reasons appear directly inside Pending Payments; no separate Verification Issues button is shown on the main dashboard. Pending and issue lists show the saved reason below each TrxID, and Payment Details retains complete SMS evidence, timestamps and attempt history. Historical callback links remain compatible. Wallet-funded purchases remain excluded. Successful redeem-code/link wallet credits are included in Completed Payments as Redeem Credit, with customer, amount, date and a redeem reference. Redeem credits never appear in Pending and have no Delete action. Times use Asia/Dhaka.
 
 Open a record to see the customer, method, USD/BDT amount, transaction ID, current status, verification reason and SMS evidence. **View Customer** opens the user's profile and its separate **Add Balance** feature. Refresh reloads information without verification, credit or delivery.
 
